@@ -24,6 +24,7 @@ from core.observability.models import (
     TokenUsage,
     TraceRecord,
 )
+from core.observability.traces import derive_trace_identity
 from core.observability.mysql_repository import MySQLTelemetryRepository
 from utils.logger import get_logger
 
@@ -210,11 +211,21 @@ class TelemetryRuntime:
 
     def start_trace(self, context: TelemetryContext, *, source: str = "user",
                     attributes: dict[str, Any] | None = None) -> None:
+        trace_attributes = dict(attributes or {})
+        identity = derive_trace_identity(
+            session_id=context.session_id,
+            turn_id=context.turn_id,
+            source=source,
+            channel=context.channel,
+            attributes=trace_attributes,
+        )
         record = TraceRecord(
             trace_id=context.trace_id, request_id=context.request_id,
             session_id=context.session_id, turn_id=context.turn_id,
+            chain_id=identity["chain_id"], chain_name=identity["chain_name"],
+            entrypoint=identity["entrypoint"],
             workspace_id=context.workspace_id, user_id=context.user_id,
-            channel=context.channel, source=source, attributes=dict(attributes or {}),
+            channel=context.channel, source=source, attributes=trace_attributes,
         )
         self._trace_starts[context.trace_id] = (record, time.perf_counter())
         self._trace_usage[context.trace_id] = TokenUsage()
@@ -314,6 +325,7 @@ class TelemetryRuntime:
             **self.repository.health(), "queue_size": self._queue.qsize() if self._queue else 0,
             "queue_capacity": self.queue_size, "dropped_events": self.dropped_events,
             "live_subscribers": len(self._subscribers),
+            "active_traces": len(self._trace_starts),
         }
 
 

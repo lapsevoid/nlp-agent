@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from core.observability.models import SpanRecord, TelemetryEnvelope, TelemetryEvent, TraceRecord
+from core.observability.summary import build_telemetry_overview
+from core.observability.traces import build_trace_group_page, trace_chain_identity
 
 
 class TelemetryRepository:
@@ -31,6 +33,7 @@ class TelemetryRepository:
                 CREATE TABLE IF NOT EXISTS traces (
                     trace_id TEXT PRIMARY KEY, request_id TEXT NOT NULL,
                     session_id TEXT NOT NULL, turn_id TEXT NOT NULL,
+                    chain_id TEXT, chain_name TEXT, entrypoint TEXT,
                     workspace_id TEXT NOT NULL, user_id TEXT NOT NULL,
                     channel TEXT NOT NULL, source TEXT NOT NULL,
                     started_at TEXT NOT NULL, completed_at TEXT,
@@ -85,6 +88,12 @@ class TelemetryRepository:
             )
             self._ensure_column("traces", "cache_miss_tokens", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column("traces", "reasoning_tokens", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column("traces", "chain_id", "TEXT")
+            self._ensure_column("traces", "chain_name", "TEXT")
+            self._ensure_column("traces", "entrypoint", "TEXT")
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_traces_chain ON traces(chain_id, started_at DESC)"
+            )
             self._ensure_column("spans", "cache_miss_tokens", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column("spans", "reasoning_tokens", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column("daily_metrics", "cache_miss_tokens", "INTEGER NOT NULL DEFAULT 0")
@@ -113,12 +122,14 @@ class TelemetryRepository:
         u = item.usage
         self._conn.execute(
             """INSERT OR REPLACE INTO traces (
-               trace_id,request_id,session_id,turn_id,workspace_id,user_id,channel,source,
+               trace_id,request_id,session_id,turn_id,chain_id,chain_name,entrypoint,
+               workspace_id,user_id,channel,source,
                started_at,completed_at,duration_ms,ttft_ms,status,input_tokens,output_tokens,
                cached_tokens,total_tokens,usage_source,error_kind,error_message,attributes_json,
                cache_miss_tokens,reasoning_tokens
-               ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (item.trace_id, item.request_id, item.session_id, item.turn_id,
+             item.chain_id, item.chain_name, item.entrypoint,
              item.workspace_id, item.user_id, item.channel, item.source,
              item.started_at.isoformat(), item.completed_at.isoformat() if item.completed_at else None,
              item.duration_ms, item.ttft_ms, item.status.value, u.input_tokens,
@@ -191,26 +202,12 @@ class TelemetryRepository:
         return rows
 
     def overview(self, days: int = 30) -> dict[str, Any]:
-        since = (datetime.now(timezone.utc) - timedelta(days=max(1, days))).isoformat()
-        rows = self._rows(
-            "SELECT status,duration_ms,ttft_ms,input_tokens,output_tokens,cached_tokens,"
-            "cache_miss_tokens,reasoning_tokens,total_tokens "
-            "FROM traces WHERE started_at>=? AND completed_at IS NOT NULL", (since,)
+        return build_telemetry_overview(
+            self._decode(self._rows("SELECT * FROM traces")),
+            self._decode(self._rows("SELECT * FROM spans")),
+            self._decode(self._rows("SELECT * FROM events")),
+            days,
         )
-        durations = sorted(r["duration_ms"] for r in rows if r["duration_ms"] is not None)
-        ttfts = sorted(r["ttft_ms"] for r in rows if r["ttft_ms"] is not None)
-        percentile = lambda values, p: values[min(len(values)-1, int((len(values)-1)*p))] if values else None
-        failures = sum(r["status"] in {"error", "timeout"} for r in rows)
-        return {
-            "period_days": days, "requests": len(rows),
-            "successes": sum(r["status"] == "ok" for r in rows),
-            "errors": failures, "error_rate": failures / len(rows) if rows else 0.0,
-            "latency_ms": {"p50": percentile(durations, .50), "p95": percentile(durations, .95)},
-            "ttft_ms": {"p50": percentile(ttfts, .50), "p95": percentile(ttfts, .95)},
-            "tokens": {key: sum(r[key] for r in rows) for key in
-                       ("input_tokens", "output_tokens", "cached_tokens", "cache_miss_tokens",
-                        "reasoning_tokens", "total_tokens")},
-        }
 
     def list_traces(self, *, limit: int = 100, session_id: str | None = None,
                     status: str | None = None, user_id: str | None = None,
@@ -231,6 +228,45 @@ class TelemetryRepository:
             f"SELECT * FROM traces{where} ORDER BY started_at DESC LIMIT ?",
             (*args, min(max(1, limit), 500)),
         ))
+
+    def trace_groups(
+        self,
+        *,
+        days: int = 30,
+        limit: int = 24,
+        offset: int = 0,
+        query: str | None = None,
+        focus: str = "all",
+    ) -> dict[str, Any]:
+        since = (datetime.now(timezone.utc) - timedelta(days=max(1, days))).isoformat()
+        rows = self._decode(self._rows(
+            "SELECT * FROM traces WHERE started_at>=? ORDER BY started_at DESC", (since,)
+        ))
+        span_rows = self._decode(self._rows(
+            "SELECT * FROM spans WHERE started_at>=? ORDER BY started_at", (since,)
+        ))
+        page = build_trace_group_page(
+            rows, spans=span_rows, limit=limit, offset=offset, query=query, focus=focus
+        )
+        page["period_days"] = days
+        return page
+
+    def trace_group_detail(self, chain_id: str) -> dict[str, Any] | None:
+        rows = self._decode(self._rows("SELECT * FROM traces ORDER BY started_at"))
+        matching = [row for row in rows if trace_chain_identity(row)["chain_id"] == chain_id]
+        if not matching:
+            return None
+        trace_ids = {str(row["trace_id"]) for row in matching}
+        spans = self._decode(self._rows("SELECT * FROM spans ORDER BY started_at"))
+        events = self._decode(self._rows("SELECT * FROM events ORDER BY timestamp"))
+        matching_spans = [row for row in spans if str(row.get("trace_id")) in trace_ids]
+        chain = build_trace_group_page(matching, spans=matching_spans, limit=1)["items"][0]
+        return {
+            "chain": chain,
+            "traces": matching,
+            "spans": matching_spans,
+            "events": [row for row in events if str(row.get("trace_id")) in trace_ids],
+        }
 
     def trace_detail(self, trace_id: str) -> dict[str, Any] | None:
         traces = self._decode(self._rows("SELECT * FROM traces WHERE trace_id=?", (trace_id,)))
@@ -297,17 +333,25 @@ class TelemetryRepository:
             (since, min(max(1, limit), 500)),
         )
 
-    def prune(self, trace_days: int = 30, event_days: int = 30) -> None:
-        trace_before = (datetime.now(timezone.utc) - timedelta(days=trace_days)).isoformat()
-        event_before = (datetime.now(timezone.utc) - timedelta(days=event_days)).isoformat()
+    def prune(self, trace_days: int = 30, event_days: int = 30) -> dict[str, int]:
+        trace_days = max(1, trace_days)
+        event_days = max(1, event_days)
+        now = datetime.now(timezone.utc)
+        trace_before = (now - timedelta(days=trace_days)).isoformat()
+        event_before = (now - timedelta(days=event_days)).isoformat()
+        trace_day = (now.date() - timedelta(days=trace_days)).isoformat()
         with self._lock, self._conn:
             old = [r[0] for r in self._conn.execute(
                 "SELECT trace_id FROM traces WHERE started_at<?", (trace_before,)).fetchall()]
+            spans = 0
             if old:
                 marks = ",".join("?" for _ in old)
-                self._conn.execute(f"DELETE FROM spans WHERE trace_id IN ({marks})", old)
+                spans = int(self._conn.execute(f"DELETE FROM spans WHERE trace_id IN ({marks})", old).rowcount or 0)
                 self._conn.execute(f"DELETE FROM traces WHERE trace_id IN ({marks})", old)
-            self._conn.execute("DELETE FROM events WHERE timestamp<?", (event_before,))
+            traces = len(old)
+            events = int(self._conn.execute("DELETE FROM events WHERE timestamp<?", (event_before,)).rowcount or 0)
+            daily_metrics = int(self._conn.execute("DELETE FROM daily_metrics WHERE day<?", (trace_day,)).rowcount or 0)
+        return {"traces": traces, "spans": spans, "events": events, "daily_metrics": daily_metrics}
 
     def delete_session(self, session_id: str) -> None:
         with self._lock, self._conn:

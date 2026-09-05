@@ -37,6 +37,11 @@ class Settings(BaseSettings):
     NLP_AGENT_MONITOR_PORT: int = 0
     NLP_AGENT_MONITOR_ALLOWED_HOSTS: str = ""
     NLP_AGENT_MONITOR_ALLOWED_ORIGINS: str = ""
+    NLP_AGENT_MONITOR_RETENTION_ENABLED: bool | None = None
+    NLP_AGENT_MONITOR_RETENTION_TRACE_DAYS: int | None = None
+    NLP_AGENT_MONITOR_RETENTION_EVENT_DAYS: int | None = None
+    NLP_AGENT_MONITOR_RETENTION_INTERVAL_S: int | None = None
+    NLP_AGENT_MONITOR_RETENTION_INITIAL_DELAY_S: int | None = None
     NLP_AGENT_GATEWAY_TRANSPORT: str = ""
     NLP_AGENT_REDIS_URL: str = ""
     NLP_AGENT_STATE_FACTORY: str = ""
@@ -232,6 +237,16 @@ class Settings(BaseSettings):
     @property
     def monitor_runtime(self) -> dict:
         config = dict(self._config.get("monitor", {}))
+        retention = dict(config.get("retention", {}))
+        overrides = {
+            "enabled": self.NLP_AGENT_MONITOR_RETENTION_ENABLED,
+            "trace_days": self.NLP_AGENT_MONITOR_RETENTION_TRACE_DAYS,
+            "event_days": self.NLP_AGENT_MONITOR_RETENTION_EVENT_DAYS,
+            "interval_s": self.NLP_AGENT_MONITOR_RETENTION_INTERVAL_S,
+            "initial_delay_s": self.NLP_AGENT_MONITOR_RETENTION_INITIAL_DELAY_S,
+        }
+        retention.update({key: value for key, value in overrides.items() if value is not None})
+        config["retention"] = retention
         if self.NLP_AGENT_WEB_SECRET:
             config["auth_secret"] = self.NLP_AGENT_WEB_SECRET
         self._apply_network_overrides(

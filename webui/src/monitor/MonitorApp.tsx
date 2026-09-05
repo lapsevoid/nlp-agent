@@ -1,33 +1,124 @@
-import { Activity, AlertTriangle, Bot, Clock3, Database, Gauge, HardDrive, Radio, RefreshCw, Search, Server, ShieldCheck, TerminalSquare, Timer, Trash2, X, Zap } from "lucide-react";
+import { Activity, AlertTriangle, Bot, Clock3, Database, Gauge, HardDrive, Layers3, MoreHorizontal, Radio, RefreshCw, Search, Server, ShieldCheck, TerminalSquare, Timer, Trash2, X, Zap } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ConfirmDialog } from "@/shared/ui/ConfirmDialog";
-import { authenticate, monitorApi, type ErrorRow, type Overview, type SessionRow, type TelemetryEvent, type Trace, type TraceDetail, type UsageRow } from "./api";
-import { controlPlaneUrl, groupEventsByTrace, groupTracesIntoChains, monitorPageFromLocation, resetMonitorData, telemetryFrame, type MonitorPage, type TraceChain } from "./monitor-helpers";
+import { authenticate, monitorApi, type ErrorRow, type Overview, type SessionRow, type SystemUsageDimension, type SystemUsageSnapshot, type TelemetryEvent, type Trace, type TraceDetail, type UsageRow } from "./api";
+import { controlPlaneUrl, groupEventsByTrace, monitorPageFromLocation, monitorPathForPage, resetMonitorData, telemetryFrame, type MonitorPage, type TraceChain } from "./monitor-helpers";
 import { mergeSandboxCapacitySamples, mergeSandboxLogs, SANDBOX_REFRESH_INTERVAL_MS, SandboxMonitorPage, type SandboxExecution, type SandboxLogEntry, type SandboxOverview, type SandboxRuntime } from "./SandboxMonitorPage";
 import { AuthorizationAuditPage } from "./AuthorizationAuditPage";
+import { MonitorLoginPage } from "./MonitorLoginPage";
+import { MonitorComponentsPage, MonitorErrorsPage, MonitorOverviewPage, MonitorSessionsPage, MonitorStoragePage, MonitorUsagePage } from "./MonitorDashboardPages";
+import { TraceExplorerPage } from "./TraceExplorerPage";
 
 type Page = MonitorPage;
 const NAV: Array<{ page: Page; label: string; icon: typeof Gauge }> = [
   { page: "overview", label: "系统总览", icon: Gauge },
-  { page: "traces", label: "运行记录", icon: Activity },
-  { page: "sessions", label: "Sessions", icon: Bot },
+  { page: "usage", label: "用量中心", icon: Database },
+  { page: "traces", label: "运行链路", icon: Activity },
+  { page: "sessions", label: "用户会话", icon: Bot },
+  { page: "components", label: "组件与模型", icon: Layers3 },
   { page: "errors", label: "错误分析", icon: AlertTriangle },
-  { page: "events", label: "实时运行流", icon: Radio },
+  { page: "events", label: "实时事件", icon: Radio },
   { page: "sandbox", label: "代码沙箱", icon: TerminalSquare },
-  { page: "storage", label: "数据留存", icon: HardDrive },
   { page: "audit", label: "审计日志", icon: ShieldCheck },
+  { page: "storage", label: "数据留存", icon: HardDrive },
+];
+const NAV_GROUPS: Array<{ label: string; items: typeof NAV }> = [
+  { label: "概览", items: NAV.filter((item) => item.page === "overview") },
+  { label: "请求洞察", items: NAV.filter((item) => ["usage", "traces", "sessions", "components", "errors"].includes(item.page)) },
+  { label: "运行环境", items: NAV.filter((item) => ["events", "sandbox"].includes(item.page)) },
+  { label: "治理", items: NAV.filter((item) => ["audit", "storage"].includes(item.page)) },
 ];
 function fmt(value: number | null | undefined, suffix = "") { return value == null ? "—" : `${value.toLocaleString()}${suffix}`; }
 function time(value?: string) { return value ? new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(new Date(value)) : "—"; }
 function Status({ value }: { value: string }) { return <span className={`mon-status ${value}`}>{value}</span>; }
 function Empty({ text }: { text: string }) { return <div className="mon-empty"><Database /><span>{text}</span></div>; }
-
-function OverviewPage({ data, usage }: { data: Overview; usage: UsageRow[] }) {
-  const max = Math.max(1, ...usage.map((row) => row.total_tokens));
-  return <div className="mon-stack"><div className="mon-kpis"><article><Zap /><span>请求</span><strong>{fmt(data.requests)}</strong><small>{data.period_days} 天</small></article><article><Timer /><span>P95 响应</span><strong>{fmt(data.latency_ms.p95, " ms")}</strong><small>P50 {fmt(data.latency_ms.p50, " ms")}</small></article><article><Clock3 /><span>P95 首 Token</span><strong>{fmt(data.ttft_ms.p95, " ms")}</strong><small>P50 {fmt(data.ttft_ms.p50, " ms")}</small></article><article className={data.error_rate > .05 ? "danger" : ""}><AlertTriangle /><span>错误率</span><strong>{(data.error_rate * 100).toFixed(2)}%</strong><small>{data.errors} errors</small></article></div><section className="mon-panel"><header><div><h2>Token 与缓存</h2><p>Provider 返回的输入、输出、推理和 KV Cache 命中数据</p></div></header><div className="mon-token-grid">{Object.entries(data.tokens).map(([key, value]) => <article key={key}><span>{key.replaceAll("_", " ")}</span><strong>{fmt(value)}</strong></article>)}</div></section><section className="mon-panel"><header><div><h2>用量趋势</h2><p>按组件与模型聚合的本地 Token 记录</p></div></header>{usage.length ? <div className="mon-bars">{usage.slice(-24).map((row, index) => <div key={`${row.day}-${row.component}-${row.name}-${index}`} title={`${row.day} ${row.name}: ${row.total_tokens}`}><span style={{ height: `${Math.max(3, row.total_tokens / max * 100)}%` }} /><small>{row.component.slice(0, 3)}</small></div>)}</div> : <Empty text="还没有 Token 用量数据" />}</section></div>;
+function authStatus(reason: unknown): number | undefined {
+  if (typeof reason !== "object" || reason === null || !("status" in reason)) return undefined;
+  const status = (reason as { status?: unknown }).status;
+  return typeof status === "number" ? status : undefined;
+}
+function authMessage(reason: unknown): string {
+  const status = authStatus(reason);
+  if (status === 401) return "登录监控平台后才能查看运行数据。";
+  if (status === 403) return "当前账号没有监控权限，请使用开发者账号登录。";
+  return reason instanceof Error ? reason.message : "监控平台认证失败，请稍后重试。";
 }
 
-function RunList({ chains, onOpen }: { chains: TraceChain[]; onOpen: (chain: TraceChain) => void }) {
+const TOKEN_LABELS: Record<string, string> = {
+  input_tokens: "输入 Token",
+  cached_input_tokens: "缓存读取",
+  cache_write_input_tokens: "缓存写入",
+  output_tokens: "输出 Token",
+  reasoning_output_tokens: "推理 Token",
+  total_tokens: "总 Token",
+  cached_tokens: "缓存 Token",
+  cache_miss_tokens: "缓存未命中",
+  reasoning_tokens: "推理 Token",
+};
+
+function tokenLabel(key: string) { return TOKEN_LABELS[key] ?? key.replaceAll("_", " "); }
+function credits(value: number | null | undefined) { return value == null ? "未完整计价" : `${(value / 1_000_000).toFixed(4)} credits`; }
+
+function DimensionChips({ title, items }: { title: string; items: Array<{ value: string; requests: number }> }) {
+  return <section className="mon-overview-mini-panel"><header><h3>{title}</h3><span>{items.reduce((sum, item) => sum + item.requests, 0)} 次</span></header>{items.length ? <div className="mon-dimension-list">{items.slice(0, 8).map((item) => <div key={item.value}><code>{item.value}</code><b>{fmt(item.requests)}</b></div>)}</div> : <Empty text="暂无标记" />}</section>;
+}
+
+function UsageDimensionTable({ title, description, rows, label }: { title: string; description: string; rows: SystemUsageDimension[]; label: (row: SystemUsageDimension) => string }) {
+  return <section className="mon-panel mon-usage-dimension-panel"><header><div><h2>{title}</h2><p>{description}</p></div></header>{rows.length ? <div className="mon-table"><table><thead><tr><th>维度</th><th>调用</th><th>计价</th><th>总 Token</th><th>Credits</th></tr></thead><tbody>{rows.slice(0, 8).map((row, index) => <tr key={`${label(row)}-${index}`}><td><strong>{label(row)}</strong>{row.provider ? <small>{row.provider}</small> : null}</td><td>{fmt(row.events)}</td><td>{row.credits_complete ? `${fmt(row.priced_events)} 完整` : `${fmt(row.unpriced_events)} 待补`}</td><td>{fmt(row.tokens.total_tokens)}</td><td>{credits(row.credits_micro)}</td></tr>)}</tbody></table></div> : <Empty text="暂无详细用量" />}</section>;
+}
+
+function usageTotalTokens(row: { tokens?: Record<string, number>; total_tokens?: number }) {
+  return Number(row.tokens?.total_tokens ?? row.total_tokens ?? 0);
+}
+
+export function LegacyOverviewPage({ data, usage, systemUsage }: { data: Overview; usage: UsageRow[]; systemUsage: SystemUsageSnapshot | null }) {
+  const tags = data.tags ?? { channels: [], sources: [], span_kinds: [] };
+  const statusBreakdown = data.status_breakdown ?? [];
+  const componentSpans = data.component_spans ?? [];
+  const models = data.models ?? [];
+  const errorGroups = data.error_groups ?? [];
+  const topUsers = data.top_users ?? [];
+  const tokenValues = systemUsage && Object.keys(systemUsage.tokens).length ? systemUsage.tokens : data.tokens ?? {};
+  const breakdown = systemUsage?.breakdown?.length ? systemUsage.breakdown : usage.map((row) => ({ ...row, tokens: { total_tokens: row.total_tokens } }));
+  const max = Math.max(1, ...breakdown.map(usageTotalTokens));
+  const runtime = data.runtime ?? {};
+  const queueSize = typeof runtime.queue_size === "number" ? runtime.queue_size : null;
+  const queueCapacity = typeof runtime.queue_capacity === "number" ? runtime.queue_capacity : null;
+  const queueRatio = queueSize != null && queueCapacity ? queueSize / queueCapacity : null;
+  const detailedUsers = systemUsage?.users ?? [];
+  const detailedModels = systemUsage?.models ?? [];
+  return <div className="mon-stack">
+    <section className="mon-overview-hero"><div><span className="mon-section-kicker">SYSTEM OBSERVABILITY · ALL USERS</span><h2>所有用户运行情况</h2><p>以逻辑请求为主口径，汇总所有用户、工作区和会话；内部 Model / Worker / Tool attempt 单独展示，便于定位重试、依赖和容量问题。</p></div><div className="mon-overview-hero-meta"><span>统计周期</span><strong>最近 {data.period_days} 天</strong><small>{data.from ? time(data.from) : "实时查询"} — {data.to ? time(data.to) : "现在"}</small></div></section>
+    <div className="mon-kpis mon-kpis-wide">
+      <article><Zap /><span>逻辑请求</span><strong>{fmt(data.requests)}</strong><small>{fmt(data.successes)} 成功 · {fmt(data.failed_requests ?? data.errors)} 失败</small></article>
+      <article><Activity /><span>活跃用户</span><strong>{fmt(data.active_users)}</strong><small>{fmt(data.active_workspaces)} 个工作区</small></article>
+      <article><Bot /><span>活跃会话</span><strong>{fmt(data.active_sessions)}</strong><small>全用户合计</small></article>
+      <article><Timer /><span>P95 响应</span><strong>{fmt(data.latency_ms.p95, " ms")}</strong><small>P50 {fmt(data.latency_ms.p50, " ms")}</small></article>
+      <article><Clock3 /><span>P95 首 Token</span><strong>{fmt(data.ttft_ms.p95, " ms")}</strong><small>P50 {fmt(data.ttft_ms.p50, " ms")}</small></article>
+      <article className={data.error_rate > .05 ? "danger" : "success"}><AlertTriangle /><span>逻辑错误率</span><strong>{(data.error_rate * 100).toFixed(2)}%</strong><small>{fmt(data.errors)} error / timeout</small></article>
+    </div>
+    <div className="mon-overview-grid mon-overview-main-grid">
+      <section className="mon-panel"><header><div><span className="mon-overview-panel-kicker">全局用量账本</span><h2>Token 与缓存</h2><p>来自详细 UsageEvent 账本：所有用户的 canonical Token、计价完整度和 Credits。</p></div><span className={`mon-coverage-badge ${systemUsage?.credits_complete === false ? "warning" : ""}`}>{systemUsage ? (systemUsage.credits_complete ? "计价完整" : "部分待补") : "账本未连接"}</span></header><div className="mon-token-grid mon-token-grid-detailed">{Object.entries(tokenValues).map(([key, value]) => <article key={key}><span>{tokenLabel(key)}</span><strong>{fmt(value)}</strong></article>)}</div><div className="mon-usage-ledger-footer"><span>{systemUsage ? `${fmt(systemUsage.events)} 次用量事件 · ${fmt(systemUsage.priced_events)} 次已计价` : "当前显示观测 Trace 的兼容 Token 汇总"}</span><strong>{credits(systemUsage?.credits_micro)}</strong></div></section>
+      <section className="mon-panel mon-operational-panel"><header><div><h2>服务与采集健康</h2><p>传统后端监控中的饱和、可用性和遥测管道信号。</p></div></header><div className="mon-operational-grid"><div><span>Telemetry 队列</span><strong>{queueSize == null ? "—" : `${fmt(queueSize)} / ${fmt(queueCapacity)}`}</strong><small>{queueRatio == null ? "容量未知" : `${(queueRatio * 100).toFixed(1)}% 占用`}</small></div><div><span>进行中 Trace</span><strong>{fmt(typeof runtime.active_traces === "number" ? runtime.active_traces : null)}</strong><small>当前活跃请求</small></div><div><span>丢弃事件</span><strong className={Number(runtime.dropped_events ?? 0) > 0 ? "danger-text" : ""}>{fmt(typeof runtime.dropped_events === "number" ? runtime.dropped_events : null)}</strong><small>非 debug 事件应重点关注</small></div><div><span>实时订阅</span><strong>{fmt(typeof runtime.live_subscribers === "number" ? runtime.live_subscribers : null)}</strong><small>Monitor WebSocket</small></div><div><span>结果状态</span><strong>{statusBreakdown.length ? statusBreakdown.map((item) => `${item.value} ${item.requests}`).join(" · ") : "—"}</strong><small>{fmt(data.requests)} 条逻辑请求</small></div></div></section>
+    </div>
+    <section className="mon-panel"><header><div><h2>请求标记与流量切片</h2><p>把已有 Trace / Span / Event 标记展开，先发现入口、来源、组件和状态异常，再下钻到 Trace。</p></div></header><div className="mon-overview-dimensions"><DimensionChips title="Channel" items={tags.channels} /><DimensionChips title="Source" items={tags.sources} /><DimensionChips title="Span kind" items={tags.span_kinds} /><DimensionChips title="Event level" items={Object.entries(data.events_by_level ?? {}).map(([value, requests]) => ({ value, requests }))} /></div></section>
+    <div className="mon-overview-grid">
+      <section className="mon-panel mon-component-panel"><header><div><h2>组件与依赖健康</h2><p>Span attempt 口径；看出 Model / Worker / Tool 的调用量、失败、重试和平均耗时。</p></div></header>{componentSpans.length ? <div className="mon-table"><table><thead><tr><th>组件</th><th>调用</th><th>失败率</th><th>重试</th><th>平均耗时</th><th>Token</th></tr></thead><tbody>{componentSpans.slice(0, 12).map((row) => <tr key={`${row.label}-${row.name}`}><td><strong>{row.name}</strong><small>{row.label}</small></td><td>{fmt(row.requests)}</td><td className={row.error_rate > .05 ? "danger-text" : ""}>{(row.error_rate * 100).toFixed(1)}%</td><td>{fmt(row.retries)}</td><td>{fmt(row.avg_duration_ms, " ms")}</td><td>{fmt(row.total_tokens)}</td></tr>)}</tbody></table></div> : <Empty text="当前周期没有组件 Span" />}</section>
+      <section className="mon-panel mon-component-panel"><header><div><h2>模型与 Provider</h2><p>模型调用、失败、重试和 Token，帮助识别单一 Provider 回归。</p></div></header>{models.length ? <div className="mon-table"><table><thead><tr><th>模型</th><th>调用</th><th>失败率</th><th>重试</th><th>平均耗时</th><th>Token</th></tr></thead><tbody>{models.slice(0, 12).map((row) => <tr key={`${row.provider}-${row.provider_model}-${row.model_profile}`}><td><strong>{row.provider_model}</strong><small>{row.provider} · {row.model_profile}</small></td><td>{fmt(row.requests)}</td><td className={row.error_rate > .05 ? "danger-text" : ""}>{(row.error_rate * 100).toFixed(1)}%</td><td>{fmt(row.retries)}</td><td>{fmt(row.avg_duration_ms, " ms")}</td><td>{fmt(row.total_tokens)}</td></tr>)}</tbody></table></div> : <Empty text="当前周期没有模型 Span" />}</section>
+    </div>
+    <div className="mon-overview-grid">
+      <section className="mon-panel"><header><div><h2>用户与工作区热度</h2><p>按逻辑请求聚合，不把用户 ID 作为指标标签；这里用于监控下钻。</p></div></header>{topUsers.length ? <div className="mon-table"><table><thead><tr><th>用户</th><th>请求</th><th>错误率</th><th>平均响应</th><th>Token</th><th>工作区</th><th>最后活跃</th></tr></thead><tbody>{topUsers.slice(0, 12).map((row) => <tr key={row.user_id}><td><strong>{row.user_id}</strong></td><td>{fmt(row.requests)}</td><td>{(row.error_rate * 100).toFixed(1)}%</td><td>{fmt(row.avg_duration_ms, " ms")}</td><td>{fmt(row.total_tokens)}</td><td>{row.workspaces.join(" · ")}</td><td>{time(row.last_seen ?? undefined)}</td></tr>)}</tbody></table></div> : <Empty text="当前周期没有用户请求" />}</section>
+      <div className="mon-detail-usage-stack"><UsageDimensionTable title="详细用量分布" description="按用户汇总详细 Token / Credits。" rows={detailedUsers} label={(row) => row.user_id ?? "unknown"} /><UsageDimensionTable title="按 Provider" description="计价事件和 Token 的 Provider 分布。" rows={systemUsage?.providers ?? []} label={(row) => row.provider ?? "unknown"} /><UsageDimensionTable title="按模型" description="Provider model 的详细账本分布。" rows={detailedModels} label={(row) => row.provider_model ?? "unknown"} /></div>
+    </div>
+    <div className="mon-overview-grid">
+      <section className="mon-panel"><header><div><h2>错误分组</h2><p>按 error kind / 组件 / 操作名聚合，避免只看到一个总错误率。</p></div></header>{errorGroups.length ? <div className="mon-error-grid">{errorGroups.slice(0, 8).map((row) => <div className="mon-error-summary" key={`${row.error_kind}-${row.kind}-${row.name}`}><AlertTriangle /><span><strong>{row.error_kind}</strong><small>{row.kind} · {row.name}</small></span><b>{row.count}</b><time>{time(row.last_seen ?? undefined)}</time></div>)}</div> : <Empty text="当前周期没有组件错误" />}</section>
+      <section className="mon-panel"><header><div><h2>用量趋势</h2><p>优先使用详细账本的日 / 周聚合，展示全用户真实用量。</p></div></header>{breakdown.length ? <div className="mon-bars">{breakdown.slice(-24).map((row, index) => { const total = usageTotalTokens(row); return <div key={`${row.day}-${index}`} title={`${row.day}: ${total}`}><span style={{ height: `${Math.max(3, total / max * 100)}%` }} /><small>{row.day.slice(5)}</small></div>; })}</div> : <Empty text="还没有 Token 用量数据" />}</section>
+    </div>
+    <div className="mon-overview-footnote">数据范围：逻辑请求来自 Telemetry Trace；详细 Token / Credits 来自 UsageEvent。取消、拒绝和重试会分别保留在状态或 Span attempt 中，避免把内部重试误算成用户请求。</div>
+  </div>;
+}
+
+export function RunList({ chains, onOpen }: { chains: TraceChain[]; onOpen: (chain: TraceChain) => void }) {
   const [query, setQuery] = useState("");
   const visible = chains.filter((chain) => `${chain.sessionId} ${chain.turnId} ${chain.traces.map((trace) => `${trace.trace_id} ${trace.status} ${trace.source}`).join(" ")}`.toLowerCase().includes(query.toLowerCase()));
   return <section className="mon-panel"><header><div><h2>运行链路</h2><p>一次评测运行作为一个抽屉；普通对话按 Turn 收纳，内部再展示对应的 Trace。</p></div><label className="mon-search"><Search size={14} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="评测 / Case / Trace / Session" /></label></header><div className="mon-run-list">{visible.map((chain) => { const latest = chain.traces.at(-1)!; const totalTokens = chain.traces.reduce((sum, trace) => sum + trace.total_tokens, 0); const cases = new Set(chain.traces.map((trace) => trace.attributes.evaluation_case_id).filter((value): value is string => typeof value === "string")); return <button className={`mon-run-card mon-chain-card ${chain.evaluationRunId ? "mon-evaluation-card" : ""}`} type="button" key={chain.key} onClick={() => onOpen(chain)}><time>{time(chain.traces[0]?.started_at)}</time><div className="mon-run-title">{chain.evaluationRunId ? <><span>评测批次</span><strong>运行 <code>{chain.evaluationRunId.slice(0, 12)}</code></strong><small>{chain.evaluationSuiteId ?? "evaluation"} · {cases.size} 个 Case · {chain.traces.length} 条 Trace</small></> : <><strong>对话链路 <code>{chain.turnId.slice(0, 12)}</code></strong><small>session {chain.sessionId.slice(0, 12)} · {chain.traces.length} 条 Trace</small></>}</div><Status value={latest.status} /><dl><div><dt>{chain.evaluationRunId ? "Case" : "Trace"}</dt><dd>{chain.evaluationRunId ? cases.size : chain.traces.length}</dd></div><div><dt>Trace</dt><dd>{chain.traces.length} 条</dd></div><div><dt>累计 Token</dt><dd>{fmt(totalTokens)}</dd></div><div><dt>{chain.evaluationRunId ? "Suite" : "会话"}</dt><dd><code>{(chain.evaluationSuiteId ?? chain.sessionId).slice(0, 12)}</code></dd></div></dl></button>; })}{!visible.length && <Empty text="没有匹配的运行链路" />}</div></section>;
@@ -48,9 +139,13 @@ export function MonitorApp() {
   const [page, setPage] = useState<Page>(() => monitorPageFromLocation());
   const [days, setDays] = useState(30);
   const [loading, setLoading] = useState(true);
+  const [authState, setAuthState] = useState<"checking" | "authenticated" | "login">("checking");
+  const [authMessageText, setAuthMessageText] = useState("");
   const [error, setError] = useState("");
   const [overview, setOverview] = useState<Overview | null>(null);
+  const [systemUsage, setSystemUsage] = useState<SystemUsageSnapshot | null>(null);
   const [traces, setTraces] = useState<Trace[]>([]);
+  const [traceContextLoaded, setTraceContextLoaded] = useState(false);
   const [usage, setUsage] = useState<UsageRow[]>([]);
   const [sessions, setSessions] = useState<SessionRow[]>([]);
   const [errors, setErrors] = useState<ErrorRow[]>([]);
@@ -69,8 +164,20 @@ export function MonitorApp() {
   const [detail, setDetail] = useState<TraceDetail | null>(null);
   const [live, setLive] = useState(false);
   const [resetOpen, setResetOpen] = useState(false);
+  const [dangerOpen, setDangerOpen] = useState(false);
   const [resetting, setResetting] = useState(false);
-  const load = useCallback(async () => { setLoading(true); setError(""); try { await authenticate(); const [o, t, u, s, e, ev, st] = await Promise.all([monitorApi.overview(days), monitorApi.traces(), monitorApi.usage(days), monitorApi.sessions(days), monitorApi.errors(days), monitorApi.events(), monitorApi.storage()]); setOverview(o); setTraces(t.items); setUsage(u.items); setSessions(s.items); setErrors(e.items); setEvents(ev.items); setStorage(st); } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); } finally { setLoading(false); } }, [days]);
+  const load = useCallback(async () => { setLoading(true); setError(""); try { await authenticate(); setAuthState("authenticated"); const [o, u, s, e, ev, st] = await Promise.all([monitorApi.overview(days), monitorApi.usage(days), monitorApi.sessions(days), monitorApi.errors(days), monitorApi.events(), monitorApi.storage()]); const su = await monitorApi.systemUsage(days).catch((reason) => { if (authStatus(reason) === 401 || authStatus(reason) === 403) throw reason; return null; }); setOverview(o); setSystemUsage(su); setUsage(u.items); setSessions(s.items); setErrors(e.items); setEvents(ev.items); setStorage(st); } catch (reason) { if (authStatus(reason) === 401 || authStatus(reason) === 403) { setAuthState("login"); setAuthMessageText(authMessage(reason)); } else { setAuthState("authenticated"); setError(reason instanceof Error ? reason.message : String(reason)); } } finally { setLoading(false); } }, [days]);
+  const loadTraceContext = useCallback(async () => {
+    try {
+      const result = await monitorApi.traces();
+      setTraces(result.items);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setTraceContextLoaded(true);
+    }
+  }, []);
+  const login = useCallback(async (username: string, password: string) => { setAuthMessageText(""); try { await monitorApi.login(username, password); setAuthState("checking"); await load(); } catch (reason) { setAuthState("login"); setAuthMessageText(authMessage(reason)); throw reason; } }, [load]);
   const loadSandbox = useCallback(async (initial = false) => {
     if (sandboxRefreshInFlight.current) return;
     sandboxRefreshInFlight.current = true;
@@ -101,6 +208,11 @@ export function MonitorApp() {
   useEffect(() => { queueMicrotask(() => void load()); }, [load]);
   useEffect(() => { const onPopState = () => setPage(monitorPageFromLocation()); addEventListener("popstate", onPopState); return () => removeEventListener("popstate", onPopState); }, []);
   useEffect(() => {
+    if ((page !== "events" && page !== "errors") || traceContextLoaded) return undefined;
+    queueMicrotask(() => void loadTraceContext());
+    return undefined;
+  }, [loadTraceContext, page, traceContextLoaded]);
+  useEffect(() => {
     if (page !== "sandbox") return undefined;
     queueMicrotask(() => void loadSandbox(true));
     const refreshTimer = window.setInterval(() => {
@@ -112,21 +224,42 @@ export function MonitorApp() {
     return () => { window.clearInterval(refreshTimer); window.clearInterval(cleanupTimer); };
   }, [loadSandbox, page]);
   useEffect(() => { if (!overview) return; let socket: WebSocket | null = null; let cancelled = false; void monitorApi.createWsTicket().then(({ ticket }) => { if (cancelled) return; const protocol = location.protocol === "https:" ? "wss:" : "ws:"; socket = new WebSocket(`${protocol}//${location.host}/ws/observability?ticket=${encodeURIComponent(ticket)}`); socket.onopen = () => setLive(true); socket.onclose = () => setLive(false); socket.onmessage = (message) => { const frame = telemetryFrame(message.data); if (frame) setEvents((current) => [frame.payload, ...current.filter((item) => item.event_id !== frame.payload.event_id)].slice(0, 300)); }; }).catch(() => setLive(false)); return () => { cancelled = true; socket?.close(); }; }, [overview]);
-  const openTrace = async (trace: Trace) => setDetail(await monitorApi.trace(trace.trace_id));
-  const chains = useMemo(() => groupTracesIntoChains(traces), [traces]);
-  const resetAll = useCallback(async () => { setResetting(true); setError(""); try { await resetMonitorData(monitorApi.reset, load); setDetail(null); } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); } finally { setResetting(false); setResetOpen(false); } }, [load]);
-  const navigate = (next: Page) => { const url = new URL(location.href); if (next === "overview") url.searchParams.delete("page"); else url.searchParams.set("page", next); history.pushState({}, "", `${url.pathname}${url.search}${url.hash}`); setPage(next); };
+  const openTrace = useCallback(async (trace: Trace) => {
+    try {
+      setDetail(await monitorApi.trace(trace.trace_id));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  }, []);
+  const openTraceById = useCallback(async (traceId: string) => {
+    const cached = traces.find((trace) => trace.trace_id === traceId);
+    if (cached) {
+      await openTrace(cached);
+      return;
+    }
+    try {
+      setDetail(await monitorApi.trace(traceId));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  }, [openTrace, traces]);
+  const resetAll = useCallback(async () => { setResetting(true); setError(""); try { await resetMonitorData(monitorApi.reset, load); setDetail(null); } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); } finally { setResetting(false); setResetOpen(false); setDangerOpen(false); } }, [load]);
+  const navigate = (next: Page) => { const path = monitorPathForPage(next, location); history.pushState({}, "", `${path}${location.hash}`); setPage(next); };
   const pageContent = useMemo(() => {
     if (page === "sandbox") return <SandboxMonitorPage overview={sandboxOverview} logs={sandboxLogs} runtimes={sandboxRuntimes} executions={sandboxExecutions} live={sandboxLive} loading={sandboxLoading} logLoading={sandboxLogLoading} error={sandboxError} onRefresh={() => void loadSandbox(false)} onDrain={(runtimeId) => { if (confirm("确认排空这个运行时？")) void monitorApi.drainSandboxRuntime(runtimeId).then(() => loadSandbox(false)); }} />;
     if (page === "audit") return <AuthorizationAuditPage />;
     if (!overview) return null;
-    if (page === "traces") return <RunList chains={chains} onOpen={setChain} />;
-    if (page === "sessions") return <section className="mon-panel"><header><div><h2>活跃 Session</h2><p>请求量、错误、平均响应与 Token</p></div></header><div className="mon-table"><table><thead><tr><th>Session</th><th>用户 / Workspace</th><th>Turn</th><th>错误</th><th>平均响应</th><th>Token</th><th>最后活跃</th></tr></thead><tbody>{sessions.map((row) => <tr key={row.session_id}><td><code>{row.session_id}</code></td><td>{row.user_id}<small>{row.workspace_id} · {row.channel}</small></td><td>{row.turns}</td><td>{row.errors}</td><td>{fmt(row.avg_duration_ms, " ms")}</td><td>{fmt(row.total_tokens)}</td><td>{time(row.last_seen)}</td></tr>)}</tbody></table>{!sessions.length && <Empty text="没有 Session 数据" />}</div></section>;
-    if (page === "errors") return <section className="mon-panel"><header><div><h2>错误、超时与重试</h2><p>按组件和错误类型聚合，点击样例 Trace 进入完整链路</p></div></header><div className="mon-error-grid">{errors.map((row) => <button key={`${row.error_kind}-${row.kind}-${row.name}`} type="button" onClick={() => { const trace = traces.find((item) => item.trace_id === row.sample_trace_id); if (trace) void openTrace(trace); }}><AlertTriangle /><span><strong>{row.error_kind}</strong><small>{row.kind} · {row.name}</small></span><b>{row.count}</b><time>{time(row.last_seen)}</time></button>)}</div>{!errors.length && <Empty text="当前周期没有错误" />}</section>;
+    if (page === "traces") return <TraceExplorerPage days={days} />;
     if (page === "events") return <RunEventStream events={events} traces={traces} live={live} onOpen={(trace) => void openTrace(trace)} />;
-    if (page === "storage") return <section className="mon-panel"><header><div><h2>数据留存与清理</h2><p>Telemetry SQLite 大小、队列、丢弃事件和表记录数</p></div></header><div className="mon-storage"><Json value={storage} /><button type="button" onClick={async () => { if (confirm(`清理 ${days} 天以前的 Trace 与 Event？`)) { setStorage(await monitorApi.prune(days, days)); } }}><HardDrive size={16} />按当前周期清理过期数据</button></div></section>;
-    return <OverviewPage data={overview} usage={usage} />;
-  }, [chains, days, errors, events, live, loadSandbox, overview, page, sandboxError, sandboxExecutions, sandboxLive, sandboxLoading, sandboxLogLoading, sandboxLogs, sandboxOverview, sandboxRuntimes, sessions, storage, traces, usage]);
-  return <div className="monitor-shell"><aside className="monitor-nav"><div className="monitor-brand"><Server /><span><strong>NLP Monitor</strong><small>OBSERVABILITY · 8766</small></span></div><nav>{NAV.map(({ page: item, label, icon: Icon }) => <button className={page === item ? "active" : ""} type="button" key={item} onClick={() => navigate(item)}><Icon size={17} />{label}</button>)}</nav><a href={controlPlaneUrl()}>返回控制面</a></aside><main><header className="monitor-top"><div><h1>{NAV.find((item) => item.page === page)?.label}</h1><span><i className={`mon-live-dot ${(live || sandboxLive) ? "on" : ""}`} />{(live || sandboxLive) ? "实时" : "离线"}</span></div><label>统计周期<select value={days} onChange={(event) => setDays(Number(event.target.value))}><option value={1}>24 小时</option><option value={7}>7 天</option><option value={30}>30 天</option><option value={90}>90 天</option></select></label><button className="mon-reset-button" type="button" onClick={() => setResetOpen(true)} disabled={loading || resetting}><Trash2 />重置全部数据</button><button type="button" onClick={() => page === "sandbox" ? void loadSandbox(false) : void load()} disabled={loading || resetting || sandboxLoading}><RefreshCw className={(loading || sandboxLoading) ? "spin" : ""} />刷新</button></header><div className="monitor-content">{error && page !== "sandbox" ? <div className="mon-fatal"><AlertTriangle /><strong>监控数据加载失败</strong><p>{error}</p></div> : loading && !overview && page !== "sandbox" ? <div className="mon-fatal"><RefreshCw className="spin" /><strong>正在连接 Monitor</strong></div> : pageContent}</div></main>{chain && <ChainDrawer chain={chain} onClose={() => setChain(null)} onOpenTrace={(trace) => void openTrace(trace)} />}{detail && <TraceDrawer detail={detail} onClose={() => setDetail(null)} />}<ConfirmDialog open={resetOpen} title="重置全部本地运行数据？" description="将永久清除所有学生会话、消息、练习记录、学习记忆、Trace、日志、调试事件和工具审计。教师主题、知识点、蓝图、模型与用户设置会保留。请先停止正在运行的对话。" confirmLabel={resetting ? "正在重置…" : "确认重置全部数据"} cancelLabel="取消" onClose={() => { if (!resetting) setResetOpen(false); }} onConfirm={() => void resetAll()} /></div>;
+    if (page === "usage") return <MonitorUsagePage data={overview} usage={usage} systemUsage={systemUsage} />;
+    if (page === "components") return <MonitorComponentsPage data={overview} />;
+    if (page === "sessions") return <MonitorSessionsPage rows={sessions} />;
+    if (page === "errors") return <MonitorErrorsPage rows={errors} onOpen={(traceId) => void openTraceById(traceId)} />;
+    if (page === "storage") return <MonitorStoragePage storage={storage} retentionDays={days} onPrune={async () => { setStorage(await monitorApi.prune(days, days)); }} />;
+    return <MonitorOverviewPage data={overview} usage={usage} systemUsage={systemUsage} />;
+  }, [days, errors, events, live, loadSandbox, openTrace, openTraceById, overview, page, sandboxError, sandboxExecutions, sandboxLive, sandboxLoading, sandboxLogLoading, sandboxLogs, sandboxOverview, sandboxRuntimes, sessions, storage, systemUsage, traces, usage]);
+  if (authState === "checking") return <main className="monitor-auth-shell"><div className="monitor-auth-loading"><RefreshCw className="spin" /><span>正在验证监控权限…</span></div></main>;
+  if (authState === "login") return <MonitorLoginPage message={authMessageText} onLogin={login} />;
+  return <div className="monitor-shell"><aside className="monitor-nav"><div className="monitor-brand"><Server /><span><strong>NLP Monitor</strong><small>OBSERVABILITY · 8766</small></span></div><nav className="monitor-nav-groups">{NAV_GROUPS.map((group) => <div className="monitor-nav-group" key={group.label}><span className="monitor-nav-group-label">{group.label}</span>{group.items.map(({ page: item, label, icon: Icon }) => <button className={page === item ? "active" : ""} aria-current={page === item ? "page" : undefined} type="button" key={item} onClick={() => navigate(item)}><Icon size={17} />{label}</button>)}</div>)}</nav><a href={controlPlaneUrl()}>返回控制面</a></aside><main><a className="monitor-skip-link" href="#monitor-content">跳到主要内容</a><header className="monitor-top"><div><h1>{NAV.find((item) => item.page === page)?.label}</h1><span><i className={`mon-live-dot ${(live || sandboxLive) ? "on" : ""}`} />{(live || sandboxLive) ? "实时" : "离线"}</span></div><label>统计周期<select value={days} onChange={(event) => setDays(Number(event.target.value))}><option value={1}>24 小时</option><option value={7}>7 天</option><option value={30}>30 天</option><option value={90}>90 天</option></select></label><div className="mon-danger-menu"><button className="mon-danger-trigger" type="button" aria-label="更多监控操作" aria-expanded={dangerOpen} onClick={() => setDangerOpen((open) => !open)}><MoreHorizontal size={17} /></button>{dangerOpen ? <div className="mon-danger-menu-popover"><span>危险操作</span><button className="mon-reset-button" type="button" onClick={() => { setDangerOpen(false); setResetOpen(true); }} disabled={loading || resetting}><Trash2 />重置全部数据</button></div> : null}</div><button type="button" onClick={() => page === "sandbox" ? void loadSandbox(false) : void load()} disabled={loading || resetting || sandboxLoading}><RefreshCw className={(loading || sandboxLoading) ? "spin" : ""} />刷新</button></header><div className="monitor-content" id="monitor-content">{error && page !== "sandbox" ? <div className="mon-fatal"><AlertTriangle /><strong>监控数据加载失败</strong><p>{error}</p></div> : loading && !overview && page !== "sandbox" ? <div className="mon-fatal"><RefreshCw className="spin" /><strong>正在连接 Monitor</strong></div> : pageContent}</div></main>{chain && <ChainDrawer chain={chain} onClose={() => setChain(null)} onOpenTrace={(trace) => void openTrace(trace)} />}{detail && <TraceDrawer detail={detail} onClose={() => setDetail(null)} />}<ConfirmDialog open={resetOpen} title="重置全部本地运行数据？" description="将永久清除所有学生会话、消息、练习记录、学习记忆、Trace、日志、调试事件和工具审计。教师主题、知识点、蓝图、模型与用户设置会保留。请先停止正在运行的对话。" confirmLabel={resetting ? "正在重置…" : "确认重置全部数据"} cancelLabel="取消" onClose={() => { if (!resetting) setResetOpen(false); }} onConfirm={() => void resetAll()} /></div>;
 }
-function Json({ value }: { value: unknown }) { return <pre className="mon-json">{JSON.stringify(value, null, 2)}</pre>; }
+export function Json({ value }: { value: unknown }) { return <pre className="mon-json">{JSON.stringify(value, null, 2)}</pre>; }

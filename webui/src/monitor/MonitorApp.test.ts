@@ -1,4 +1,4 @@
-import { controlPlaneUrl, groupEventsByTrace, groupTracesIntoChains, monitorUrl, resetMonitorData, telemetryFrame } from "./monitor-helpers";
+import { controlPlaneUrl, groupEventsByTrace, groupTracesIntoChains, monitorPageFromLocation, monitorPathForPage, monitorUrl, resetMonitorData, telemetryFrame } from "./monitor-helpers";
 import type { TelemetryEvent, Trace } from "./api";
 
 const trace = (traceId: string): Trace => ({
@@ -12,6 +12,11 @@ const event = (eventId: string, timestamp: string, traceId?: string): TelemetryE
 });
 
 describe("MonitorApp helpers", () => {
+  it("maps dedicated monitor paths to pages and back", () => {
+    expect(monitorPageFromLocation({ pathname: "/monitor/usage", search: "" })).toBe("usage");
+    expect(monitorPathForPage("components", { pathname: "/monitor", search: "" })).toBe("/monitor/components");
+  });
+
   it("returns to the control plane on the same remote host and the paired environment port", () => {
     expect(controlPlaneUrl({ protocol: "https:", hostname: "nlp.example.test", port: "18766" } as Location))
       .toBe("https://nlp.example.test:18765/developer");

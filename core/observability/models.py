@@ -53,6 +53,9 @@ class TraceRecord(BaseModel):
     request_id: str
     session_id: str
     turn_id: str
+    chain_id: str | None = None
+    chain_name: str | None = None
+    entrypoint: str | None = None
     workspace_id: str = "default"
     user_id: str = "default"
     channel: str = "cli"

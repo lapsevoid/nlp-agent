@@ -11,7 +11,20 @@ from sqlalchemy import create_engine, delete, func, select
 from sqlalchemy.dialects.mysql import insert
 
 from core.observability.models import TelemetryEnvelope
+from core.observability.summary import build_telemetry_overview
+from core.observability.traces import build_trace_group_page, trace_chain_identity
 from server.infrastructure.mysql.models import ObservabilityRecordModel
+
+
+def _record_key(kind: str, payload: dict[str, Any]) -> str:
+    """Select the envelope's own identity so sibling spans never overwrite."""
+    field = {"trace": "trace_id", "span": "span_id", "event": "event_id"}.get(kind)
+    if field is None:
+        raise ValueError(f"unsupported telemetry envelope kind: {kind}")
+    value = payload.get(field)
+    if not value:
+        raise ValueError(f"telemetry {kind} is missing {field}")
+    return str(value)
 
 
 class MySQLTelemetryRepository:
@@ -23,7 +36,7 @@ class MySQLTelemetryRepository:
             for envelope in envelopes:
                 payload = envelope.model_dump(mode="json")
                 item = payload.get("payload", {})
-                key = str(item.get("trace_id") or item.get("span_id") or item.get("event_id"))
+                key = _record_key(envelope.kind, item)
                 statement = insert(ObservabilityRecordModel).values(
                     id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"nlp-agent-observability:{envelope.kind}:{key}")), kind=envelope.kind, record_key=key,
                     trace_id=item.get("trace_id"), session_id=item.get("session_id"),
@@ -45,9 +58,15 @@ class MySQLTelemetryRepository:
             counts = {kind: int(connection.scalar(select(func.count()).select_from(ObservabilityRecordModel).where(ObservabilityRecordModel.kind == kind)) or 0) for kind in ("trace", "span", "event")}
         return {"database": "mysql", "records": count, "traces": counts["trace"], "spans": counts["span"], "events": counts["event"]}
 
-    def _rows(self, kind: str) -> list[dict[str, Any]]:
+    def _rows(self, kind: str, *, since: datetime | None = None) -> list[dict[str, Any]]:
+        statement = select(ObservabilityRecordModel.payload_json).where(
+            ObservabilityRecordModel.kind == kind
+        )
+        if since is not None:
+            statement = statement.where(ObservabilityRecordModel.created_at >= since)
+        statement = statement.order_by(ObservabilityRecordModel.created_at.desc())
         with self._engine.connect() as connection:
-            rows = connection.execute(select(ObservabilityRecordModel.payload_json).where(ObservabilityRecordModel.kind == kind).order_by(ObservabilityRecordModel.created_at.desc())).all()
+            rows = connection.execute(statement).all()
         output = []
         for row in rows:
             item = row[0].get("payload", {})
@@ -57,14 +76,46 @@ class MySQLTelemetryRepository:
         return output
 
     def overview(self, days: int = 30) -> dict[str, Any]:
-        rows = [row for row in self._rows("trace") if row.get("completed_at")]
-        errors = sum(row.get("status") in {"error", "timeout"} for row in rows)
-        totals = {key: sum(int((row.get("usage") or {}).get(key, 0) or 0) for row in rows) for key in ("input_tokens", "output_tokens", "cached_tokens", "cache_miss_tokens", "reasoning_tokens", "total_tokens")}
-        return {"period_days": days, "requests": len(rows), "successes": len(rows) - errors, "errors": errors, "error_rate": errors / len(rows) if rows else 0.0, "latency_ms": {"p50": None, "p95": None}, "ttft_ms": {"p50": None, "p95": None}, "tokens": totals}
+        since = datetime.now(timezone.utc) - timedelta(days=max(1, days))
+        return build_telemetry_overview(
+            self._rows("trace", since=since),
+            self._rows("span", since=since),
+            self._rows("event", since=since),
+            days,
+        )
 
     def list_traces(self, *, limit: int = 100, session_id: str | None = None, status: str | None = None, user_id: str | None = None, workspace_ids: frozenset[str] | None = None) -> list[dict[str, Any]]:
         rows = self._rows("trace")
         return [row for row in rows if (not session_id or row.get("session_id") == session_id) and (not status or row.get("status") == status) and (not user_id or row.get("user_id") == user_id) and (not workspace_ids or row.get("workspace_id") in workspace_ids)][:limit]
+
+    def trace_groups(self, *, days: int = 30, limit: int = 24, offset: int = 0, query: str | None = None, focus: str = "all") -> dict[str, Any]:
+        since = datetime.now(timezone.utc) - timedelta(days=max(1, days))
+        traces = self._rows("trace", since=since)
+        spans = self._rows("span", since=since)
+        page = build_trace_group_page(
+            traces,
+            spans=spans,
+            limit=limit,
+            offset=offset,
+            query=query,
+            focus=focus,
+        )
+        page["period_days"] = days
+        return page
+
+    def trace_group_detail(self, chain_id: str) -> dict[str, Any] | None:
+        traces = [row for row in self._rows("trace") if trace_chain_identity(row)["chain_id"] == chain_id]
+        if not traces:
+            return None
+        trace_ids = {str(row["trace_id"]) for row in traces}
+        spans = [row for row in self._rows("span") if str(row.get("trace_id")) in trace_ids]
+        chain = build_trace_group_page(traces, spans=spans, limit=1)["items"][0]
+        return {
+            "chain": chain,
+            "traces": traces,
+            "spans": spans,
+            "events": [row for row in self._rows("event") if str(row.get("trace_id")) in trace_ids],
+        }
 
     def recent_events(self, *, limit: int = 200, level: str | None = None, trace_id: str | None = None) -> list[dict[str, Any]]:
         return [row for row in self._rows("event") if (not level or row.get("level") == level) and (not trace_id or row.get("trace_id") == trace_id)][:limit]
@@ -75,7 +126,10 @@ class MySQLTelemetryRepository:
         return {"trace": traces[0], "spans": [row for row in self._rows("span") if row.get("trace_id") == trace_id], "events": [row for row in self._rows("event") if row.get("trace_id") == trace_id]}
 
     def errors(self, days: int = 30, limit: int = 100) -> list[dict[str, Any]]:
-        return [{"error_kind": row.get("error_kind") or "unknown", "kind": row.get("kind"), "name": row.get("name"), "count": 1} for row in self._rows("span") if row.get("status") in {"error", "timeout"}][:limit]
+        since = datetime.now(timezone.utc) - timedelta(days=max(1, days))
+        return build_telemetry_overview(
+            [], self._rows("span", since=since), [], days
+        )["error_groups"][:limit]
 
     def usage(self, days: int = 30) -> list[dict[str, Any]]:
         since = (
@@ -131,11 +185,92 @@ class MySQLTelemetryRepository:
 
         return [metrics[key] for key in sorted(metrics)]
 
-    def sessions(self, days: int = 30, limit: int = 100, **_: Any) -> list[dict[str, Any]]:
-        return []
+    def sessions(
+        self,
+        days: int = 30,
+        limit: int = 100,
+        *,
+        user_id: str | None = None,
+        workspace_ids: frozenset[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        since = datetime.now(timezone.utc) - timedelta(days=max(1, days))
+        rows = [
+            row
+            for row in self._rows("trace", since=since)
+            if row.get("completed_at")
+            and (not user_id or row.get("user_id") == user_id)
+            and (
+                not workspace_ids
+                or "*" in workspace_ids
+                or row.get("workspace_id") in workspace_ids
+            )
+        ]
+        groups: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
+        for row in rows:
+            key = (
+                str(row.get("session_id") or "unknown"),
+                str(row.get("workspace_id") or "unknown"),
+                str(row.get("user_id") or "unknown"),
+                str(row.get("channel") or "unknown"),
+            )
+            groups.setdefault(key, []).append(row)
+        result = []
+        for (session_id, workspace_id, user_id, channel), session_rows in groups.items():
+            result.append(
+                {
+                    "session_id": session_id,
+                    "workspace_id": workspace_id,
+                    "user_id": user_id,
+                    "channel": channel,
+                    "turns": len(session_rows),
+                    "errors": sum(
+                        row.get("status") in {"error", "timeout"}
+                        for row in session_rows
+                    ),
+                    "avg_duration_ms": round(
+                        sum(int(row.get("duration_ms") or 0) for row in session_rows)
+                        / len(session_rows)
+                    ),
+                    "total_tokens": sum(int(row.get("total_tokens") or 0) for row in session_rows),
+                    "last_seen": max(
+                        str(row.get("completed_at") or row.get("started_at") or "")
+                        for row in session_rows
+                    ),
+                }
+            )
+        return sorted(result, key=lambda row: row["last_seen"], reverse=True)[:limit]
 
-    def prune(self, trace_days: int = 30, event_days: int = 30) -> None:
-        return None
+    def prune(self, trace_days: int = 30, event_days: int = 30) -> dict[str, int]:
+        """Delete expired telemetry without touching the quota usage ledger."""
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        trace_before = now - timedelta(days=max(1, trace_days))
+        event_before = now - timedelta(days=max(1, event_days))
+
+        with self._engine.begin() as connection:
+            spans = connection.execute(
+                delete(ObservabilityRecordModel).where(
+                    ObservabilityRecordModel.kind == "span",
+                    ObservabilityRecordModel.created_at < trace_before,
+                )
+            )
+            traces = connection.execute(
+                delete(ObservabilityRecordModel).where(
+                    ObservabilityRecordModel.kind == "trace",
+                    ObservabilityRecordModel.created_at < trace_before,
+                )
+            )
+            events = connection.execute(
+                delete(ObservabilityRecordModel).where(
+                    ObservabilityRecordModel.kind == "event",
+                    ObservabilityRecordModel.created_at < event_before,
+                )
+            )
+        return {
+            "traces": max(0, int(traces.rowcount or 0)),
+            "spans": max(0, int(spans.rowcount or 0)),
+            "events": max(0, int(events.rowcount or 0)),
+            "daily_metrics": 0,
+        }
 
     def delete_session(self, session_id: str) -> None:
         with self._engine.begin() as connection:
@@ -151,5 +286,5 @@ class MySQLTelemetryRepository:
         # Query endpoints remain safe during the migration window; new telemetry is
         # durable in MySQL even when no historical rows exist.
         if name in {"overview", "list_traces", "trace_detail", "usage", "sessions", "recent_events", "errors"}:
-            return lambda *args, **kwargs: [] if name != "overview" else {"period_days": kwargs.get("days", 30), "requests": 0, "successes": 0, "errors": 0, "error_rate": 0.0, "latency_ms": {"p50": None, "p95": None}, "ttft_ms": {"p50": None, "p95": None}, "tokens": {}}
+            return lambda *args, **kwargs: [] if name != "overview" else {"period_days": kwargs.get("days", 30), "requests": 0, "successes": 0, "errors": 0, "error_rate": 0.0, "latency_ms": {"p50": None, "p90": None, "p95": None, "p99": None}, "ttft_ms": {"p50": None, "p90": None, "p95": None, "p99": None}, "tokens": {}}
         raise AttributeError(name)

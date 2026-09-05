@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Awaitable, Callable
+from contextlib import nullcontext
 from typing import Protocol
 
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
@@ -11,6 +12,8 @@ from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 from core.coordinator_runtime import CoordinatorRuntime
 from core.session_context import SessionContext
 from core.learning import ExerciseState, LearningContext, LearningProgress, TeachingMaterials
+from core.observability.context import bind_telemetry_context, current_telemetry_context
+from core.observability.runtime import global_telemetry
 from core.task_manager import global_task_manager
 from core.model_runtime.selection import bind_model_profile, current_model_profile
 from core.worker_events import global_worker_event_bus
@@ -98,26 +101,29 @@ class LangGraphAgentEngine:
                     teaching_materials,
                 )
             return
-        config = {
-            "recursion_limit": 64,
-            "configurable": {
-                "thread_id": context.session_id,
-                "auth_session_id": context.auth_session_id,
-                "turn_id": turn_id,
-                "user_id": context.user_id,
-                "workspace_id": context.workspace_id,
-                "channel": context.channel,
-                "model_profile": selected_profile,
-                "learning_context": learning_context.model_dump(mode="json") if learning_context else None,
-                "learning_progress": learning_progress.model_dump(mode="json") if learning_progress else None,
-                "exercise_state": exercise_state.model_dump(mode="json") if exercise_state else None,
-                "learning_topic": teaching_materials.learning_topic if teaching_materials else {},
-                "exercise_blueprint": teaching_materials.exercise_blueprint if teaching_materials else {},
-                "review_blueprint": teaching_materials.review_blueprint if teaching_materials else {},
-                "guided_session": teaching_materials.guided_session if teaching_materials else {},
-                "guided_blueprint": teaching_materials.guided_blueprint if teaching_materials else {},
-            },
+        configurable = {
+            "thread_id": context.session_id,
+            "auth_session_id": context.auth_session_id,
+            "turn_id": turn_id,
+            "user_id": context.user_id,
+            "workspace_id": context.workspace_id,
+            "channel": context.channel,
+            "model_profile": selected_profile,
+            "learning_context": learning_context.model_dump(mode="json") if learning_context else None,
+            "learning_progress": learning_progress.model_dump(mode="json") if learning_progress else None,
+            "exercise_state": exercise_state.model_dump(mode="json") if exercise_state else None,
+            "learning_topic": teaching_materials.learning_topic if teaching_materials else {},
+            "exercise_blueprint": teaching_materials.exercise_blueprint if teaching_materials else {},
+            "review_blueprint": teaching_materials.review_blueprint if teaching_materials else {},
+            "guided_session": teaching_materials.guided_session if teaching_materials else {},
+            "guided_blueprint": teaching_materials.guided_blueprint if teaching_materials else {},
         }
+        telemetry = current_telemetry_context()
+        if telemetry is None and self._runtime is not None:
+            telemetry = self._runtime.telemetry_context(context.session_id)
+        if telemetry is not None:
+            configurable.update(telemetry.configurable())
+        config = {"recursion_limit": 64, "configurable": configurable}
         if background:
             await self._emit(
                 turn_id,
@@ -130,100 +136,109 @@ class LangGraphAgentEngine:
         active_tools: dict[str, str] = {}
         suppressed_model_runs: set[str] = set()
         anonymous_suppressed_model_stream = False
-        async for event in self._app.astream_events(
-            {"messages": messages}, config=config, version="v2"
-        ):
-            metadata = event.get("metadata", {})
-            node = metadata.get("langgraph_node")
-            event_name = event.get("event")
-            if event_name == "on_chat_model_start" and node == "coordinator":
-                anonymous_suppressed_model_stream = False
-                continue
-            if event_name == "on_chat_model_end" and node == "coordinator":
-                anonymous_suppressed_model_stream = False
-                continue
-            if event_name == "on_chat_model_stream" and node == "coordinator":
-                if background:
+        telemetry_binding = (
+            bind_telemetry_context(telemetry)
+            if telemetry is not None
+            else nullcontext()
+        )
+        with telemetry_binding:
+            event_stream = self._app.astream_events(
+                {"messages": messages}, config=config, version="v2"
+            )
+            async for event in event_stream:
+                metadata = event.get("metadata", {})
+                node = metadata.get("langgraph_node")
+                event_name = event.get("event")
+                if event_name == "on_chat_model_start" and node == "coordinator":
+                    anonymous_suppressed_model_stream = False
                     continue
-                chunk = event.get("data", {}).get("chunk")
-                if not isinstance(chunk, AIMessageChunk):
+                if event_name == "on_chat_model_end" and node == "coordinator":
+                    anonymous_suppressed_model_stream = False
                     continue
-                run_id = str(event.get("run_id") or "")
-                if run_id in suppressed_model_runs or (
-                    not run_id and anonymous_suppressed_model_stream
-                ):
-                    continue
-                if _is_internal_model_event(metadata):
-                    if run_id:
-                        suppressed_model_runs.add(run_id)
-                    else:
-                        anonymous_suppressed_model_stream = True
-                    continue
-                if chunk.content:
-                    if looks_like_internal_output(chunk.content):
+                if event_name == "on_chat_model_stream" and node == "coordinator":
+                    if background:
+                        continue
+                    chunk = event.get("data", {}).get("chunk")
+                    if not isinstance(chunk, AIMessageChunk):
+                        continue
+                    run_id = str(event.get("run_id") or "")
+                    if run_id in suppressed_model_runs or (
+                        not run_id and anonymous_suppressed_model_stream
+                    ):
+                        continue
+                    if _is_internal_model_event(metadata):
                         if run_id:
                             suppressed_model_runs.add(run_id)
                         else:
                             anonymous_suppressed_model_stream = True
                         continue
+                    if chunk.content:
+                        if looks_like_internal_output(chunk.content):
+                            if run_id:
+                                suppressed_model_runs.add(run_id)
+                            else:
+                                anonymous_suppressed_model_stream = True
+                            continue
+                        global_telemetry.mark_ttft(telemetry)
+                        await self._emit(
+                            turn_id,
+                            context.session_id,
+                            GatewayEventType.MESSAGE_DELTA,
+                            {"delta": chunk.content, "background": background},
+                        )
+                    reasoning = chunk.additional_kwargs.get("reasoning_content")
+                    if reasoning and not looks_like_internal_output(reasoning):
+                        global_telemetry.mark_ttft(telemetry)
+                        await self._emit(
+                            turn_id,
+                            context.session_id,
+                            GatewayEventType.MESSAGE_DELTA,
+                            {"delta": reasoning, "channel": "reasoning", "background": background},
+                        )
+                elif event_name == "on_chain_start" and node == "tools" and not active_tool_node:
+                    active_tool_node = True
+                    observed_tool_events = False
+                elif event_name == "on_tool_start":
+                    observed_tool_events = True
+                    tool_id = str(event.get("run_id") or event.get("name") or uuid.uuid4())
+                    tool_name = str(event.get("name") or "工具")
+                    active_tools[tool_id] = tool_name
                     await self._emit(
                         turn_id,
                         context.session_id,
-                        GatewayEventType.MESSAGE_DELTA,
-                        {"delta": chunk.content, "background": background},
+                        GatewayEventType.TOOL_STARTED,
+                        {"name": tool_name},
                     )
-                reasoning = chunk.additional_kwargs.get("reasoning_content")
-                if reasoning and not looks_like_internal_output(reasoning):
-                    await self._emit(
-                        turn_id,
-                        context.session_id,
-                        GatewayEventType.MESSAGE_DELTA,
-                        {"delta": reasoning, "channel": "reasoning", "background": background},
-                    )
-            elif event_name == "on_chain_start" and node == "tools" and not active_tool_node:
-                active_tool_node = True
-                observed_tool_events = False
-            elif event_name == "on_tool_start":
-                observed_tool_events = True
-                tool_id = str(event.get("run_id") or event.get("name") or uuid.uuid4())
-                tool_name = str(event.get("name") or "工具")
-                active_tools[tool_id] = tool_name
-                await self._emit(
-                    turn_id,
-                    context.session_id,
-                    GatewayEventType.TOOL_STARTED,
-                    {"name": tool_name},
-                )
-            elif event_name == "on_tool_end":
-                observed_tool_events = True
-                tool_id = str(event.get("run_id") or event.get("name") or "")
-                tool_name = active_tools.pop(tool_id, str(event.get("name") or "工具"))
-                await self._emit(
-                    turn_id,
-                    context.session_id,
-                    GatewayEventType.TOOL_COMPLETED,
-                    {"name": tool_name},
-                )
-            elif event_name == "on_tool_error":
-                observed_tool_events = True
-                tool_id = str(event.get("run_id") or event.get("name") or "")
-                tool_name = active_tools.pop(tool_id, str(event.get("name") or "工具"))
-                await self._emit(
-                    turn_id,
-                    context.session_id,
-                    GatewayEventType.TOOL_FAILED,
-                    {"name": tool_name},
-                )
-            elif event_name == "on_chain_end" and node == "tools" and active_tool_node:
-                active_tool_node = False
-                if not observed_tool_events:
+                elif event_name == "on_tool_end":
+                    observed_tool_events = True
+                    tool_id = str(event.get("run_id") or event.get("name") or "")
+                    tool_name = active_tools.pop(tool_id, str(event.get("name") or "工具"))
                     await self._emit(
                         turn_id,
                         context.session_id,
                         GatewayEventType.TOOL_COMPLETED,
-                        {"name": "tool"},
+                        {"name": tool_name},
                     )
-            await self._apply_pending_snips(context)
+                elif event_name == "on_tool_error":
+                    observed_tool_events = True
+                    tool_id = str(event.get("run_id") or event.get("name") or "")
+                    tool_name = active_tools.pop(tool_id, str(event.get("name") or "工具"))
+                    await self._emit(
+                        turn_id,
+                        context.session_id,
+                        GatewayEventType.TOOL_FAILED,
+                        {"name": tool_name},
+                    )
+                elif event_name == "on_chain_end" and node == "tools" and active_tool_node:
+                    active_tool_node = False
+                    if not observed_tool_events:
+                        await self._emit(
+                            turn_id,
+                            context.session_id,
+                            GatewayEventType.TOOL_COMPLETED,
+                            {"name": "tool"},
+                        )
+                await self._apply_pending_snips(context)
 
     async def run_turn(
         self,

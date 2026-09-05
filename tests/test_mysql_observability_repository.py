@@ -1,6 +1,58 @@
 from datetime import datetime, timezone
 
-from core.observability.mysql_repository import MySQLTelemetryRepository
+from core.observability.mysql_repository import MySQLTelemetryRepository, _record_key
+
+
+def test_observability_record_key_keeps_siblings_in_one_trace_distinct():
+    trace = {"trace_id": "trace-1", "span_id": "span-1", "event_id": "event-1"}
+
+    assert _record_key("trace", trace) == "trace-1"
+    assert _record_key("span", trace) == "span-1"
+    assert _record_key("event", trace) == "event-1"
+    assert _record_key("span", {**trace, "span_id": "span-2"}) != _record_key("span", trace)
+
+
+def test_prune_deletes_expired_trace_span_and_event_rows():
+    class Result:
+        def __init__(self, rowcount):
+            self.rowcount = rowcount
+
+    class Connection:
+        def __init__(self):
+            self.statements = []
+            self.rowcounts = iter((4, 2, 3))
+
+        def execute(self, statement):
+            self.statements.append(statement)
+            return Result(next(self.rowcounts))
+
+    class Begin:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def __enter__(self):
+            return self.connection
+
+        def __exit__(self, *_args):
+            return None
+
+    class Engine:
+        def __init__(self):
+            self.connection = Connection()
+
+        def begin(self):
+            return Begin(self.connection)
+
+    repository = object.__new__(MySQLTelemetryRepository)
+    repository._engine = Engine()
+
+    assert repository.prune(trace_days=30, event_days=14) == {
+        "traces": 2,
+        "spans": 4,
+        "events": 3,
+        "daily_metrics": 0,
+    }
+    assert len(repository._engine.connection.statements) == 3
 
 
 def test_usage_aggregates_span_rows_for_monitor_contract(monkeypatch) -> None:

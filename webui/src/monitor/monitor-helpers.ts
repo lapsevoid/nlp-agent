@@ -1,14 +1,39 @@
 import type { TelemetryEvent, Trace } from "./api";
 
 export type BrowserLocation = Pick<Location, "protocol" | "hostname" | "port">;
-export type MonitorPage = "overview" | "traces" | "sessions" | "errors" | "events" | "storage" | "sandbox" | "audit";
+export type MonitorPathLocation = Pick<Location, "pathname" | "search">;
+export type MonitorPage = "overview" | "usage" | "traces" | "sessions" | "components" | "errors" | "events" | "storage" | "sandbox" | "audit";
+
+const MONITOR_ROUTE_SLUGS: Record<MonitorPage, string> = {
+  overview: "",
+  usage: "usage",
+  traces: "traces",
+  sessions: "sessions",
+  components: "components",
+  errors: "errors",
+  events: "events",
+  storage: "storage",
+  sandbox: "sandbox",
+  audit: "audit",
+};
+const MONITOR_ROUTE_PAGES = new Map(Object.entries(MONITOR_ROUTE_SLUGS).map(([page, slug]) => [slug, page as MonitorPage]));
 
 // Keep navigation and telemetry helpers outside the React entry module so Fast Refresh sees a component-only boundary.
-export function monitorPageFromLocation(current: Pick<Location, "search"> = location): MonitorPage {
+export function monitorPageFromLocation(current: MonitorPathLocation = location): MonitorPage {
   const candidate = new URLSearchParams(current.search).get("page");
-  return ["overview", "traces", "sessions", "errors", "events", "storage", "sandbox", "audit"].includes(candidate ?? "")
-    ? candidate as MonitorPage
-    : "overview";
+  if (candidate && Object.hasOwn(MONITOR_ROUTE_SLUGS, candidate)) return candidate as MonitorPage;
+  const pathname = current.pathname.replace(/\/+$/, "");
+  const slug = pathname.split("/").at(-1) ?? "";
+  return MONITOR_ROUTE_PAGES.get(slug) ?? "overview";
+}
+
+export function monitorPathForPage(page: MonitorPage, current: Pick<Location, "pathname" | "search"> = location): string {
+  const pathname = current.pathname.replace(/\/+$/, "");
+  const monitorRoot = pathname.match(/^(.*\/monitor)(?:\/.*)?$/)?.[1] ?? "";
+  const root = monitorRoot || "/";
+  const slug = MONITOR_ROUTE_SLUGS[page];
+  if (!slug) return root;
+  return `${root === "/" ? "" : root}/${slug}`;
 }
 
 function pairedPort(current: BrowserLocation, service: "web" | "monitor"): number {

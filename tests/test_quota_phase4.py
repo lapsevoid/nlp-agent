@@ -765,6 +765,68 @@ def test_archived_events_leave_operational_usage_views_but_remain_auditable():
     assert archived["archive_batch_id"] == result["batch_id"]
 
 
+def test_system_snapshot_aggregates_detailed_usage_for_every_user():
+    engine = _engine()
+    with engine.begin() as connection:
+        connection.execute(
+            insert(UsageEventModel).values(
+                _usage_event(
+                    operation_id="op-system-alice",
+                    user_id="alice",
+                    occurred_at=NOW - timedelta(hours=1),
+                )
+            )
+        )
+        bob = _usage_event(
+            operation_id="op-system-bob",
+            user_id="bob",
+            occurred_at=NOW - timedelta(hours=1),
+        )
+        bob.update(provider="provider-b", provider_model="model-b", credits_micro=None, usage_status="pending")
+        connection.execute(insert(UsageEventModel).values(bob))
+
+    snapshot = UsageReadService(engine).system_snapshot(days=7, now=NOW)
+
+    assert snapshot["scope"] == "system"
+    assert snapshot["events"] == 2
+    assert snapshot["unpriced_events"] == 1
+    assert snapshot["credits_complete"] is False
+    assert snapshot["tokens"]["total_tokens"] == 20
+    assert [row["user_id"] for row in snapshot["users"]] == ["alice", "bob"]
+    assert snapshot["providers"][0]["provider"] == "provider-a"
+    assert snapshot["models"][1]["provider_model"] == "model-b"
+
+
+def test_system_usage_exposes_bounded_user_pages_and_five_minute_trend():
+    engine = _engine()
+    with engine.begin() as connection:
+        for index in range(3):
+            connection.execute(
+                insert(UsageEventModel).values(
+                    _usage_event(
+                        operation_id=f"op-page-{index}",
+                        user_id=f"user-{index}",
+                        occurred_at=NOW - timedelta(minutes=7 * index + 1),
+                    )
+                )
+            )
+
+    reader = UsageReadService(engine)
+    page = reader.system_user_page(days=7, limit=2, offset=0, now=NOW)
+    trend = reader.system_trend(window_minutes=30, bucket_minutes=5, now=NOW)
+
+    assert page["scope"] == "system"
+    assert page["total"] == 3
+    assert len(page["items"]) == 2
+    assert page["has_more"] is True
+    assert trend["scope"] == "system"
+    assert trend["window_minutes"] == 30
+    assert trend["bucket_minutes"] == 5
+    assert trend["granularity"] == "five_minute"
+    assert all(row["granularity"] == "five_minute" for row in trend["breakdown"])
+    assert all("T" in row["day"] for row in trend["breakdown"])
+
+
 def test_alert_status_can_be_acknowledged_and_resolved():
     engine = _engine()
     with engine.begin() as connection:

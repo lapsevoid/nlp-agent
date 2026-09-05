@@ -59,11 +59,84 @@ class ObservabilityService:
             raise AccessDeniedError(trace_id)
         return detail
 
+    async def trace_groups(
+        self,
+        principal: AuthenticatedPrincipal,
+        *,
+        days: int = 30,
+        limit: int = 24,
+        offset: int = 0,
+        query: str | None = None,
+        focus: str = "all",
+    ) -> dict[str, Any]:
+        """Return problem-oriented chain summaries for all monitor users."""
+        self._require_admin(principal)
+        return await asyncio.to_thread(
+            self.runtime.repository.trace_groups,
+            days=days,
+            limit=limit,
+            offset=offset,
+            query=query,
+            focus=focus,
+        )
+
+    async def trace_group(
+        self, principal: AuthenticatedPrincipal, chain_id: str
+    ) -> dict[str, Any] | None:
+        self._require_admin(principal)
+        return await asyncio.to_thread(
+            self.runtime.repository.trace_group_detail, chain_id
+        )
+
     async def usage(
         self, principal: AuthenticatedPrincipal, days: int = 30
     ) -> list[dict[str, Any]]:
         self._require_admin(principal)
         return await asyncio.to_thread(self.runtime.repository.usage, days)
+
+    async def system_usage(
+        self,
+        principal: AuthenticatedPrincipal,
+        usage_reader: Any,
+        days: int = 30,
+    ) -> dict[str, Any]:
+        """Read the canonical all-user token/credit ledger for the monitor."""
+        self._require_admin(principal)
+        return await asyncio.to_thread(usage_reader.system_snapshot, days=days)
+
+    async def system_usage_users(
+        self,
+        principal: AuthenticatedPrincipal,
+        usage_reader: Any,
+        *,
+        days: int = 30,
+        limit: int = 12,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """Read one bounded page from the administrator's all-user ledger."""
+        self._require_admin(principal)
+        return await asyncio.to_thread(
+            usage_reader.system_user_page,
+            days=days,
+            limit=limit,
+            offset=offset,
+        )
+
+    async def system_usage_trend(
+        self,
+        principal: AuthenticatedPrincipal,
+        usage_reader: Any,
+        *,
+        window_minutes: int = 120,
+        bucket_minutes: int = 5,
+    ) -> dict[str, Any]:
+        """Read the bounded five-minute all-user usage trend."""
+        self._require_admin(principal)
+        return await asyncio.to_thread(
+            usage_reader.system_trend,
+            window_minutes=window_minutes,
+            bucket_minutes=bucket_minutes,
+        )
 
     async def sessions(
         self, principal: AuthenticatedPrincipal, days: int = 30, limit: int = 100
