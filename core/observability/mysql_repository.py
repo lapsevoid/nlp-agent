@@ -230,6 +230,6 @@ class MySQLTelemetryRepository:
     def __getattr__(self, name: str) -> Any:
         # Query endpoints remain safe during the migration window; new telemetry is
         # durable in MySQL even when no historical rows exist.
-        if name in {"overview", "list_traces", "trace_detail", "usage", "sessions", "recent_events", "errors"}:
+        if name in {"overview", "list_traces", "trace_detail", "usage", "recent_events", "errors"}:
             return lambda *args, **kwargs: [] if name != "overview" else {"period_days": kwargs.get("days", 30), "requests": 0, "successes": 0, "errors": 0, "error_rate": 0.0, "latency_ms": {"p50": None, "p90": None, "p95": None, "p99": None}, "ttft_ms": {"p50": None, "p90": None, "p95": None, "p99": None}, "tokens": {}}
         raise AttributeError(name)
