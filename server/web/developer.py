@@ -109,6 +109,10 @@ async def developer_snapshot(
                 "writable": path.exists() and path.is_dir(),
             }
         )
+    from server.tools.academic.service import academic_metrics_snapshot
+
+    tools = _tool_snapshot()
+    tools["academic_metrics"] = await academic_metrics_snapshot()
     return {
         "runtime": health.model_dump(mode="json"),
         "features": {
@@ -130,7 +134,7 @@ async def developer_snapshot(
             ),
             "providers": providers,
         },
-        "tools": _tool_snapshot(),
+        "tools": tools,
         "skills": _skills_snapshot(),
         "agents": {
             "runtime": _safe(raw.get("agent_runtime", {})),

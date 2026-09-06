@@ -3,7 +3,7 @@ import { StrictMode } from "react";
 import userEvent from "@testing-library/user-event";
 import { vi } from "vitest";
 
-import { MarkdownContent, stripInternalChatMetadata } from "./MarkdownContent";
+import { MarkdownContent, normalizeTrustedAcademicLink, stripInternalChatMetadata } from "./MarkdownContent";
 
 describe("MarkdownContent LaTeX delimiters", () => {
   it("renders backslash-delimited inline and display formulas with KaTeX", () => {
@@ -72,6 +72,62 @@ describe("MarkdownContent LaTeX delimiters", () => {
     expect(screen.getByText("反斜杠绕过")).not.toHaveAttribute("href");
     expect(screen.getByRole("link", { name: "课程目录" })).toHaveAttribute("href", "/teacher");
     expect(screen.getByRole("link", { name: "本节" })).toHaveAttribute("href", "#attention");
+  });
+
+  it("renders trusted academic links with target blank and rel while sanitizing untrusted external links", () => {
+    render(
+      <MarkdownContent>{String.raw`
+[arXiv 论文](https://arxiv.org/abs/1706.03762)
+[DOI 链接](https://doi.org/10.1145/3442188.3445922)
+[ACL 论文](https://aclanthology.org/2020.acl-main.1/)
+[Semantic Scholar](https://www.semanticscholar.org/paper/1706.03762)
+[Google Scholar](https://scholar.google.com/scholar?q=Attention+Is+All+You+Need)
+[明文 HTTP](http://arxiv.org/abs/1706.03762)
+[子域名伪装](https://arxiv.org.evil.example/phish)
+[参数诱导](https://evil.example/?next=arxiv.org)
+[包含凭据](https://user:pass@arxiv.org/abs/1706.03762)
+[非默认端口](https://arxiv.org:8443/abs/1706.03762)
+      `}</MarkdownContent>,
+    );
+
+    const arxivLink = screen.getByRole("link", { name: "arXiv 论文" });
+    expect(arxivLink).toHaveAttribute("href", "https://arxiv.org/abs/1706.03762");
+    expect(arxivLink).toHaveAttribute("target", "_blank");
+    expect(arxivLink).toHaveAttribute("rel", "noopener noreferrer");
+
+    const doiLink = screen.getByRole("link", { name: "DOI 链接" });
+    expect(doiLink).toHaveAttribute("href", "https://doi.org/10.1145/3442188.3445922");
+    expect(doiLink).toHaveAttribute("target", "_blank");
+    expect(doiLink).toHaveAttribute("rel", "noopener noreferrer");
+
+    const aclLink = screen.getByRole("link", { name: "ACL 论文" });
+    expect(aclLink).toHaveAttribute("href", "https://aclanthology.org/2020.acl-main.1/");
+    expect(aclLink).toHaveAttribute("target", "_blank");
+    expect(aclLink).toHaveAttribute("rel", "noopener noreferrer");
+
+    const s2Link = screen.getByRole("link", { name: "Semantic Scholar" });
+    expect(s2Link).toHaveAttribute("href", "https://www.semanticscholar.org/paper/1706.03762?utm_source=api");
+    expect(s2Link).toHaveAttribute("target", "_blank");
+    expect(s2Link).toHaveAttribute("rel", "noopener noreferrer");
+
+    const scholarLink = screen.getByRole("link", { name: "Google Scholar" });
+    expect(scholarLink).toHaveAttribute("href", "https://scholar.google.com/scholar?q=Attention+Is+All+You+Need");
+    expect(scholarLink).toHaveAttribute("target", "_blank");
+    expect(scholarLink).toHaveAttribute("rel", "noopener noreferrer");
+
+    // Untrusted/unsafe links should NOT have href attribute
+    expect(screen.getByText("明文 HTTP")).not.toHaveAttribute("href");
+    expect(screen.getByText("子域名伪装")).not.toHaveAttribute("href");
+    expect(screen.getByText("参数诱导")).not.toHaveAttribute("href");
+    expect(screen.getByText("包含凭据")).not.toHaveAttribute("href");
+    expect(screen.getByText("非默认端口")).not.toHaveAttribute("href");
+  });
+
+  it("normalizes Semantic Scholar attribution parameters", () => {
+    expect(normalizeTrustedAcademicLink("https://www.semanticscholar.org/paper/id?utm_source=other&x=1"))
+      .toBe("https://www.semanticscholar.org/paper/id?utm_source=api&x=1");
+    expect(normalizeTrustedAcademicLink("http://www.semanticscholar.org/paper/id")).toBeNull();
+    expect(normalizeTrustedAcademicLink("https://www.semanticscholar.org.evil.example/paper/id")).toBeNull();
   });
 
   it("renders Markdown image alt text as a figure caption", () => {

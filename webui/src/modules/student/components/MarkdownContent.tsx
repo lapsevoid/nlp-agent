@@ -466,6 +466,37 @@ function isSameOriginMarkdownLink(href: string | undefined): href is string {
   }
 }
 
+export const TRUSTED_ACADEMIC_HOSTS = new Set([
+  "arxiv.org",
+  "doi.org",
+  "aclanthology.org",
+  "www.semanticscholar.org",
+  "scholar.google.com",
+]);
+
+export function normalizeTrustedAcademicLink(href: string | undefined): string | null {
+  if (!href) return null;
+  try {
+    const url = new URL(href);
+    if (url.protocol !== "https:"
+      || url.username
+      || url.password
+      || url.port
+      || !TRUSTED_ACADEMIC_HOSTS.has(url.hostname.toLowerCase())) return null;
+    if (url.hostname.toLowerCase() === "www.semanticscholar.org") {
+      url.searchParams.set("utm_source", "api");
+      return url.toString();
+    }
+    return href;
+  } catch {
+    return null;
+  }
+}
+
+export function isTrustedAcademicLink(href: string | undefined): href is string {
+  return normalizeTrustedAcademicLink(href) !== null;
+}
+
 function isSafeMarkdownImage(src: string | undefined, allowDataImages = false): src is string {
   if (!src || src.startsWith("#")) return false;
   if (/^data:/i.test(src)) return allowDataImages && /^data:image\/(?:png|jpe?g|gif|webp);base64,/i.test(src);
@@ -542,9 +573,16 @@ export function MarkdownContent({ children, streaming = false, streamRenderInter
             if (!match) return <code className={className} {...props}>{value}</code>;
             return <LessonCodeBlock language={match[1]} code={content} actions={codeActions} streaming={streaming} />;
           },
-          a: ({ children: value, href, ...props }) => isSameOriginMarkdownLink(href)
-            ? <a {...props} href={href}>{value}</a>
-            : <span className="external-link-removed">{value}</span>,
+          a: ({ children: value, href, ...props }) => {
+            if (isSameOriginMarkdownLink(href)) {
+              return <a {...props} href={href}>{value}</a>;
+            }
+            const academicHref = normalizeTrustedAcademicLink(href);
+            if (academicHref) {
+              return <a {...props} href={academicHref} target="_blank" rel="noopener noreferrer">{value}</a>;
+            }
+            return <span className="external-link-removed">{value}</span>;
+          },
           img: ({ node, src, alt, title, ...props }) => {
             void node;
             const imageWidth = readMarkdownImageWidth(title);

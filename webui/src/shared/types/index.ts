@@ -35,6 +35,7 @@ export interface DeveloperSnapshot {
     policies: Record<string, unknown>;
     mcp_servers: Record<string, Record<string, unknown>>;
     custom: Record<string, unknown>;
+    academic_metrics?: Record<string, unknown>;
   };
   skills: Array<{ name: string; path: string; source: string; description: string; allowed_tools: string[]; capabilities: string[]; available: boolean; missing_requirements: string[]; bytes: number; modified_at: number }>;
   agents: Record<string, unknown>;
