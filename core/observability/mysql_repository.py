@@ -185,61 +185,6 @@ class MySQLTelemetryRepository:
 
         return [metrics[key] for key in sorted(metrics)]
 
-    def sessions(
-        self,
-        days: int = 30,
-        limit: int = 100,
-        *,
-        user_id: str | None = None,
-        workspace_ids: frozenset[str] | None = None,
-    ) -> list[dict[str, Any]]:
-        since = datetime.now(timezone.utc) - timedelta(days=max(1, days))
-        rows = [
-            row
-            for row in self._rows("trace", since=since)
-            if row.get("completed_at")
-            and (not user_id or row.get("user_id") == user_id)
-            and (
-                not workspace_ids
-                or "*" in workspace_ids
-                or row.get("workspace_id") in workspace_ids
-            )
-        ]
-        groups: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
-        for row in rows:
-            key = (
-                str(row.get("session_id") or "unknown"),
-                str(row.get("workspace_id") or "unknown"),
-                str(row.get("user_id") or "unknown"),
-                str(row.get("channel") or "unknown"),
-            )
-            groups.setdefault(key, []).append(row)
-        result = []
-        for (session_id, workspace_id, user_id, channel), session_rows in groups.items():
-            result.append(
-                {
-                    "session_id": session_id,
-                    "workspace_id": workspace_id,
-                    "user_id": user_id,
-                    "channel": channel,
-                    "turns": len(session_rows),
-                    "errors": sum(
-                        row.get("status") in {"error", "timeout"}
-                        for row in session_rows
-                    ),
-                    "avg_duration_ms": round(
-                        sum(int(row.get("duration_ms") or 0) for row in session_rows)
-                        / len(session_rows)
-                    ),
-                    "total_tokens": sum(int(row.get("total_tokens") or 0) for row in session_rows),
-                    "last_seen": max(
-                        str(row.get("completed_at") or row.get("started_at") or "")
-                        for row in session_rows
-                    ),
-                }
-            )
-        return sorted(result, key=lambda row: row["last_seen"], reverse=True)[:limit]
-
     def prune(self, trace_days: int = 30, event_days: int = 30) -> dict[str, int]:
         """Delete expired telemetry without touching the quota usage ledger."""
         now = datetime.now(timezone.utc).replace(tzinfo=None)

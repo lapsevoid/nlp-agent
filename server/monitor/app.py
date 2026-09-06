@@ -496,10 +496,6 @@ def create_monitor_app(
         authorization_service.require(identity, Permission.SYSTEM_RUNTIME_MONITOR)
         return await asyncio.to_thread(reader.shadow_comparison, days=days)
 
-    @app.get("/api/v1/observability/sessions", tags=["observability"])
-    async def sessions(identity: Principal, days: int = Query(30, ge=1, le=365), limit: int = Query(100, ge=1, le=500)):
-        return {"items": await service.sessions(identity, days, limit)}
-
     @app.get("/api/v1/observability/events", tags=["observability"])
     async def events(identity: Principal, limit: int = Query(200, ge=1, le=1000), level: str | None = None, trace_id: str | None = None):
         return {"items": await service.events(identity, limit=limit, level=level, trace_id=trace_id)}

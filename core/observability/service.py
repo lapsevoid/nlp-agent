@@ -138,17 +138,6 @@ class ObservabilityService:
             bucket_minutes=bucket_minutes,
         )
 
-    async def sessions(
-        self, principal: AuthenticatedPrincipal, days: int = 30, limit: int = 100
-    ) -> list[dict[str, Any]]:
-        return await asyncio.to_thread(
-            self.runtime.repository.sessions,
-            days,
-            limit,
-            user_id=None if principal.is_admin else principal.user_id,
-            workspace_ids=None if principal.is_admin else principal.workspace_ids,
-        )
-
     async def events(
         self,
         principal: AuthenticatedPrincipal,

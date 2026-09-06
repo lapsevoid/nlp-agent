@@ -35,7 +35,6 @@ export interface TraceGroupSummary {
 export interface TraceGroupPage { scope: "system"; items: TraceGroupSummary[]; total: number; offset: number; limit: number; has_more: boolean; period_days?: number; }
 export interface TraceGroupDetail { chain: TraceGroupSummary; traces: Trace[]; spans: Array<Span & { trace_id?: string }>; events: TelemetryEvent[]; }
 export interface UsageRow { day: string; component: string; name: string; requests: number; successes: number; errors: number; duration_sum_ms: number; input_tokens: number; output_tokens: number; cached_tokens: number; cache_miss_tokens: number; reasoning_tokens: number; total_tokens: number; }
-export interface SessionRow { session_id: string; workspace_id: string; user_id: string; channel: string; turns: number; errors: number; avg_duration_ms: number; total_tokens: number; last_seen: string; }
 export interface ErrorRow { error_kind: string; kind: string; name: string; count: number; last_seen: string; sample_trace_id: string; }
 export interface SystemUsageDimension { user_id?: string; workspace_id?: string; provider?: string; purpose?: string; provider_model?: string; events: number; priced_events: number; unpriced_events: number; credits_complete: boolean; credit_status: string; credits_micro: number | null; priced_credits_micro: number; tokens: Record<string, number>; }
 export interface SystemUsageBreakdown { day: string; period_start?: string; period_end?: string; granularity?: string; purpose?: string; provider?: string; provider_model?: string; events?: number; priced_events?: number; unpriced_events?: number; priced_credits_micro?: number; total_tokens?: number; tokens?: Record<string, number>; }
@@ -103,7 +102,6 @@ export const monitorApi = {
   systemUsage: (days: number, includeUsers = false) => request<SystemUsageSnapshot>(`/observability/usage/system?days=${days}&include_users=${includeUsers}`),
   systemUsageUsers: (days: number, limit = 12, offset = 0) => request<SystemUsageUserPage>(`/observability/usage/system/users?days=${days}&limit=${limit}&offset=${offset}`),
   systemUsageTrend: (windowMinutes = 120, bucketMinutes = 5) => request<SystemUsageSnapshot>(`/observability/usage/system/trend?window_minutes=${windowMinutes}&bucket_minutes=${bucketMinutes}`),
-  sessions: (days: number) => request<{ items: SessionRow[] }>(`/observability/sessions?days=${days}&limit=200`),
   events: (limit = 300) => request<{ items: TelemetryEvent[] }>(`/observability/events?limit=${limit}`),
   errors: (days: number) => request<{ items: ErrorRow[] }>(`/observability/errors?days=${days}&limit=200`),
   storage: () => request<Record<string, unknown>>("/observability/storage"),

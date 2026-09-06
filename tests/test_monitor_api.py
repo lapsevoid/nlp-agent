@@ -93,6 +93,7 @@ def test_monitor_is_admin_only_and_queries_observability(tmp_path):
         assert client.get("/api/v1/observability/overview").status_code == 401
         login = client.post("/api/v1/auth/session", headers={"Origin": "http://testserver"})
         assert login.status_code == 201
+        assert client.get("/api/v1/observability/sessions").status_code == 404
         overview = client.get("/api/v1/observability/overview").json()
         assert overview["requests"] == 1
         assert overview["tokens"]["total_tokens"] == 14

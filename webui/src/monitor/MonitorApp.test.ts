@@ -14,6 +14,8 @@ const event = (eventId: string, timestamp: string, traceId?: string): TelemetryE
 describe("MonitorApp helpers", () => {
   it("maps dedicated monitor paths to pages and back", () => {
     expect(monitorPageFromLocation({ pathname: "/monitor/usage", search: "" })).toBe("usage");
+    expect(monitorPageFromLocation({ pathname: "/monitor/sessions", search: "" })).toBe("overview");
+    expect(monitorPageFromLocation({ pathname: "/monitor", search: "?page=sessions" })).toBe("overview");
     expect(monitorPathForPage("components", { pathname: "/monitor", search: "" })).toBe("/monitor/components");
   });
 

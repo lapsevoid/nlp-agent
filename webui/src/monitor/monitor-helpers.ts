@@ -2,13 +2,12 @@ import type { TelemetryEvent, Trace } from "./api";
 
 export type BrowserLocation = Pick<Location, "protocol" | "hostname" | "port">;
 export type MonitorPathLocation = Pick<Location, "pathname" | "search">;
-export type MonitorPage = "overview" | "usage" | "traces" | "sessions" | "components" | "errors" | "events" | "storage" | "sandbox" | "audit";
+export type MonitorPage = "overview" | "usage" | "traces" | "components" | "errors" | "events" | "storage" | "sandbox" | "audit";
 
 const MONITOR_ROUTE_SLUGS: Record<MonitorPage, string> = {
   overview: "",
   usage: "usage",
   traces: "traces",
-  sessions: "sessions",
   components: "components",
   errors: "errors",
   events: "events",

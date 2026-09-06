@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Activity, AlertTriangle, CheckCircle2, Database, HardDrive, Layers3, LineChart, RefreshCw, Server, ShieldAlert, Users, Zap } from "lucide-react";
 import { monitorApi } from "./api";
-import type { ErrorRow, Overview, OverviewComponent, OverviewModel, SessionRow, SystemUsageBreakdown, SystemUsageCatalog, SystemUsageDimension, SystemUsageSnapshot, UsageRow } from "./api";
+import type { ErrorRow, Overview, OverviewComponent, OverviewModel, SystemUsageBreakdown, SystemUsageCatalog, SystemUsageDimension, SystemUsageSnapshot, UsageRow } from "./api";
 
 function fmt(value: number | null | undefined, suffix = "") {
   return value == null ? "—" : `${value.toLocaleString()}${suffix}`;
@@ -309,10 +309,6 @@ export function MonitorComponentsPage({ data }: { data: Overview }) {
   const spans = data.component_spans ?? [];
   const models = data.models ?? [];
   return <div className="mon-page mon-components-page"><PageIntro eyebrow="DEPENDENCIES · MODEL / WORKER / TOOL" title="组件与模型" description="把组件调用、失败、重试和模型 Provider 分开看，定位是哪一层开始退化。" meta={`${fmt(spans.length)} 个组件 · ${fmt(models.length)} 个模型`} /><div className="mon-components-grid"><MetricTable title="组件 Span" description="按 Span attempt 统计，内部重试不会隐藏。" columns={["组件", "调用", "失败率", "重试", "平均耗时", "Token"]} rows={spans} /><MetricTable title="模型与 Provider" description="比较 Provider、模型和配置档位的健康度。" columns={["模型", "调用", "失败率", "重试", "平均耗时", "Token"]} rows={models} /></div><section className="mon-panel mon-fixed-panel"><header><div><h2>Span 类型分布</h2><p>快速确认流量是否异常集中在某一类内部工作。</p></div></header><div className="mon-component-chip-grid">{(data.span_kinds ?? []).map((item) => <div key={item.name}><span>{item.name}</span><strong>{fmt(item.requests)}</strong><small>{fmt(item.total_tokens)} tokens · {(item.error_rate * 100).toFixed(1)}% errors</small></div>)}{!data.span_kinds?.length && <Empty text="暂无 Span 类型" />}</div></section></div>;
-}
-
-export function MonitorSessionsPage({ rows }: { rows: SessionRow[] }) {
-  return <div className="mon-page mon-table-page"><PageIntro eyebrow="USERS · WORKSPACES · SESSIONS" title="用户会话" description="按全用户范围查看活跃 Session、错误、响应和 Token，不再混在系统总览里。" meta={`${fmt(rows.length)} 个 Session`} /><section className="mon-panel mon-route-table-panel"><header><div><h2>活跃 Session</h2><p>最近 {rows.length ? "周期" : "暂无数据"} 的会话汇总。</p></div><Users className="mon-panel-health-icon" /></header><div className="mon-table mon-table-scroll"><table><thead><tr><th>Session</th><th>用户 / Workspace</th><th>Turn</th><th>错误</th><th>平均响应</th><th>Token</th><th>最后活跃</th></tr></thead><tbody>{rows.map((row) => <tr key={row.session_id}><td><code>{row.session_id}</code></td><td>{row.user_id}<small>{row.workspace_id} · {row.channel}</small></td><td>{row.turns}</td><td>{row.errors}</td><td>{fmt(row.avg_duration_ms, " ms")}</td><td>{fmt(row.total_tokens)}</td><td>{time(row.last_seen)}</td></tr>)}</tbody></table>{!rows.length && <Empty text="没有 Session 数据" />}</div></section></div>;
 }
 
 export function MonitorErrorsPage({ rows, onOpen }: { rows: ErrorRow[]; onOpen?: (traceId: string) => void }) {

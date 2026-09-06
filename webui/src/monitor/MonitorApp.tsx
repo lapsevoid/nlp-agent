@@ -1,12 +1,12 @@
 import { Activity, AlertTriangle, Bot, Clock3, Database, Gauge, HardDrive, Layers3, MoreHorizontal, Radio, RefreshCw, Search, Server, ShieldCheck, TerminalSquare, Timer, Trash2, X, Zap } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ConfirmDialog } from "@/shared/ui/ConfirmDialog";
-import { authenticate, monitorApi, type ErrorRow, type Overview, type SessionRow, type SystemUsageDimension, type SystemUsageSnapshot, type TelemetryEvent, type Trace, type TraceDetail, type UsageRow } from "./api";
+import { authenticate, monitorApi, type ErrorRow, type Overview, type SystemUsageDimension, type SystemUsageSnapshot, type TelemetryEvent, type Trace, type TraceDetail, type UsageRow } from "./api";
 import { controlPlaneUrl, groupEventsByTrace, monitorPageFromLocation, monitorPathForPage, resetMonitorData, telemetryFrame, type MonitorPage, type TraceChain } from "./monitor-helpers";
 import { mergeSandboxCapacitySamples, mergeSandboxLogs, SANDBOX_REFRESH_INTERVAL_MS, SandboxMonitorPage, type SandboxExecution, type SandboxLogEntry, type SandboxOverview, type SandboxRuntime } from "./SandboxMonitorPage";
 import { AuthorizationAuditPage } from "./AuthorizationAuditPage";
 import { MonitorLoginPage } from "./MonitorLoginPage";
-import { MonitorComponentsPage, MonitorErrorsPage, MonitorOverviewPage, MonitorSessionsPage, MonitorStoragePage, MonitorUsagePage } from "./MonitorDashboardPages";
+import { MonitorComponentsPage, MonitorErrorsPage, MonitorOverviewPage, MonitorStoragePage, MonitorUsagePage } from "./MonitorDashboardPages";
 import { TraceExplorerPage } from "./TraceExplorerPage";
 
 type Page = MonitorPage;
@@ -14,7 +14,6 @@ const NAV: Array<{ page: Page; label: string; icon: typeof Gauge }> = [
   { page: "overview", label: "系统总览", icon: Gauge },
   { page: "usage", label: "用量中心", icon: Database },
   { page: "traces", label: "运行链路", icon: Activity },
-  { page: "sessions", label: "用户会话", icon: Bot },
   { page: "components", label: "组件与模型", icon: Layers3 },
   { page: "errors", label: "错误分析", icon: AlertTriangle },
   { page: "events", label: "实时事件", icon: Radio },
@@ -24,7 +23,7 @@ const NAV: Array<{ page: Page; label: string; icon: typeof Gauge }> = [
 ];
 const NAV_GROUPS: Array<{ label: string; items: typeof NAV }> = [
   { label: "概览", items: NAV.filter((item) => item.page === "overview") },
-  { label: "请求洞察", items: NAV.filter((item) => ["usage", "traces", "sessions", "components", "errors"].includes(item.page)) },
+  { label: "请求洞察", items: NAV.filter((item) => ["usage", "traces", "components", "errors"].includes(item.page)) },
   { label: "运行环境", items: NAV.filter((item) => ["events", "sandbox"].includes(item.page)) },
   { label: "治理", items: NAV.filter((item) => ["audit", "storage"].includes(item.page)) },
 ];
@@ -147,7 +146,6 @@ export function MonitorApp() {
   const [traces, setTraces] = useState<Trace[]>([]);
   const [traceContextLoaded, setTraceContextLoaded] = useState(false);
   const [usage, setUsage] = useState<UsageRow[]>([]);
-  const [sessions, setSessions] = useState<SessionRow[]>([]);
   const [errors, setErrors] = useState<ErrorRow[]>([]);
   const [events, setEvents] = useState<TelemetryEvent[]>([]);
   const [storage, setStorage] = useState<Record<string, unknown>>({});
@@ -166,7 +164,7 @@ export function MonitorApp() {
   const [resetOpen, setResetOpen] = useState(false);
   const [dangerOpen, setDangerOpen] = useState(false);
   const [resetting, setResetting] = useState(false);
-  const load = useCallback(async () => { setLoading(true); setError(""); try { await authenticate(); setAuthState("authenticated"); const [o, u, s, e, ev, st] = await Promise.all([monitorApi.overview(days), monitorApi.usage(days), monitorApi.sessions(days), monitorApi.errors(days), monitorApi.events(), monitorApi.storage()]); const su = await monitorApi.systemUsage(days).catch((reason) => { if (authStatus(reason) === 401 || authStatus(reason) === 403) throw reason; return null; }); setOverview(o); setSystemUsage(su); setUsage(u.items); setSessions(s.items); setErrors(e.items); setEvents(ev.items); setStorage(st); } catch (reason) { if (authStatus(reason) === 401 || authStatus(reason) === 403) { setAuthState("login"); setAuthMessageText(authMessage(reason)); } else { setAuthState("authenticated"); setError(reason instanceof Error ? reason.message : String(reason)); } } finally { setLoading(false); } }, [days]);
+  const load = useCallback(async () => { setLoading(true); setError(""); try { await authenticate(); setAuthState("authenticated"); const [o, u, e, ev, st] = await Promise.all([monitorApi.overview(days), monitorApi.usage(days), monitorApi.errors(days), monitorApi.events(), monitorApi.storage()]); const su = await monitorApi.systemUsage(days).catch((reason) => { if (authStatus(reason) === 401 || authStatus(reason) === 403) throw reason; return null; }); setOverview(o); setSystemUsage(su); setUsage(u.items); setErrors(e.items); setEvents(ev.items); setStorage(st); } catch (reason) { if (authStatus(reason) === 401 || authStatus(reason) === 403) { setAuthState("login"); setAuthMessageText(authMessage(reason)); } else { setAuthState("authenticated"); setError(reason instanceof Error ? reason.message : String(reason)); } } finally { setLoading(false); } }, [days]);
   const loadTraceContext = useCallback(async () => {
     try {
       const result = await monitorApi.traces();
@@ -253,11 +251,10 @@ export function MonitorApp() {
     if (page === "events") return <RunEventStream events={events} traces={traces} live={live} onOpen={(trace) => void openTrace(trace)} />;
     if (page === "usage") return <MonitorUsagePage data={overview} usage={usage} systemUsage={systemUsage} />;
     if (page === "components") return <MonitorComponentsPage data={overview} />;
-    if (page === "sessions") return <MonitorSessionsPage rows={sessions} />;
     if (page === "errors") return <MonitorErrorsPage rows={errors} onOpen={(traceId) => void openTraceById(traceId)} />;
     if (page === "storage") return <MonitorStoragePage storage={storage} retentionDays={days} onPrune={async () => { setStorage(await monitorApi.prune(days, days)); }} />;
     return <MonitorOverviewPage data={overview} usage={usage} systemUsage={systemUsage} />;
-  }, [days, errors, events, live, loadSandbox, openTrace, openTraceById, overview, page, sandboxError, sandboxExecutions, sandboxLive, sandboxLoading, sandboxLogLoading, sandboxLogs, sandboxOverview, sandboxRuntimes, sessions, storage, systemUsage, traces, usage]);
+  }, [days, errors, events, live, loadSandbox, openTrace, openTraceById, overview, page, sandboxError, sandboxExecutions, sandboxLive, sandboxLoading, sandboxLogLoading, sandboxLogs, sandboxOverview, sandboxRuntimes, storage, systemUsage, traces, usage]);
   if (authState === "checking") return <main className="monitor-auth-shell"><div className="monitor-auth-loading"><RefreshCw className="spin" /><span>正在验证监控权限…</span></div></main>;
   if (authState === "login") return <MonitorLoginPage message={authMessageText} onLogin={login} />;
   return <div className="monitor-shell"><aside className="monitor-nav"><div className="monitor-brand"><Server /><span><strong>NLP Monitor</strong><small>OBSERVABILITY · 8766</small></span></div><nav className="monitor-nav-groups">{NAV_GROUPS.map((group) => <div className="monitor-nav-group" key={group.label}><span className="monitor-nav-group-label">{group.label}</span>{group.items.map(({ page: item, label, icon: Icon }) => <button className={page === item ? "active" : ""} aria-current={page === item ? "page" : undefined} type="button" key={item} onClick={() => navigate(item)}><Icon size={17} />{label}</button>)}</div>)}</nav><a href={controlPlaneUrl()}>返回控制面</a></aside><main><a className="monitor-skip-link" href="#monitor-content">跳到主要内容</a><header className="monitor-top"><div><h1>{NAV.find((item) => item.page === page)?.label}</h1><span><i className={`mon-live-dot ${(live || sandboxLive) ? "on" : ""}`} />{(live || sandboxLive) ? "实时" : "离线"}</span></div><label>统计周期<select value={days} onChange={(event) => setDays(Number(event.target.value))}><option value={1}>24 小时</option><option value={7}>7 天</option><option value={30}>30 天</option><option value={90}>90 天</option></select></label><div className="mon-danger-menu"><button className="mon-danger-trigger" type="button" aria-label="更多监控操作" aria-expanded={dangerOpen} onClick={() => setDangerOpen((open) => !open)}><MoreHorizontal size={17} /></button>{dangerOpen ? <div className="mon-danger-menu-popover"><span>危险操作</span><button className="mon-reset-button" type="button" onClick={() => { setDangerOpen(false); setResetOpen(true); }} disabled={loading || resetting}><Trash2 />重置全部数据</button></div> : null}</div><button type="button" onClick={() => page === "sandbox" ? void loadSandbox(false) : void load()} disabled={loading || resetting || sandboxLoading}><RefreshCw className={(loading || sandboxLoading) ? "spin" : ""} />刷新</button></header><div className="monitor-content" id="monitor-content">{error && page !== "sandbox" ? <div className="mon-fatal"><AlertTriangle /><strong>监控数据加载失败</strong><p>{error}</p></div> : loading && !overview && page !== "sandbox" ? <div className="mon-fatal"><RefreshCw className="spin" /><strong>正在连接 Monitor</strong></div> : pageContent}</div></main>{chain && <ChainDrawer chain={chain} onClose={() => setChain(null)} onOpenTrace={(trace) => void openTrace(trace)} />}{detail && <TraceDrawer detail={detail} onClose={() => setDetail(null)} />}<ConfirmDialog open={resetOpen} title="重置全部本地运行数据？" description="将永久清除所有学生会话、消息、练习记录、学习记忆、Trace、日志、调试事件和工具审计。教师主题、知识点、蓝图、模型与用户设置会保留。请先停止正在运行的对话。" confirmLabel={resetting ? "正在重置…" : "确认重置全部数据"} cancelLabel="取消" onClose={() => { if (!resetting) setResetOpen(false); }} onConfirm={() => void resetAll()} /></div>;

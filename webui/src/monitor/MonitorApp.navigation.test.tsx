@@ -11,7 +11,7 @@ const { monitorApi } = vi.hoisted(() => ({
     systemUsage: vi.fn().mockResolvedValue({ scope: "system", events: 0, priced_events: 0, unpriced_events: 0, credits_complete: true, credit_status: "complete", credits_micro: 0, priced_credits_micro: 0, tokens: {}, breakdown: [], users: [], workspaces: [], providers: [], purposes: [], models: [] }),
     systemUsageTrend: vi.fn().mockResolvedValue({ scope: "system", period_days: 1, from: "2026-09-04T08:00:00Z", to: "2026-09-04T10:00:00Z", granularity: "five_minute", events: 0, priced_events: 0, unpriced_events: 0, credits_complete: true, credit_status: "complete", credits_micro: 0, priced_credits_micro: 0, tokens: {}, breakdown: [], users: [], workspaces: [], providers: [], purposes: [], models: [] }),
     systemUsageUsers: vi.fn().mockResolvedValue({ items: [], total: 0, offset: 0, limit: 12, has_more: false }),
-    sessions: vi.fn().mockResolvedValue({ items: [] }), errors: vi.fn().mockResolvedValue({ items: [] }),
+    errors: vi.fn().mockResolvedValue({ items: [] }),
     events: vi.fn().mockResolvedValue({ items: [] }), storage: vi.fn().mockResolvedValue({}),
     authorizationAudit: vi.fn().mockResolvedValue({ items: [], total: 0, offset: 0, limit: 50, has_more: false }),
     authorizationAuditStats: vi.fn().mockResolvedValue({ period_days: 30, since: "2026-08-01T00:00:00", total: 0, by_decision: {}, top_reasons: [] }),
@@ -58,6 +58,16 @@ describe("MonitorApp navigation", () => {
 
     expect(location.pathname).toBe("/monitor/traces");
     expect(location.search).toBe("");
+  });
+
+  it("does not expose a standalone user-session browser or load its metadata", async () => {
+    history.replaceState({}, "", "/monitor");
+
+    render(<MonitorApp />);
+
+    expect(await screen.findByRole("heading", { name: "系统总览", level: 1 })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "用户会话" })).not.toBeInTheDocument();
+    expect(monitorApi).not.toHaveProperty("sessions");
   });
 
   it("shows paginated problem-oriented trace groups and loads a chain detail on demand", async () => {

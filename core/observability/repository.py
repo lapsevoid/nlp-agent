@@ -286,30 +286,6 @@ class TelemetryRepository:
             "SELECT * FROM daily_metrics WHERE day>=? ORDER BY day,component,name", (since,)
         )
 
-    def sessions(self, days: int = 30, limit: int = 100, *,
-                 user_id: str | None = None,
-                 workspace_ids: frozenset[str] | None = None) -> list[dict[str, Any]]:
-        since = (datetime.now(timezone.utc) - timedelta(days=max(1, days))).isoformat()
-        clauses = ["started_at>=?", "completed_at IS NOT NULL"]
-        args: list[Any] = [since]
-        if user_id:
-            clauses.append("user_id=?"); args.append(user_id)
-        if workspace_ids and "*" not in workspace_ids:
-            marks = ",".join("?" for _ in workspace_ids)
-            clauses.append(f"workspace_id IN ({marks})")
-            args.extend(sorted(workspace_ids))
-        where = " AND ".join(clauses)
-        return self._rows(
-            f"""SELECT session_id,workspace_id,user_id,channel,COUNT(*) turns,
-                      SUM(CASE WHEN status IN ('error','timeout') THEN 1 ELSE 0 END) errors,
-                      CAST(AVG(duration_ms) AS INTEGER) avg_duration_ms,
-                      SUM(total_tokens) total_tokens,MAX(started_at) last_seen
-               FROM traces WHERE {where}
-               GROUP BY session_id,workspace_id,user_id,channel
-               ORDER BY last_seen DESC LIMIT ?""",
-            (*args, min(max(1, limit), 500)),
-        )
-
     def recent_events(self, *, limit: int = 200, level: str | None = None,
                       trace_id: str | None = None) -> list[dict[str, Any]]:
         clauses, args = [], []
