@@ -29,6 +29,8 @@ describe("MonitorApp navigation", () => {
   beforeEach(() => {
     authenticate.mockReset().mockResolvedValue({});
     monitorApi.login.mockReset().mockResolvedValue({ csrf_token: "test-csrf" });
+    monitorApi.createWsTicket.mockReset().mockResolvedValue({ ticket: "test-ticket", expires_in: 60 });
+    monitorApi.events.mockReset().mockResolvedValue({ items: [] });
     monitorApi.systemUsage.mockReset().mockResolvedValue({ scope: "system", events: 0, priced_events: 0, unpriced_events: 0, credits_complete: true, credit_status: "complete", credits_micro: 0, priced_credits_micro: 0, tokens: {}, breakdown: [], users: [], workspaces: [], providers: [], purposes: [], models: [] });
     monitorApi.systemUsageTrend.mockReset().mockResolvedValue({ scope: "system", period_days: 1, from: "2026-09-04T08:00:00Z", to: "2026-09-04T10:00:00Z", granularity: "five_minute", events: 0, priced_events: 0, unpriced_events: 0, credits_complete: true, credit_status: "complete", credits_micro: 0, priced_credits_micro: 0, tokens: {}, breakdown: [], users: [], workspaces: [], providers: [], purposes: [], models: [] });
     monitorApi.dependencies.mockReset().mockResolvedValue({ scope: "system", period_days: 30, from: "2026-09-04T08:00:00Z", to: "2026-09-04T10:00:00Z", summary: { requests: 0, component_calls: 0, errors: 0, component_errors: 0, error_rate: 0, active_users: 0, active_workspaces: 0, latency_ms: { p50: 0, p90: 0, p95: 0, p99: 0 }, ttft_ms: { p50: 0, p90: 0, p95: 0, p99: 0 }, total_tokens: 0 }, trend: [], components: [], providers: [], models: [], anomalies: [] });
@@ -137,6 +139,28 @@ describe("MonitorApp navigation", () => {
     render(<MonitorApp />);
 
     expect(await screen.findByRole("heading", { name: "运行链路", level: 1 })).toBeVisible();
+    expect(monitorApi.traces).not.toHaveBeenCalled();
+  });
+
+  it("loads live diagnostics only after entering the route and opens a scoped realtime connection", async () => {
+    history.replaceState({}, "", "/monitor");
+    monitorApi.events.mockResolvedValueOnce({ items: [{
+      event_id: "event-1", timestamp: "2026-09-06T10:00:00Z", level: "error", name: "provider.failed",
+      trace_id: "trace-1", session_id: "session-1", turn_id: "turn-1", payload: { provider: "openai", model: "gpt-5.4" },
+    }] });
+
+    render(<MonitorApp />);
+
+    await screen.findByRole("heading", { name: "系统总览", level: 1 });
+    expect(monitorApi.events).not.toHaveBeenCalled();
+    expect(monitorApi.createWsTicket).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "实时诊断" }));
+
+    expect(await screen.findByRole("heading", { name: "实时诊断", level: 1 })).toBeVisible();
+    expect(await screen.findByText("provider.failed")).toBeVisible();
+    expect(monitorApi.events).toHaveBeenCalledWith(100);
+    expect(monitorApi.createWsTicket).toHaveBeenCalledTimes(1);
     expect(monitorApi.traces).not.toHaveBeenCalled();
   });
 

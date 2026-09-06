@@ -149,6 +149,10 @@ def _build_observability(count: int = 96) -> tuple[list[TelemetryEnvelope], list
         event_specs = [("request.completed", "info" if status == SpanStatus.OK else "error")]
         if has_retry:
             event_specs.insert(0, ("request.retry", "warning"))
+        if index % 11 == 3:
+            event_specs.append(("request.slow", "warning"))
+        if index % 23 == 9:
+            event_specs.append(("provider.rate_limited", "error"))
         if index % 5 == 0:
             event_specs.append(("queue.backpressure", "warning"))
         for event_index, (name, level) in enumerate(event_specs):
@@ -186,6 +190,16 @@ def _build_observability(count: int = 96) -> tuple[list[TelemetryEnvelope], list
             "started_at": started, "occurred_at": started + timedelta(milliseconds=duration),
             "created_at": started + timedelta(milliseconds=duration), "archived_at": None, "archive_batch_id": None,
         })
+    for index in range(max(3, count // 24)):
+        timestamp = _utc(index, index * 11 + 3)
+        envelopes.append(TelemetryEnvelope(kind="event", payload=TelemetryEvent(
+            event_id=_id("system-event", index), timestamp=timestamp, level="warning",
+            name="telemetry.backpressure", worker_id=f"{PREFIX}worker-{index % 3}",
+            payload={
+                "demo_seed_id": MARKER, "component": "telemetry", "operation": "event_ingest",
+                "queue_size": 420 + index * 95, "queue_capacity": 5000,
+            },
+        )))
     return envelopes, usage_rows
 
 

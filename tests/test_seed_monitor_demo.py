@@ -15,6 +15,8 @@ def test_demo_seed_builds_dense_multi_user_observability_data():
     assert len(traces) == 96
     assert len(spans) == 96 * 3
     assert len(events) >= 96
+    assert any(event.payload.name == "request.slow" for event in events)
+    assert any(event.payload.name == "telemetry.backpressure" and event.payload.trace_id is None for event in events)
     assert len(usage_rows) == 96
     assert {row["user_id"] for row in usage_rows} == {
         "demo-user-alice",

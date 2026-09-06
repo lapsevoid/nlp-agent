@@ -17,6 +17,34 @@ const MONITOR_ROUTE_SLUGS: Record<MonitorPage, string> = {
 };
 const MONITOR_ROUTE_PAGES = new Map(Object.entries(MONITOR_ROUTE_SLUGS).map(([page, slug]) => [slug, page as MonitorPage]));
 
+const SAFE_EVENT_KEYS = [
+  "provider", "provider_model", "model", "component", "operation", "operation_name",
+  "attempt", "retry_count", "duration_ms", "latency_ms", "queue_size", "queue_capacity", "status", "error_kind",
+] as const;
+const SAFE_EVENT_LABELS: Record<string, string> = {
+  provider: "Provider", provider_model: "模型", model: "模型", component: "组件",
+  operation: "操作", operation_name: "操作", attempt: "尝试", retry_count: "重试",
+  duration_ms: "耗时", latency_ms: "延迟", queue_size: "队列", queue_capacity: "容量",
+  status: "状态", error_kind: "错误类型",
+};
+
+/** Returns an allow-listed event context; raw payloads never belong in monitor UI. */
+export function safeEventContext(event: TelemetryEvent): string[] {
+  const result: string[] = [];
+  if (event.worker_id) result.push(`Worker=${event.worker_id.slice(0, 12)}`);
+  for (const key of SAFE_EVENT_KEYS) {
+    const raw = event.payload[key];
+    const value = typeof raw === "string" && raw.length > 0 && raw.length <= 80
+      ? raw
+      : typeof raw === "number" || typeof raw === "boolean" ? String(raw) : null;
+    if (value == null) continue;
+    const label = SAFE_EVENT_LABELS[key] ?? key;
+    if (result.some((item) => item.startsWith(`${label}=`))) continue;
+    result.push(`${label}=${value}`);
+  }
+  return result.slice(0, 6);
+}
+
 // Keep navigation and telemetry helpers outside the React entry module so Fast Refresh sees a component-only boundary.
 export function monitorPageFromLocation(current: MonitorPathLocation = location): MonitorPage {
   const candidate = new URLSearchParams(current.search).get("page");
