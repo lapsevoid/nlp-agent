@@ -2,7 +2,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-from scripts.seed_monitor_demo import MARKER, _build_observability
+from datetime import datetime, timezone
+
+from scripts.seed_monitor_demo import MARKER, _build_observability, _build_sandbox_demo
 
 
 def test_demo_seed_builds_dense_multi_user_observability_data():
@@ -41,3 +43,31 @@ def test_demo_seed_script_supports_direct_project_root_invocation():
 
     assert result.returncode == 0
     assert "Seed synthetic monitoring data" in result.stdout
+
+
+def test_demo_seed_builds_bounded_sandbox_monitor_data_without_user_code():
+    users, workspace, environments, runtimes, executions, samples = _build_sandbox_demo(
+        count=24,
+        now=datetime(2026, 9, 6, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert len(users) == 4
+    assert workspace["slug"] == f"{MARKER}-workspace"
+    assert len(environments) == 4
+    assert len(runtimes) == 12
+    assert len(executions) == 24
+    assert len(samples) == 60
+    assert {row["state"] for row in runtimes} >= {
+        "ready_unbound",
+        "assigned",
+        "creating",
+        "claiming",
+        "draining",
+        "failed",
+    }
+    assert {row["status"] for row in executions} >= {"running", "completed", "failed", "timeout"}
+    assert all(row["external_runtime_id"].startswith(f"{MARKER}-runtime-") for row in runtimes)
+    assert all(row["request_id"].startswith(f"{MARKER}-sandbox-request-") for row in executions)
+    assert all(row["resource_summary_json"]["demo_seed_id"] == MARKER for row in executions)
+    assert all("code" not in row["resource_summary_json"] for row in executions)
+    assert {sample["demo_seed_id"] for sample in samples} == {MARKER}

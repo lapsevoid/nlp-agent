@@ -7,6 +7,8 @@ The script is deliberately scoped to localhost MySQL and to rows carrying the
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import sys
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -17,7 +19,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from sqlalchemy import create_engine, delete
+from sqlalchemy import create_engine, delete, select
 from sqlalchemy.dialects.mysql import insert
 
 from configs.settings import settings
@@ -30,12 +32,35 @@ from core.observability.models import (
     TokenUsage,
     TraceRecord,
 )
-from server.infrastructure.mysql.models import ObservabilityRecordModel
+from server.infrastructure.mysql.models import (
+    ObservabilityRecordModel,
+    SandboxArtifactModel,
+    SandboxEnvironmentModel,
+    SandboxExecutionModel,
+    SandboxLeaseModel,
+    SandboxRuntimeInstanceModel,
+    UserModel,
+    WorkspaceMemberModel,
+    WorkspaceModel,
+)
 from server.quota.models import UsageEventModel
 
 
 MARKER = "monitor-demo-v1"
 PREFIX = f"{MARKER}-"
+SANDBOX_ENVIRONMENT_PROFILE = f"{MARKER}:python-base"
+SANDBOX_WORKSPACE_SLUG = f"{MARKER}-workspace"
+SANDBOX_HISTORY_COUNT = 60
+SANDBOX_USERS = (
+    ("alice", "Alice"),
+    ("bob", "Bob"),
+    ("charlie", "Charlie"),
+    ("diana", "Diana"),
+)
+
+
+def _uuid(kind: str, index: int = 0) -> str:
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"nlp-agent:{MARKER}:{kind}:{index}"))
 
 
 def _id(kind: str, index: int) -> str:
@@ -203,6 +228,217 @@ def _build_observability(count: int = 96) -> tuple[list[TelemetryEnvelope], list
     return envelopes, usage_rows
 
 
+def _build_sandbox_demo(
+    count: int = 96,
+    *,
+    now: datetime | None = None,
+    trace_ids: list[str] | None = None,
+    span_ids: list[str] | None = None,
+) -> tuple[list[dict], dict, list[dict], list[dict], list[dict], list[dict]]:
+    """Build safe synthetic rows for the sandbox monitor.
+
+    The generated principals are disabled demo users.  Sandbox records carry a
+    stable marker in their IDs/metadata so ``--clear`` can remove only these
+    rows.  No source code, stdout, prompt, or model response is generated.
+    """
+    if count < 1:
+        raise ValueError("count must be at least 1")
+    sampled_at = (now or datetime.now(timezone.utc)).replace(microsecond=0)
+    user_rows = [
+        {
+            "id": _uuid("sandbox-user", index),
+            "username": f"{PREFIX}user-{slug}",
+            "password_hash": "!monitor-demo-disabled",
+            "display_name": f"监控模拟用户 {display_name}",
+            "status": "disabled",
+            "authorization_version": 1,
+            "registration_source": "monitor_demo",
+        }
+        for index, (slug, display_name) in enumerate(SANDBOX_USERS)
+    ]
+    workspace = {
+        "id": _uuid("sandbox-workspace"),
+        "slug": SANDBOX_WORKSPACE_SLUG,
+        "name": "监控模拟工作区",
+        "status": "active",
+    }
+    environment_rows = [
+        {
+            "id": _uuid("sandbox-environment", index),
+            "owner_user_id": user_rows[index]["id"],
+            "resource_profile_id": SANDBOX_ENVIRONMENT_PROFILE,
+            "profile_revision": 1,
+            "status": "ready",
+            "generation": 1,
+            "last_active_at": sampled_at - timedelta(seconds=index * 45),
+        }
+        for index in range(len(user_rows))
+    ]
+
+    runtime_states = (
+        "ready_unbound", "ready_unbound", "ready_unbound", "ready_unbound",
+        "assigned", "assigned", "creating", "creating", "claiming", "draining",
+        "failed", "failed",
+    )
+    runtime_rows: list[dict] = []
+    for index, state in enumerate(runtime_states):
+        runtime_id = _uuid("sandbox-runtime", index)
+        environment = environment_rows[index % len(environment_rows)]
+        runtime_rows.append(
+            {
+                "id": runtime_id,
+                "environment_id": environment["id"],
+                "node_id": f"{PREFIX}node-{index % 3}",
+                "runtime_kind": "docker",
+                "external_runtime_id": f"{PREFIX}runtime-{index:03d}",
+                "image_digest": f"sha256:{hashlib.sha256(f'{MARKER}:image:{index}'.encode()).hexdigest()}",
+                "resource_profile_id": "python-base",
+                "state": state,
+                "generation": 1,
+                "last_heartbeat_at": sampled_at - timedelta(seconds=index * 20)
+                if state != "failed"
+                else None,
+                "failure_reason": "synthetic_runtime_boot_failure" if state == "failed" else None,
+                "updated_at": sampled_at - timedelta(seconds=index * 20),
+            }
+        )
+        if state in {"assigned", "claiming"}:
+            environment["active_runtime_id"] = runtime_id
+
+    execution_rows: list[dict] = []
+    for index in range(count):
+        runtime = runtime_rows[index % len(runtime_rows)]
+        environment = environment_rows[index % len(environment_rows)]
+        owner_user_id = environment["owner_user_id"]
+        status = (
+            "running" if index == 0
+            else "timeout" if index % 17 == 8
+            else "failed" if index % 11 == 4
+            else "completed"
+        )
+        started_at = sampled_at - timedelta(seconds=15 * (index + 1))
+        duration_ms = 420 + (index % 9) * 115
+        completed_at = None if status == "running" else started_at + timedelta(milliseconds=duration_ms)
+        trace_id = trace_ids[index % len(trace_ids)] if trace_ids else _uuid("sandbox-trace", index)
+        span_id = span_ids[index % len(span_ids)] if span_ids else _uuid("sandbox-span", index)
+        execution_rows.append(
+            {
+                "id": _uuid("sandbox-execution", index),
+                "environment_id": environment["id"],
+                "runtime_instance_id": runtime["id"],
+                "owner_user_id": owner_user_id,
+                "workspace_id": workspace["id"],
+                "actor_type": "worker",
+                "request_id": f"{PREFIX}sandbox-request-{index:03d}",
+                "code_hash": hashlib.sha256(f"{MARKER}:code:{index}".encode()).hexdigest(),
+                "status": status,
+                "generation": 1,
+                "started_at": started_at,
+                "completed_at": completed_at,
+                "exit_reason": (
+                    "synthetic_execution_timeout" if status == "timeout"
+                    else "synthetic_dependency_error" if status == "failed"
+                    else None
+                ),
+                "resource_summary_json": {
+                    "demo_seed_id": MARKER,
+                    "duration_ms": duration_ms if completed_at else None,
+                    "cpu_ms": 180 + (index % 7) * 37,
+                    "memory_peak_mb": 96 + (index % 5) * 16,
+                    "queue_ms": 30 + (index % 4) * 12,
+                },
+                "trace_id": trace_id,
+                "span_id": span_id,
+                "parent_span_id": None,
+                "created_at": started_at,
+            }
+        )
+
+    samples: list[dict] = []
+    for index in range(SANDBOX_HISTORY_COUNT):
+        ready = 2 + (index * 3) % 4
+        creating = 1 if index % 9 in {0, 1} else 0
+        target = 5
+        samples.append(
+            {
+                "timestamp": (sampled_at - timedelta(seconds=(SANDBOX_HISTORY_COUNT - index - 1) * 30)).timestamp(),
+                "ready": ready,
+                "creating": creating,
+                "target": target,
+                "adaptive_target": 5 + (index % 2),
+                "deficit": max(0, target - ready - creating),
+                "arrival_rate_per_min": round(0.4 + (index % 5) * 0.2, 3),
+                "refill_p95_s": round(2.8 + (index % 4) * 0.35, 2),
+                "demo_seed_id": MARKER,
+            }
+        )
+    return user_rows, workspace, environment_rows, runtime_rows, execution_rows, samples
+
+
+def _clear_sandbox_demo_rows(connection: object) -> None:
+    execution_filter = SandboxExecutionModel.request_id.like(f"{PREFIX}sandbox-request-%")
+    execution_ids = select(SandboxExecutionModel.id).where(execution_filter)
+    environment_ids = select(SandboxEnvironmentModel.id).where(
+        SandboxEnvironmentModel.resource_profile_id == SANDBOX_ENVIRONMENT_PROFILE
+    )
+    connection.execute(delete(SandboxArtifactModel).where(SandboxArtifactModel.execution_id.in_(execution_ids)))
+    connection.execute(delete(SandboxLeaseModel).where(SandboxLeaseModel.environment_id.in_(environment_ids)))
+    connection.execute(delete(SandboxExecutionModel).where(execution_filter))
+    connection.execute(
+        delete(SandboxRuntimeInstanceModel).where(
+            SandboxRuntimeInstanceModel.external_runtime_id.like(f"{PREFIX}runtime-%")
+        )
+    )
+    connection.execute(
+        delete(WorkspaceMemberModel).where(
+            WorkspaceMemberModel.workspace_id == _uuid("sandbox-workspace")
+        )
+    )
+    connection.execute(
+        delete(SandboxEnvironmentModel).where(
+            SandboxEnvironmentModel.resource_profile_id == SANDBOX_ENVIRONMENT_PROFILE
+        )
+    )
+    connection.execute(delete(WorkspaceModel).where(WorkspaceModel.slug == SANDBOX_WORKSPACE_SLUG))
+    connection.execute(delete(UserModel).where(UserModel.username.like(f"{PREFIX}user-%")))
+
+
+def _seed_sandbox_capacity_samples(samples: list[dict]) -> str:
+    """Best-effort seed of only demo members in the shared Redis series."""
+    redis_url = settings.NLP_AGENT_REDIS_URL.strip()
+    if not redis_url:
+        return "Redis 未配置，容量历史将在监控进程运行后逐步采样"
+    try:
+        import redis
+
+        key = "nova:sandbox:metrics:capacity"
+        client = redis.Redis.from_url(redis_url, decode_responses=True)
+        client.ping()
+        existing = client.zrange(key, 0, -1)
+        demo_members: list[str] = []
+        for member in existing:
+            try:
+                if json.loads(member).get("demo_seed_id") == MARKER:
+                    demo_members.append(member)
+            except (TypeError, json.JSONDecodeError):
+                continue
+        if demo_members:
+            client.zrem(key, *demo_members)
+        if samples:
+            client.zadd(
+                key,
+                {
+                    json.dumps(sample, separators=(",", ":"), sort_keys=True): float(sample["timestamp"])
+                    for sample in samples
+                },
+            )
+            client.expire(key, max(60, int(settings.NLP_AGENT_SANDBOX_METRICS_RETENTION_S)))
+        client.close()
+        return f"已写入 {len(samples)} 个容量历史采样" if samples else "已清理容量历史中的模拟采样"
+    except Exception as error:
+        return f"Redis 容量历史未写入（{type(error).__name__}），不影响 MySQL 模拟数据"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Seed synthetic monitoring data into local MySQL")
     parser.add_argument("--clear", action="store_true", help="remove only monitor-demo-v1 rows")
@@ -216,10 +452,34 @@ def main() -> int:
 
     engine = create_engine(database_url.replace("mysql+aiomysql://", "mysql+pymysql://"), pool_pre_ping=True)
     envelopes, usage_rows = _build_observability(count=args.count)
+    trace_ids = [
+        envelope.payload.trace_id
+        for envelope in envelopes
+        if envelope.kind == "trace"
+    ]
+    span_ids = [
+        envelope.payload.span_id
+        for envelope in envelopes
+        if envelope.kind == "span" and envelope.payload.kind == SpanKind.MODEL
+    ]
+    (
+        sandbox_users,
+        sandbox_workspace,
+        sandbox_environments,
+        sandbox_runtimes,
+        sandbox_executions,
+        sandbox_samples,
+    ) = _build_sandbox_demo(count=args.count, trace_ids=trace_ids, span_ids=span_ids)
     with engine.begin() as connection:
+        _clear_sandbox_demo_rows(connection)
         connection.execute(delete(ObservabilityRecordModel).where(ObservabilityRecordModel.record_key.like(f"{PREFIX}%")))
         connection.execute(delete(UsageEventModel).where(UsageEventModel.operation_id.like(f"{PREFIX}%")))
         if not args.clear:
+            connection.execute(insert(UserModel), sandbox_users)
+            connection.execute(insert(WorkspaceModel), sandbox_workspace)
+            connection.execute(insert(SandboxEnvironmentModel), sandbox_environments)
+            connection.execute(insert(SandboxRuntimeInstanceModel), sandbox_runtimes)
+            connection.execute(insert(SandboxExecutionModel), sandbox_executions)
             for envelope in envelopes:
                 payload = envelope.model_dump(mode="json")
                 item = payload["payload"]
@@ -238,9 +498,16 @@ def main() -> int:
                 ))
             connection.execute(insert(UsageEventModel), usage_rows)
     engine.dispose()
+    sandbox_capacity_status = _seed_sandbox_capacity_samples([] if args.clear else sandbox_samples)
     print("cleared monitor-demo-v1 rows")
     if not args.clear:
-        print(f"seeded {len(envelopes)} observability records and {len(usage_rows)} usage events")
+        print(
+            f"seeded {len(envelopes)} observability records, {len(usage_rows)} usage events, "
+            f"{len(sandbox_runtimes)} sandbox runtimes, {len(sandbox_executions)} sandbox executions"
+        )
+        print(sandbox_capacity_status)
+    else:
+        print(sandbox_capacity_status)
     return 0
 
 
