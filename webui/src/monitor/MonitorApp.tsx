@@ -1,7 +1,7 @@
 import { Activity, AlertTriangle, Bot, Clock3, Database, Gauge, HardDrive, Layers3, MoreHorizontal, Radio, RefreshCw, Search, Server, ShieldCheck, TerminalSquare, Timer, Trash2, X, Zap } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ConfirmDialog } from "@/shared/ui/ConfirmDialog";
-import { authenticate, monitorApi, type ErrorRow, type Overview, type SystemUsageDimension, type SystemUsageSnapshot, type TelemetryEvent, type Trace, type TraceDetail, type UsageRow } from "./api";
+import { authenticate, monitorApi, type Overview, type SystemUsageDimension, type SystemUsageSnapshot, type TelemetryEvent, type Trace, type TraceDetail, type UsageRow } from "./api";
 import { controlPlaneUrl, groupEventsByTrace, monitorPageFromLocation, monitorPathForPage, resetMonitorData, telemetryFrame, type MonitorPage, type TraceChain } from "./monitor-helpers";
 import { mergeSandboxCapacitySamples, mergeSandboxLogs, SANDBOX_REFRESH_INTERVAL_MS, SandboxMonitorPage, type SandboxExecution, type SandboxLogEntry, type SandboxOverview, type SandboxRuntime } from "./SandboxMonitorPage";
 import { AuthorizationAuditPage } from "./AuthorizationAuditPage";
@@ -146,7 +146,6 @@ export function MonitorApp() {
   const [traces, setTraces] = useState<Trace[]>([]);
   const [traceContextLoaded, setTraceContextLoaded] = useState(false);
   const [usage, setUsage] = useState<UsageRow[]>([]);
-  const [errors, setErrors] = useState<ErrorRow[]>([]);
   const [events, setEvents] = useState<TelemetryEvent[]>([]);
   const [storage, setStorage] = useState<Record<string, unknown>>({});
   const [sandboxOverview, setSandboxOverview] = useState<SandboxOverview | null>(null);
@@ -164,7 +163,7 @@ export function MonitorApp() {
   const [resetOpen, setResetOpen] = useState(false);
   const [dangerOpen, setDangerOpen] = useState(false);
   const [resetting, setResetting] = useState(false);
-  const load = useCallback(async () => { setLoading(true); setError(""); try { await authenticate(); setAuthState("authenticated"); const [overviewResult, usageResult, errorsResult, eventsResult, storageResult] = await Promise.all([monitorApi.overview(days), monitorApi.usage(days), monitorApi.errors(days), monitorApi.events(), monitorApi.storage()]); const systemUsageResult = await monitorApi.systemUsage(days).catch((reason) => { if (authStatus(reason) === 401 || authStatus(reason) === 403) throw reason; return null; }); setOverview(overviewResult); setSystemUsage(systemUsageResult); setUsage(usageResult.items); setErrors(errorsResult.items); setEvents(eventsResult.items); setStorage(storageResult); } catch (reason) { if (authStatus(reason) === 401 || authStatus(reason) === 403) { setAuthState("login"); setAuthMessageText(authMessage(reason)); } else { setAuthState("authenticated"); setError(reason instanceof Error ? reason.message : String(reason)); } } finally { setLoading(false); } }, [days]);
+  const load = useCallback(async () => { setLoading(true); setError(""); try { await authenticate(); setAuthState("authenticated"); const [overviewResult, usageResult, eventsResult, storageResult] = await Promise.all([monitorApi.overview(days), monitorApi.usage(days), monitorApi.events(), monitorApi.storage()]); const systemUsageResult = await monitorApi.systemUsage(days).catch((reason) => { if (authStatus(reason) === 401 || authStatus(reason) === 403) throw reason; return null; }); setOverview(overviewResult); setSystemUsage(systemUsageResult); setUsage(usageResult.items); setEvents(eventsResult.items); setStorage(storageResult); } catch (reason) { if (authStatus(reason) === 401 || authStatus(reason) === 403) { setAuthState("login"); setAuthMessageText(authMessage(reason)); } else { setAuthState("authenticated"); setError(reason instanceof Error ? reason.message : String(reason)); } } finally { setLoading(false); } }, [days]);
   const loadTraceContext = useCallback(async () => {
     try {
       const result = await monitorApi.traces();
@@ -206,7 +205,7 @@ export function MonitorApp() {
   useEffect(() => { queueMicrotask(() => void load()); }, [load]);
   useEffect(() => { const onPopState = () => setPage(monitorPageFromLocation()); addEventListener("popstate", onPopState); return () => removeEventListener("popstate", onPopState); }, []);
   useEffect(() => {
-    if ((page !== "events" && page !== "errors") || traceContextLoaded) return undefined;
+    if (page !== "events" || traceContextLoaded) return undefined;
     queueMicrotask(() => void loadTraceContext());
     return undefined;
   }, [loadTraceContext, page, traceContextLoaded]);
@@ -229,32 +228,24 @@ export function MonitorApp() {
       setError(reason instanceof Error ? reason.message : String(reason));
     }
   }, []);
-  const openTraceById = useCallback(async (traceId: string) => {
-    const cached = traces.find((trace) => trace.trace_id === traceId);
-    if (cached) {
-      await openTrace(cached);
-      return;
-    }
-    try {
-      setDetail(await monitorApi.trace(traceId));
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
-    }
-  }, [openTrace, traces]);
   const resetAll = useCallback(async () => { setResetting(true); setError(""); try { await resetMonitorData(monitorApi.reset, load); setDetail(null); } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); } finally { setResetting(false); setResetOpen(false); setDangerOpen(false); } }, [load]);
   const navigate = (next: Page) => { const path = monitorPathForPage(next, location); history.pushState({}, "", `${path}${location.hash}`); setPage(next); };
+  const navigateToTraceFilter = useCallback((query: string) => { const path = monitorPathForPage("traces", location); const params = new URLSearchParams({ focus: "errors", query }); history.pushState({}, "", `${path}?${params.toString()}${location.hash}`); setPage("traces"); }, []);
+  const traceSearch = new URLSearchParams(location.search);
+  const traceFocus = traceSearch.get("focus") === "errors" || traceSearch.get("focus") === "slow" ? traceSearch.get("focus") as "errors" | "slow" : "all";
+  const traceQuery = traceSearch.get("query") ?? "";
   const pageContent = useMemo(() => {
     if (page === "sandbox") return <SandboxMonitorPage overview={sandboxOverview} logs={sandboxLogs} runtimes={sandboxRuntimes} executions={sandboxExecutions} live={sandboxLive} loading={sandboxLoading} logLoading={sandboxLogLoading} error={sandboxError} onRefresh={() => void loadSandbox(false)} onDrain={(runtimeId) => { if (confirm("确认排空这个运行时？")) void monitorApi.drainSandboxRuntime(runtimeId).then(() => loadSandbox(false)); }} />;
     if (page === "audit") return <AuthorizationAuditPage />;
     if (!overview) return null;
-    if (page === "traces") return <TraceExplorerPage days={days} />;
+    if (page === "traces") return <TraceExplorerPage days={days} initialFocus={traceFocus} initialQuery={traceQuery} />;
     if (page === "events") return <RunEventStream events={events} traces={traces} live={live} onOpen={(trace) => void openTrace(trace)} />;
     if (page === "usage") return <MonitorUsagePage data={overview} usage={usage} systemUsage={systemUsage} />;
-    if (page === "components") return <MonitorComponentsPage data={overview} />;
-    if (page === "errors") return <MonitorErrorsPage rows={errors} onOpen={(traceId) => void openTraceById(traceId)} />;
+    if (page === "components") return <MonitorComponentsPage data={overview} systemUsage={systemUsage} onOpenTrace={navigateToTraceFilter} />;
+    if (page === "errors") return <MonitorErrorsPage days={days} onOpenProblem={navigateToTraceFilter} />;
     if (page === "storage") return <MonitorStoragePage storage={storage} retentionDays={days} onPrune={async () => { setStorage(await monitorApi.prune(days, days)); }} />;
     return <MonitorOverviewPage data={overview} usage={usage} systemUsage={systemUsage} />;
-  }, [days, errors, events, live, loadSandbox, openTrace, openTraceById, overview, page, sandboxError, sandboxExecutions, sandboxLive, sandboxLoading, sandboxLogLoading, sandboxLogs, sandboxOverview, sandboxRuntimes, storage, systemUsage, traces, usage]);
+  }, [days, events, live, loadSandbox, navigateToTraceFilter, openTrace, overview, page, sandboxError, sandboxExecutions, sandboxLive, sandboxLoading, sandboxLogLoading, sandboxLogs, sandboxOverview, sandboxRuntimes, storage, systemUsage, traceFocus, traceQuery, traces, usage]);
   if (authState === "checking") return <main className="monitor-auth-shell"><div className="monitor-auth-loading"><RefreshCw className="spin" /><span>正在验证监控权限…</span></div></main>;
   if (authState === "login") return <MonitorLoginPage message={authMessageText} onLogin={login} />;
   return <div className="monitor-shell"><aside className="monitor-nav"><div className="monitor-brand"><Server /><span><strong>NLP Monitor</strong><small>OBSERVABILITY · 8766</small></span></div><nav className="monitor-nav-groups">{NAV_GROUPS.map((group) => <div className="monitor-nav-group" key={group.label}><span className="monitor-nav-group-label">{group.label}</span>{group.items.map(({ page: item, label, icon: Icon }) => <button className={page === item ? "active" : ""} aria-current={page === item ? "page" : undefined} type="button" key={item} onClick={() => navigate(item)}><Icon size={17} />{label}</button>)}</div>)}</nav><a href={controlPlaneUrl()}>返回控制面</a></aside><main><a className="monitor-skip-link" href="#monitor-content">跳到主要内容</a><header className="monitor-top"><div><h1>{NAV.find((item) => item.page === page)?.label}</h1><span><i className={`mon-live-dot ${(live || sandboxLive) ? "on" : ""}`} />{(live || sandboxLive) ? "实时" : "离线"}</span></div><label>统计周期<select value={days} onChange={(event) => setDays(Number(event.target.value))}><option value={1}>24 小时</option><option value={7}>7 天</option><option value={30}>30 天</option><option value={90}>90 天</option></select></label><div className="mon-danger-menu"><button className="mon-danger-trigger" type="button" aria-label="更多监控操作" aria-expanded={dangerOpen} onClick={() => setDangerOpen((open) => !open)}><MoreHorizontal size={17} /></button>{dangerOpen ? <div className="mon-danger-menu-popover"><span>危险操作</span><button className="mon-reset-button" type="button" onClick={() => { setDangerOpen(false); setResetOpen(true); }} disabled={loading || resetting}><Trash2 />重置全部数据</button></div> : null}</div><button type="button" onClick={() => page === "sandbox" ? void loadSandbox(false) : void load()} disabled={loading || resetting || sandboxLoading}><RefreshCw className={(loading || sandboxLoading) ? "spin" : ""} />刷新</button></header><div className="monitor-content" id="monitor-content">{error && page !== "sandbox" ? <div className="mon-fatal"><AlertTriangle /><strong>监控数据加载失败</strong><p>{error}</p></div> : loading && !overview && page !== "sandbox" ? <div className="mon-fatal"><RefreshCw className="spin" /><strong>正在连接 Monitor</strong></div> : pageContent}</div></main>{chain && <ChainDrawer chain={chain} onClose={() => setChain(null)} onOpenTrace={(trace) => void openTrace(trace)} />}{detail && <TraceDrawer detail={detail} onClose={() => setDetail(null)} />}<ConfirmDialog open={resetOpen} title="重置全部本地运行数据？" description="将永久清除所有学生会话、消息、练习记录、学习记忆、Trace、日志、调试事件和工具审计。教师主题、知识点、蓝图、模型与用户设置会保留。请先停止正在运行的对话。" confirmLabel={resetting ? "正在重置…" : "确认重置全部数据"} cancelLabel="取消" onClose={() => { if (!resetting) setResetOpen(false); }} onConfirm={() => void resetAll()} /></div>;

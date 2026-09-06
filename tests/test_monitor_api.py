@@ -5,8 +5,8 @@ from datetime import datetime, timedelta, timezone
 
 from configs.settings import settings
 from core.identity import AuthenticatedPrincipal
-from core.observability.context import TelemetryContext
-from core.observability.models import SpanStatus, TokenUsage
+from core.observability.context import TelemetryContext, bind_telemetry_context
+from core.observability.models import SpanKind, SpanStatus, TokenUsage
 from core.observability.runtime import TelemetryRuntime
 from server.monitor.app import create_monitor_app
 from server.monitor.reset import _clear_directory
@@ -247,6 +247,53 @@ def test_monitor_trace_groups_prioritize_problem_finding_and_page_chain_rows(tmp
         first.trace_id,
         second.trace_id,
     }
+
+
+@pytest.mark.asyncio
+async def test_monitor_dependency_and_error_pages_expose_bounded_all_user_analytics(tmp_path):
+    runtime = TelemetryRuntime(tmp_path / "telemetry.sqlite3", flush_interval_s=0.01)
+    context = TelemetryContext.create(
+        session_id="analytics-session",
+        turn_id="analytics-turn",
+        user_id="alice",
+        workspace_id="workspace-a",
+    )
+    runtime.start_trace(context, attributes={"chain_name": "分析链路", "entrypoint": "/api/chat"})
+    with bind_telemetry_context(context):
+        async with runtime.span(
+            SpanKind.MODEL,
+            "gateway.model",
+            attributes={"provider": "openai", "provider_model": "gpt-5.4"},
+        ) as span:
+            span.set_status(SpanStatus.TIMEOUT, error_kind="TimeoutError")
+    runtime.complete_trace(context, status=SpanStatus.ERROR)
+    await runtime.flush()
+    auth = SameOriginSessionAuth(
+        secret="monitor-test-secret",
+        cookie_name="monitor_test",
+        allowed_origins=["http://testserver"],
+    )
+    app = create_monitor_app(runtime=runtime, auth=auth, allowed_hosts=["testserver"])
+
+    with TestClient(app) as client:
+        login = client.post("/api/v1/auth/session", headers={"Origin": "http://testserver"})
+        dependencies = client.get(
+            "/api/v1/observability/dependencies?days=30&window_minutes=120&bucket_minutes=5"
+        )
+        errors = client.get("/api/v1/observability/errors?days=30&limit=10&offset=0")
+
+    assert login.status_code == 201
+    assert dependencies.status_code == 200
+    assert dependencies.json()["scope"] == "system"
+    assert dependencies.json()["summary"]["active_users"] == 1
+    assert dependencies.json()["models"][0]["provider"] == "openai"
+    assert len(dependencies.json()["trend"]) == 24
+    assert errors.status_code == 200
+    assert errors.json()["scope"] == "system"
+    assert errors.json()["summary"]["affected_users"] == 1
+    assert errors.json()["items"][0]["sample_trace_id"] == context.trace_id
+    assert "error_message" not in errors.json()["items"][0]
+    await runtime.close()
 
 
 def test_monitor_login_reuses_account_auth_but_requires_monitor_permission():

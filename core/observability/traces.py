@@ -105,6 +105,11 @@ def build_trace_group_page(
     limit = min(max(1, limit), 100)
     offset = max(0, offset)
     normalized_query = (query or "").strip().lower()
+    query_tokens = [
+        token
+        for token in normalized_query.replace("|", " ").replace("·", " ").split()
+        if token
+    ]
     if focus not in {"all", "errors", "slow"}:
         raise ValueError("focus must be one of all, errors, slow")
 
@@ -144,6 +149,7 @@ def build_trace_group_page(
                 "sample_trace_id": str(row.get("trace_id") or ""),
                 "error_kinds": set(),
                 "provider_models": set(),
+                "component_names": set(),
                 "latest_started_at": "",
             }
             groups[chain_id] = group
@@ -169,6 +175,11 @@ def build_trace_group_page(
             if started_at >= group.get("latest_error_started_at", ""):
                 group["latest_error_started_at"] = started_at
                 group["sample_trace_id"] = str(row.get("trace_id") or "")
+        # Keep trace-only failures searchable by the same kind/name
+        # fingerprint used by the incident page. Without this marker a query
+        # such as `TimeoutError|trace|/api/chat` could never match a chain
+        # that has no persisted child span.
+        group["component_names"].add(f"trace · {identity['entrypoint']}")
 
     for span in spans or ():
         chain_id = trace_to_chain.get(str(span.get("trace_id") or ""))
@@ -195,6 +206,9 @@ def build_trace_group_page(
             group["provider_models"].add(f"{provider} / {model}")
         elif provider:
             group["provider_models"].add(provider)
+        kind = str(span.get("kind") or "unknown")
+        name = str(span.get("name") or "unknown")
+        group["component_names"].add(f"{kind} · {name}")
 
     filtered: list[dict[str, Any]] = []
     for group in groups.values():
@@ -207,9 +221,11 @@ def build_trace_group_page(
                 *sorted(group["workspace_ids"]),
                 *sorted(group["sources"]),
                 *sorted(group["provider_models"]),
+                *sorted(group["component_names"]),
+                *sorted(group["error_kinds"]),
             ]
         ).lower()
-        if normalized_query and normalized_query not in haystack:
+        if query_tokens and not all(token in haystack for token in query_tokens):
             continue
         if focus == "errors" and group["error_count"] == 0:
             continue

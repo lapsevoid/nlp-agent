@@ -10,8 +10,26 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from core.observability.models import SpanRecord, TelemetryEnvelope, TelemetryEvent, TraceRecord
-from core.observability.summary import build_telemetry_overview
+from core.observability.summary import (
+    build_dependency_health,
+    build_error_analysis,
+    build_telemetry_overview,
+)
 from core.observability.traces import build_trace_group_page, trace_chain_identity
+
+
+_ANALYTICS_TRACE_COLUMNS = (
+    "trace_id,request_id,session_id,turn_id,chain_id,chain_name,entrypoint,"
+    "workspace_id,user_id,channel,source,started_at,completed_at,duration_ms,ttft_ms,"
+    "status,input_tokens,output_tokens,cached_tokens,cache_miss_tokens,reasoning_tokens,"
+    "total_tokens,usage_source,error_kind,attributes_json"
+)
+_ANALYTICS_SPAN_COLUMNS = (
+    "span_id,trace_id,parent_span_id,session_id,turn_id,worker_id,kind,name,"
+    "started_at,completed_at,duration_ms,status,attempt,input_tokens,output_tokens,"
+    "cached_tokens,cache_miss_tokens,reasoning_tokens,total_tokens,usage_source,"
+    "error_kind,attributes_json"
+)
 
 
 class TelemetryRepository:
@@ -48,6 +66,7 @@ class TelemetryRepository:
                     error_kind TEXT, error_message TEXT, attributes_json TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_traces_started ON traces(started_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_traces_completed ON traces(completed_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_traces_session ON traces(session_id, started_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_traces_status ON traces(status, started_at DESC);
                 CREATE TABLE IF NOT EXISTS spans (
@@ -67,6 +86,8 @@ class TelemetryRepository:
                 );
                 CREATE INDEX IF NOT EXISTS idx_spans_trace ON spans(trace_id, started_at);
                 CREATE INDEX IF NOT EXISTS idx_spans_kind ON spans(kind, started_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_spans_started ON spans(started_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_spans_completed ON spans(completed_at DESC);
                 CREATE TABLE IF NOT EXISTS events (
                     event_id TEXT PRIMARY KEY, timestamp TEXT NOT NULL, level TEXT NOT NULL,
                     name TEXT NOT NULL, trace_id TEXT, span_id TEXT, session_id TEXT,
@@ -201,12 +222,62 @@ class TelemetryRepository:
                     row[key.removesuffix("_json")] = json.loads(row.pop(key) or "{}")
         return rows
 
+    def _analytics_rows(self, table: str, columns: str, since: str) -> list[dict[str, Any]]:
+        rows = self._rows(
+            f"SELECT {columns} FROM {table} "
+            "WHERE started_at>=? OR completed_at>=? "
+            "ORDER BY COALESCE(completed_at, started_at)",
+            (since, since),
+        )
+        return self._decode(rows)
+
     def overview(self, days: int = 30) -> dict[str, Any]:
+        since = (datetime.now(timezone.utc) - timedelta(days=max(1, days))).isoformat()
         return build_telemetry_overview(
-            self._decode(self._rows("SELECT * FROM traces")),
-            self._decode(self._rows("SELECT * FROM spans")),
-            self._decode(self._rows("SELECT * FROM events")),
+            self._analytics_rows("traces", _ANALYTICS_TRACE_COLUMNS, since),
+            self._analytics_rows("spans", _ANALYTICS_SPAN_COLUMNS, since),
+            self._decode(self._rows(
+                "SELECT event_id,timestamp,level,name,trace_id,span_id,session_id,turn_id,worker_id "
+                "FROM events WHERE timestamp>=? ORDER BY timestamp",
+                (since,),
+            )),
             days,
+        )
+
+    def dependency_health(
+        self,
+        days: int = 30,
+        *,
+        window_minutes: int = 120,
+        bucket_minutes: int = 5,
+    ) -> dict[str, Any]:
+        since = (datetime.now(timezone.utc) - timedelta(days=max(1, days))).isoformat()
+        return build_dependency_health(
+            self._analytics_rows("traces", _ANALYTICS_TRACE_COLUMNS, since),
+            self._analytics_rows("spans", _ANALYTICS_SPAN_COLUMNS, since),
+            days,
+            window_minutes=window_minutes,
+            bucket_minutes=bucket_minutes,
+        )
+
+    def error_analysis(
+        self,
+        days: int = 30,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+        window_minutes: int = 120,
+        bucket_minutes: int = 5,
+    ) -> dict[str, Any]:
+        since = (datetime.now(timezone.utc) - timedelta(days=max(1, days))).isoformat()
+        return build_error_analysis(
+            self._analytics_rows("traces", _ANALYTICS_TRACE_COLUMNS, since),
+            self._analytics_rows("spans", _ANALYTICS_SPAN_COLUMNS, since),
+            days,
+            limit=limit,
+            offset=offset,
+            window_minutes=window_minutes,
+            bucket_minutes=bucket_minutes,
         )
 
     def list_traces(self, *, limit: int = 100, session_id: str | None = None,

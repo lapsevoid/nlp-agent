@@ -5,6 +5,12 @@ export interface OverviewUser { user_id: string; requests: number; successes: nu
 export interface OverviewError { error_kind: string; kind: string; name: string; count: number; last_seen: string | null; sample_trace_id: string; }
 export interface PercentileMetrics { p50: number | null; p90: number | null; p95: number | null; p99: number | null; }
 export interface Overview { period_days: number; from?: string; to?: string; requests: number; successes: number; errors: number; failed_requests?: number; error_rate: number; failure_rate?: number; active_users: number; active_workspaces: number; active_sessions: number; latency_ms: PercentileMetrics; ttft_ms: PercentileMetrics; tokens: Record<string, number>; runtime: Record<string, unknown>; status_breakdown: OverviewDimension[]; tags: { channels: OverviewDimension[]; sources: OverviewDimension[]; span_kinds: OverviewDimension[] }; component_spans: OverviewComponent[]; span_kinds: OverviewComponent[]; models: OverviewModel[]; error_groups: OverviewError[]; events_by_level: Record<string, number>; event_names: OverviewDimension[]; top_users: OverviewUser[]; latest_trace_at?: string | null; latest_event_at?: string | null; }
+export interface DependencyHealthRow { label?: string; kind?: string; name?: string; provider?: string; provider_model?: string; model_profile?: string; requests: number; successes: number; errors: number; failed_requests: number; error_rate: number; retries: number; total_tokens: number; latency_ms: PercentileMetrics; ttft_ms: PercentileMetrics; users: number; workspaces: number; error_kinds: string[]; first_seen: string | null; last_seen: string | null; status: "healthy" | "watch" | "degraded"; }
+export interface DependencyHealthSummary { requests: number; component_calls: number; errors: number; component_errors: number; error_rate: number; active_users: number; active_workspaces: number; latency_ms: PercentileMetrics; ttft_ms: PercentileMetrics; total_tokens: number; }
+export interface OperationalTrendPoint { period_start: string; period_end: string; granularity: string; requests: number; component_calls: number; errors: number; component_errors: number; error_rate: number; retries: number; total_tokens: number; component_tokens: number; active_users: number; latency_ms: PercentileMetrics; component_latency_ms: PercentileMetrics; ttft_ms: PercentileMetrics; }
+export interface DependencyHealth { scope: "system"; period_days: number; from: string; to: string; summary: DependencyHealthSummary; trend: OperationalTrendPoint[]; components: DependencyHealthRow[]; providers: DependencyHealthRow[]; models: DependencyHealthRow[]; anomalies: Array<{ type: string; key: string; status: string; errors: number; error_rate: number; p95_ms: number | null; last_seen: string | null }>; catalog?: SystemUsageCatalog; }
+export interface ErrorAnalysisSummary { error_groups: number; total_errors: number; affected_requests: number; affected_users: number; ongoing_groups: number; recovered_groups: number; error_rate: number; }
+export interface ErrorAnalysis { scope: "system"; period_days: number; from: string; to: string; summary: ErrorAnalysisSummary; trend: OperationalTrendPoint[]; items: ErrorRow[]; total: number; offset: number; limit: number; has_more: boolean; }
 export interface Trace { trace_id: string; request_id: string; session_id: string; turn_id: string; workspace_id: string; user_id: string; channel: string; source: string; started_at: string; completed_at?: string; duration_ms?: number; ttft_ms?: number; status: string; input_tokens: number; output_tokens: number; cached_tokens: number; cache_miss_tokens: number; reasoning_tokens: number; total_tokens: number; error_kind?: string; error_message?: string; attributes: Record<string, unknown>; }
 export interface Span { span_id: string; parent_span_id?: string; worker_id?: string; kind: string; name: string; started_at: string; completed_at?: string; duration_ms?: number; status: string; attempt: number; total_tokens: number; input_tokens: number; output_tokens: number; cached_tokens: number; error_kind?: string; error_message?: string; attributes: Record<string, unknown>; }
 export interface TelemetryEvent { event_id: string; timestamp: string; level: string; name: string; trace_id?: string; span_id?: string; session_id?: string; turn_id?: string; worker_id?: string; payload: Record<string, unknown>; }
@@ -31,11 +37,12 @@ export interface TraceGroupSummary {
   sample_trace_id: string;
   error_kinds: string[];
   provider_models?: string[];
+  component_names?: string[];
 }
 export interface TraceGroupPage { scope: "system"; items: TraceGroupSummary[]; total: number; offset: number; limit: number; has_more: boolean; period_days?: number; }
 export interface TraceGroupDetail { chain: TraceGroupSummary; traces: Trace[]; spans: Array<Span & { trace_id?: string }>; events: TelemetryEvent[]; }
 export interface UsageRow { day: string; component: string; name: string; requests: number; successes: number; errors: number; duration_sum_ms: number; input_tokens: number; output_tokens: number; cached_tokens: number; cache_miss_tokens: number; reasoning_tokens: number; total_tokens: number; }
-export interface ErrorRow { error_kind: string; kind: string; name: string; count: number; last_seen: string; sample_trace_id: string; }
+export interface ErrorRow { fingerprint?: string; error_kind: string; kind: string; name: string; count: number; trace_count?: number; affected_users?: number; affected_workspaces?: number; first_seen?: string | null; last_seen: string | null; latency_ms?: PercentileMetrics; provider_models?: string[]; chains?: string[]; recovery_status?: "ongoing" | "recovered" | "stale"; sample_trace_id: string; }
 export interface SystemUsageDimension { user_id?: string; workspace_id?: string; provider?: string; purpose?: string; provider_model?: string; events: number; priced_events: number; unpriced_events: number; credits_complete: boolean; credit_status: string; credits_micro: number | null; priced_credits_micro: number; tokens: Record<string, number>; }
 export interface SystemUsageBreakdown { day: string; period_start?: string; period_end?: string; granularity?: string; purpose?: string; provider?: string; provider_model?: string; events?: number; priced_events?: number; unpriced_events?: number; priced_credits_micro?: number; total_tokens?: number; tokens?: Record<string, number>; }
 export interface SystemUsageProviderCatalog { adapter?: string; base_url?: string; api_key_configured?: boolean; }
@@ -86,6 +93,10 @@ export const monitorApi = {
   },
   authorizationAuditStats: (days = 30) => request<AuthorizationAuditSummary>(`/audit/authorization/stats?days=${days}`),
   overview: (days: number) => request<Overview>(`/observability/overview?days=${days}`),
+  dependencies: (params: { days?: number; windowMinutes?: number; bucketMinutes?: number } = {}) => {
+    const query = new URLSearchParams({ days: String(params.days ?? 30), window_minutes: String(params.windowMinutes ?? 120), bucket_minutes: String(params.bucketMinutes ?? 5) });
+    return request<DependencyHealth>(`/observability/dependencies?${query.toString()}`);
+  },
   traces: (limit = 200) => request<{ items: Trace[] }>(`/observability/traces?limit=${limit}`),
   trace: (id: string) => request<TraceDetail>(`/observability/traces/${encodeURIComponent(id)}`),
   traceGroups: (params: { days?: number; limit?: number; offset?: number; focus?: "all" | "errors" | "slow"; query?: string } = {}) => {
@@ -103,7 +114,10 @@ export const monitorApi = {
   systemUsageUsers: (days: number, limit = 12, offset = 0) => request<SystemUsageUserPage>(`/observability/usage/system/users?days=${days}&limit=${limit}&offset=${offset}`),
   systemUsageTrend: (windowMinutes = 120, bucketMinutes = 5) => request<SystemUsageSnapshot>(`/observability/usage/system/trend?window_minutes=${windowMinutes}&bucket_minutes=${bucketMinutes}`),
   events: (limit = 300) => request<{ items: TelemetryEvent[] }>(`/observability/events?limit=${limit}`),
-  errors: (days: number) => request<{ items: ErrorRow[] }>(`/observability/errors?days=${days}&limit=200`),
+  errors: (params: { days?: number; limit?: number; offset?: number; windowMinutes?: number; bucketMinutes?: number } = {}) => {
+    const query = new URLSearchParams({ days: String(params.days ?? 30), limit: String(params.limit ?? 100), offset: String(params.offset ?? 0), window_minutes: String(params.windowMinutes ?? 120), bucket_minutes: String(params.bucketMinutes ?? 5) });
+    return request<ErrorAnalysis>(`/observability/errors?${query.toString()}`);
+  },
   storage: () => request<Record<string, unknown>>("/observability/storage"),
   sandboxOverview: () => request<SandboxOverview>("/observability/sandbox/overview"),
   sandboxLogs: (limit = 80, sinceSeconds = 600) => request<{ items: SandboxLogEntry[]; retention_seconds: number; sampled_at: string }>(`/observability/sandbox/logs?limit=${limit}&since_seconds=${sinceSeconds}`),

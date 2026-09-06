@@ -398,6 +398,24 @@ def create_monitor_app(
     async def overview(identity: Principal, days: int = Query(30, ge=1, le=365)):
         return await service.overview(identity, days)
 
+    @app.get("/api/v1/observability/dependencies", tags=["observability"])
+    async def dependencies(
+        identity: Principal,
+        days: int = Query(30, ge=1, le=365),
+        window_minutes: int = Query(120, ge=5, le=1440),
+        bucket_minutes: int = Query(5, ge=1, le=60),
+    ):
+        if bucket_minutes > window_minutes:
+            return _problem(422, "invalid_dependency_window", "bucket_minutes must not exceed window_minutes")
+        payload = await service.dependency_health(
+            identity,
+            days=days,
+            window_minutes=window_minutes,
+            bucket_minutes=bucket_minutes,
+        )
+        payload.setdefault("catalog", monitor_model_catalog())
+        return payload
+
     @app.get("/api/v1/observability/traces", tags=["observability"])
     async def traces(identity: Principal, limit: int = Query(100, ge=1, le=500), session_id: str | None = None, status: str | None = None):
         return {"items": await service.traces(identity, limit=limit, session_id=session_id, status=status)}
@@ -501,8 +519,24 @@ def create_monitor_app(
         return {"items": await service.events(identity, limit=limit, level=level, trace_id=trace_id)}
 
     @app.get("/api/v1/observability/errors", tags=["observability"])
-    async def errors(identity: Principal, days: int = Query(30, ge=1, le=365), limit: int = Query(100, ge=1, le=500)):
-        return {"items": await service.errors(identity, days, limit)}
+    async def errors(
+        identity: Principal,
+        days: int = Query(30, ge=1, le=365),
+        limit: int = Query(100, ge=1, le=500),
+        offset: int = Query(0, ge=0),
+        window_minutes: int = Query(120, ge=5, le=1440),
+        bucket_minutes: int = Query(5, ge=1, le=60),
+    ):
+        if bucket_minutes > window_minutes:
+            return _problem(422, "invalid_error_window", "bucket_minutes must not exceed window_minutes")
+        return await service.error_analysis(
+            identity,
+            days=days,
+            limit=limit,
+            offset=offset,
+            window_minutes=window_minutes,
+            bucket_minutes=bucket_minutes,
+        )
 
     @app.get("/api/v1/observability/storage", tags=["observability"])
     async def storage(identity: Principal):

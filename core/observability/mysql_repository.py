@@ -11,7 +11,11 @@ from sqlalchemy import create_engine, delete, func, select
 from sqlalchemy.dialects.mysql import insert
 
 from core.observability.models import TelemetryEnvelope
-from core.observability.summary import build_telemetry_overview
+from core.observability.summary import (
+    build_dependency_health,
+    build_error_analysis,
+    build_telemetry_overview,
+)
 from core.observability.traces import build_trace_group_page, trace_chain_identity
 from server.infrastructure.mysql.models import ObservabilityRecordModel
 
@@ -82,6 +86,42 @@ class MySQLTelemetryRepository:
             self._rows("span", since=since),
             self._rows("event", since=since),
             days,
+        )
+
+    def dependency_health(
+        self,
+        days: int = 30,
+        *,
+        window_minutes: int = 120,
+        bucket_minutes: int = 5,
+    ) -> dict[str, Any]:
+        since = datetime.now(timezone.utc) - timedelta(days=max(1, days))
+        return build_dependency_health(
+            self._rows("trace", since=since),
+            self._rows("span", since=since),
+            days,
+            window_minutes=window_minutes,
+            bucket_minutes=bucket_minutes,
+        )
+
+    def error_analysis(
+        self,
+        days: int = 30,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+        window_minutes: int = 120,
+        bucket_minutes: int = 5,
+    ) -> dict[str, Any]:
+        since = datetime.now(timezone.utc) - timedelta(days=max(1, days))
+        return build_error_analysis(
+            self._rows("trace", since=since),
+            self._rows("span", since=since),
+            days,
+            limit=limit,
+            offset=offset,
+            window_minutes=window_minutes,
+            bucket_minutes=bucket_minutes,
         )
 
     def list_traces(self, *, limit: int = 100, session_id: str | None = None, status: str | None = None, user_id: str | None = None, workspace_ids: frozenset[str] | None = None) -> list[dict[str, Any]]:

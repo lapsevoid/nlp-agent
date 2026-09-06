@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Activity, AlertTriangle, CheckCircle2, Database, HardDrive, Layers3, LineChart, RefreshCw, Server, ShieldAlert, Users, Zap } from "lucide-react";
+import { Activity, AlertTriangle, CheckCircle2, ChevronLeft, ChevronRight, Database, HardDrive, Layers3, LineChart, RefreshCw, Server, ShieldAlert, Users, Zap } from "lucide-react";
 import { monitorApi } from "./api";
-import type { ErrorRow, Overview, OverviewComponent, OverviewModel, SystemUsageBreakdown, SystemUsageCatalog, SystemUsageDimension, SystemUsageSnapshot, UsageRow } from "./api";
+import type { DependencyHealth, DependencyHealthRow, ErrorAnalysis, OperationalTrendPoint, Overview, OverviewComponent, OverviewModel, SystemUsageBreakdown, SystemUsageCatalog, SystemUsageDimension, SystemUsageSnapshot, UsageRow } from "./api";
 
 function fmt(value: number | null | undefined, suffix = "") {
   return value == null ? "—" : `${value.toLocaleString()}${suffix}`;
@@ -219,6 +219,28 @@ function UsageTrendChart({ breakdown, fallback, to, windowMinutes = USAGE_WINDOW
   return <div className="mon-usage-trend"><div className="mon-chart-legend"><span><i className="request" />事件 <b>{fmt(totalEvents)}</b></span><span><i className="token" />Token <b>{shortNumber(totalTokens)}</b></span><small>每 5 分钟 · 最近 {windowMinutes} 分钟滑动窗口</small></div><div className="mon-chart-stage mon-usage-trend-stage"><svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`最近 ${windowMinutes} 分钟 Token 趋势`} preserveAspectRatio="none"><defs><linearGradient id="monitor-usage-fill" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stopColor="#6558d3" stopOpacity=".18" /><stop offset="1" stopColor="#6558d3" stopOpacity="0" /></linearGradient></defs>{[0, .25, .5, .75, 1].map((ratio) => <line key={ratio} x1={pad.left} x2={width - pad.right} y1={pad.top + innerHeight * ratio} y2={pad.top + innerHeight * ratio} className="mon-chart-gridline" />)}<polyline points={eventLine} className="mon-chart-line request-line" /><polyline points={tokenLine} className="mon-chart-line token-line" />{points.map((point, index) => { const label = `${point.label}：${fmt(point.events)} 次事件，${fmt(point.tokens)} Token`; return <g key={point.timestamp} className="mon-chart-point-hit" tabIndex={0} role="button" aria-label={label} onMouseEnter={() => setActiveIndex(index)} onMouseLeave={() => setActiveIndex((current) => current === index ? null : current)} onFocus={() => setActiveIndex(index)} onBlur={() => setActiveIndex((current) => current === index ? null : current)}><circle cx={x(index)} cy={y(point.events, maxEvents)} r="13" className="mon-chart-hit-area" aria-hidden="true" /><circle cx={x(index)} cy={y(point.events, maxEvents)} r="3.5" className="mon-chart-point request-point" aria-hidden="true" /><circle cx={x(index)} cy={y(point.tokens, maxTokens)} r="3" className="mon-chart-point token-point" aria-hidden="true" />{(index === 0 || index === points.length - 1 || index % Math.max(1, Math.floor(points.length / 5)) === 0) ? <text x={x(index)} y={height - 10} textAnchor="middle" className="mon-chart-label" aria-hidden="true">{point.label.slice(5, 16)}</text> : null}</g>; })}</svg>{activePoint ? <div className="mon-chart-tooltip" role="status" aria-live="polite" data-placement={tooltipPlacement} style={{ left: `${tooltipLeft}%`, top: `${tooltipTop}%` }}><strong>{activePoint.label}</strong><span><b>{fmt(activePoint.events)}</b> 次事件</span><span><b>{fmt(activePoint.tokens)}</b> Token</span></div> : null}</div><div className="mon-chart-foot"><span>窗口事件 <strong>{fmt(totalEvents)}</strong></span><span>窗口 Token <strong>{fmt(totalTokens)}</strong></span></div></div>;
 }
 
+function OperationalTrendChart({ points, errorLabel = "错误", errorKey = "errors", latencyKey = "latency_ms" }: { points: OperationalTrendPoint[]; errorLabel?: string; errorKey?: "errors" | "component_errors"; latencyKey?: "latency_ms" | "component_latency_ms" }) {
+  const [activeIndex, setActiveIndex] = useState<number | null>(null);
+  const width = 900;
+  const height = 220;
+  const pad = { top: 18, right: 20, bottom: 34, left: 20 };
+  const innerWidth = width - pad.left - pad.right;
+  const innerHeight = height - pad.top - pad.bottom;
+  const maxErrors = Math.max(1, ...points.map((point) => point[errorKey]));
+  const maxP95 = Math.max(1, ...points.map((point) => point[latencyKey].p95 ?? 0));
+  const x = (index: number) => pad.left + (points.length === 1 ? innerWidth / 2 : index * innerWidth / Math.max(1, points.length - 1));
+  const y = (value: number, max: number) => pad.top + innerHeight - value / max * innerHeight;
+  const errorLine = points.map((point, index) => `${x(index)},${y(point[errorKey], maxErrors)}`).join(" ");
+  const p95Line = points.map((point, index) => `${x(index)},${y(point[latencyKey].p95 ?? 0, maxP95)}`).join(" ");
+  const activePoint = activeIndex == null ? null : points[activeIndex];
+  const activeY = activePoint ? y(activePoint[errorKey], maxErrors) : 0;
+  const tooltipPlacement = activeY < pad.top + 42 ? "below" : "above";
+  const tooltipLeft = activeIndex == null ? 50 : Math.min(90, Math.max(10, x(activeIndex) / width * 100));
+  const tooltipTop = activePoint ? activeY / height * 100 : 30;
+  if (!points.length) return <Empty text="当前窗口还没有可绘制的监控数据" />;
+  return <div className="mon-operational-trend"><div className="mon-chart-legend"><span><i className="request" />{errorLabel} <b>{fmt(points.reduce((sum, point) => sum + point[errorKey], 0))}</b></span><span><i className="latency" />P95 响应</span><small>5 分钟聚合 · 最近 {Math.round((points.length * 5))} 分钟滑动窗口</small></div><div className="mon-chart-stage mon-operational-trend-stage"><svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${errorLabel}和 P95 响应趋势`} preserveAspectRatio="none"><defs><linearGradient id={`monitor-operational-fill-${errorKey}`} x1="0" x2="0" y1="0" y2="1"><stop offset="0" stopColor="#d25a67" stopOpacity=".13" /><stop offset="1" stopColor="#d25a67" stopOpacity="0" /></linearGradient></defs>{[0, .25, .5, .75, 1].map((ratio) => <line key={ratio} x1={pad.left} x2={width - pad.right} y1={pad.top + innerHeight * ratio} y2={pad.top + innerHeight * ratio} className="mon-chart-gridline" />)}<polyline points={errorLine} className="mon-chart-line operational-error-line" /><polyline points={p95Line} className="mon-chart-line operational-latency-line" />{points.map((point, index) => { const label = `${point.period_start}：${fmt(point[errorKey])} ${errorLabel}，P95 ${fmt(point[latencyKey].p95, " ms")}`; return <g key={point.period_start} className="mon-chart-point-hit" tabIndex={0} role="button" aria-label={label} onMouseEnter={() => setActiveIndex(index)} onMouseLeave={() => setActiveIndex((current) => current === index ? null : current)} onFocus={() => setActiveIndex(index)} onBlur={() => setActiveIndex((current) => current === index ? null : current)}><circle cx={x(index)} cy={y(point[errorKey], maxErrors)} r="13" className="mon-chart-hit-area" aria-hidden="true" /><circle cx={x(index)} cy={y(point[errorKey], maxErrors)} r="3.5" className="mon-chart-point operational-error-point" aria-hidden="true" /><circle cx={x(index)} cy={y(point[latencyKey].p95 ?? 0, maxP95)} r="3" className="mon-chart-point operational-latency-point" aria-hidden="true" />{(index === 0 || index === points.length - 1 || index % Math.max(1, Math.floor(points.length / 5)) === 0) ? <text x={x(index)} y={height - 10} textAnchor="middle" className="mon-chart-label" aria-hidden="true">{point.period_start.slice(11, 16)}</text> : null}</g>; })}</svg>{activePoint ? <div className="mon-chart-tooltip" role="status" aria-live="polite" data-placement={tooltipPlacement} style={{ left: `${tooltipLeft}%`, top: `${tooltipTop}%` }}><strong>{activePoint.period_start.slice(0, 16).replace("T", " ")}</strong><span><b>{fmt(activePoint[errorKey])}</b> {errorLabel}</span><span><b>{fmt(activePoint[latencyKey].p95, " ms")}</b> P95 响应</span><span><b>{fmt(activePoint.retries)}</b> 重试</span></div> : null}</div><div className="mon-chart-foot"><span>影响请求 <strong>{fmt(points.reduce((sum, point) => sum + point.errors, 0))}</strong></span><span>组件调用 <strong>{fmt(points.reduce((sum, point) => sum + point.component_calls, 0))}</strong></span></div></div>;
+}
+
 function catalogModel(catalog: SystemUsageCatalog | undefined, name: string) {
   return catalog?.models[name] ?? Object.values(catalog?.models ?? {}).find((model) => model.model_id === name);
 }
@@ -301,18 +323,75 @@ export function MonitorUsagePage({ data, usage, systemUsage }: { data: Overview;
   </div>;
 }
 
-function MetricTable({ title, description, columns, rows }: { title: string; description: string; columns: string[]; rows: Array<OverviewComponent | OverviewModel> }) {
-  return <section className="mon-panel mon-fixed-panel"><header><div><h2>{title}</h2><p>{description}</p></div></header>{rows.length ? <div className="mon-table mon-table-scroll"><table><thead><tr>{columns.map((column) => <th key={column}>{column}</th>)}</tr></thead><tbody>{rows.slice(0, 16).map((row, index) => { const label = "name" in row ? row.name : row.provider_model; const subtitle = "label" in row ? row.label : `${row.provider} · ${row.model_profile}`; return <tr key={`${label}-${index}`}><td><strong>{label}</strong><small>{subtitle}</small></td><td>{fmt(row.requests)}</td><td className={row.error_rate > .05 ? "danger-text" : ""}>{(row.error_rate * 100).toFixed(1)}%</td><td>{fmt(row.retries)}</td><td>{fmt(row.avg_duration_ms, " ms")}</td><td>{fmt(row.total_tokens)}</td></tr>; })}</tbody></table></div> : <Empty text="当前周期没有组件数据" />}</section>;
+function fallbackHealthRow(row: OverviewComponent | OverviewModel): DependencyHealthRow {
+  const model = "provider_model" in row;
+  return {
+    ...(model ? { provider: row.provider, provider_model: row.provider_model, model_profile: row.model_profile, label: `${row.provider} · ${row.provider_model}` } : { kind: row.label.split(" · ")[0], name: row.name, label: row.label }),
+    requests: row.requests,
+    successes: row.successes,
+    errors: row.errors,
+    failed_requests: "failed_requests" in row ? row.failed_requests : row.errors,
+    error_rate: row.error_rate,
+    retries: row.retries,
+    total_tokens: row.total_tokens,
+    latency_ms: { p50: row.avg_duration_ms, p90: row.avg_duration_ms, p95: row.avg_duration_ms, p99: row.avg_duration_ms },
+    ttft_ms: { p50: null, p90: null, p95: null, p99: null },
+    users: 0,
+    workspaces: 0,
+    error_kinds: [],
+    first_seen: null,
+    last_seen: null,
+    status: row.error_rate >= .05 ? "degraded" : row.error_rate > 0 ? "watch" : "healthy",
+  };
 }
 
-export function MonitorComponentsPage({ data }: { data: Overview }) {
-  const spans = data.component_spans ?? [];
-  const models = data.models ?? [];
-  return <div className="mon-page mon-components-page"><PageIntro eyebrow="DEPENDENCIES · MODEL / WORKER / TOOL" title="组件与模型" description="把组件调用、失败、重试和模型 Provider 分开看，定位是哪一层开始退化。" meta={`${fmt(spans.length)} 个组件 · ${fmt(models.length)} 个模型`} /><div className="mon-components-grid"><MetricTable title="组件 Span" description="按 Span attempt 统计，内部重试不会隐藏。" columns={["组件", "调用", "失败率", "重试", "平均耗时", "Token"]} rows={spans} /><MetricTable title="模型与 Provider" description="比较 Provider、模型和配置档位的健康度。" columns={["模型", "调用", "失败率", "重试", "平均耗时", "Token"]} rows={models} /></div><section className="mon-panel mon-fixed-panel"><header><div><h2>Span 类型分布</h2><p>快速确认流量是否异常集中在某一类内部工作。</p></div></header><div className="mon-component-chip-grid">{(data.span_kinds ?? []).map((item) => <div key={item.name}><span>{item.name}</span><strong>{fmt(item.requests)}</strong><small>{fmt(item.total_tokens)} tokens · {(item.error_rate * 100).toFixed(1)}% errors</small></div>)}{!data.span_kinds?.length && <Empty text="暂无 Span 类型" />}</div></section></div>;
+function healthStatusLabel(status: DependencyHealthRow["status"]) {
+  return status === "degraded" ? "退化" : status === "watch" ? "观察" : "正常";
 }
 
-export function MonitorErrorsPage({ rows, onOpen }: { rows: ErrorRow[]; onOpen?: (traceId: string) => void }) {
-  return <div className="mon-page mon-table-page"><PageIntro eyebrow="ERRORS · TIMEOUTS · RETRIES" title="错误分析" description="按错误类型、组件和操作名聚合，优先处理影响面最大的故障。" meta={`${fmt(rows.length)} 个错误分组`} /><section className="mon-panel mon-route-table-panel"><header><div><h2>错误、超时与重试</h2><p>点击错误卡片进入完整 Trace。</p></div><AlertTriangle className="mon-panel-health-icon" /></header><div className="mon-error-grid mon-error-grid-scroll">{rows.map((row) => <button className="mon-error-summary" type="button" key={`${row.error_kind}-${row.kind}-${row.name}`} onClick={() => row.sample_trace_id && onOpen?.(row.sample_trace_id)} disabled={!row.sample_trace_id || !onOpen}><AlertTriangle /><span><strong>{row.error_kind}</strong><small>{row.kind} · {row.name}</small></span><b>{row.count}</b><time>{time(row.last_seen)}</time></button>)}{!rows.length && <Empty text="当前周期没有错误" />}</div></section></div>;
+function PercentileCell({ metrics }: { metrics: DependencyHealthRow["latency_ms"] }) {
+  return <span className="mon-percentile-cell"><b>{fmt(metrics.p95, " ms")}</b><small>P90 {fmt(metrics.p90, " ms")} · P99 {fmt(metrics.p99, " ms")}</small></span>;
+}
+
+function DependencyTable({ title, description, rows, kind, catalog }: { title: string; description: string; rows: DependencyHealthRow[]; kind: "component" | "provider" | "model"; catalog?: SystemUsageCatalog }) {
+  return <section className="mon-panel mon-fixed-panel mon-health-table-panel"><header><div><span className="mon-panel-kicker">{kind === "model" ? "MODEL HEALTH" : kind === "provider" ? "PROVIDER HEALTH" : "COMPONENT HEALTH"}</span><h2>{title}</h2><p>{description}</p></div><span className="mon-usage-panel-count">{fmt(rows.length)} 个</span></header>{rows.length ? <div className="mon-table mon-table-scroll"><table><thead><tr><th>依赖</th><th>调用</th><th>错误</th><th>P95 / P90 / P99</th><th>首 Token P95 / P90 / P99</th><th>重试</th><th>Token</th></tr></thead><tbody>{rows.slice(0, 40).map((row, index) => { const model = kind === "model" ? catalogModel(catalog, row.provider_model ?? "") : undefined; const label = kind === "model" ? row.provider_model ?? "unknown" : kind === "provider" ? row.provider ?? "unknown" : row.name ?? "unknown"; const subtitle = kind === "model" ? `${row.provider ?? "unknown"} · ${row.model_profile ?? "unknown"}` : kind === "provider" ? (catalog?.providers[label]?.adapter ?? "未标注适配器") : row.kind ?? "unknown"; return <tr key={`${label}-${index}`}><td><strong>{label}</strong><small>{subtitle}</small>{model ? <small className="mon-health-linked">目录：{model.model_id ?? label}{model.profile_names?.length ? ` · ${model.profile_names.join(" / ")}` : ""}</small> : null}</td><td>{fmt(row.requests)}</td><td className={row.error_rate > .05 ? "danger-text" : ""}>{fmt(row.errors)}<small>{(row.error_rate * 100).toFixed(1)}%</small></td><td><PercentileCell metrics={row.latency_ms} /></td><td><PercentileCell metrics={row.ttft_ms} /></td><td>{fmt(row.retries)}</td><td>{fmt(row.total_tokens)}</td></tr>; })}</tbody></table></div> : <Empty text="当前周期没有依赖调用" />}</section>;
+}
+
+export function MonitorComponentsPage({ data, systemUsage, onOpenTrace }: { data: Overview; systemUsage: SystemUsageSnapshot | null; onOpenTrace?: (query: string) => void }) {
+  const [health, setHealth] = useState<DependencyHealth | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
+  const load = useCallback(async () => {
+    setLoading(true);
+    try { setHealth(await monitorApi.dependencies({ days: data.period_days || 30, windowMinutes: 120, bucketMinutes: 5 })); setLoadError(""); } catch (reason) { setLoadError(reason instanceof Error ? reason.message : String(reason)); } finally { setLoading(false); }
+  }, [data.period_days]);
+  useEffect(() => { queueMicrotask(() => void load()); const timer = window.setInterval(() => void load(), USAGE_REFRESH_INTERVAL_MS); return () => window.clearInterval(timer); }, [load]);
+  const componentRows = health?.components ?? (data.component_spans ?? []).map(fallbackHealthRow);
+  const modelRows = health?.models ?? (data.models ?? []).map(fallbackHealthRow);
+  const catalog = health?.catalog ?? systemUsage?.catalog;
+  const summary = health?.summary;
+  return <div className="mon-page mon-components-page"><PageIntro eyebrow="DEPENDENCIES · MODEL / WORKER / TOOL" title="组件与模型" description="回答‘是哪一层退化’：按组件、Provider 和真实模型 ID 聚合调用、错误、P95、首 Token、重试和 Token。异常项可直接带筛选跳到运行链路。" meta={loading ? "5 min · 读取中" : `${fmt(componentRows.length)} 个组件 · ${fmt(modelRows.length)} 个模型`} />{loadError ? <div className="mon-inline-warning"><AlertTriangle size={14} />健康聚合读取失败，当前展示总览兼容数据：{loadError}</div> : null}<section className="mon-dependency-summary"><div className="mon-summary-lead"><span>全用户依赖调用</span><strong>{fmt(summary?.component_calls ?? componentRows.reduce((sum, row) => sum + row.requests, 0))}</strong><small>{fmt(summary?.active_users ?? data.active_users)} 位用户 · {fmt(summary?.active_workspaces ?? data.active_workspaces)} 个工作区</small></div><div><span>组件错误</span><strong className={(summary?.component_errors ?? 0) > 0 ? "danger-text" : "success-text"}>{fmt(summary?.component_errors ?? componentRows.reduce((sum, row) => sum + row.errors, 0))}</strong><small>Span attempt 口径</small></div><div><span>请求 P95</span><strong>{fmt(summary?.latency_ms.p95 ?? data.latency_ms.p95, " ms")}</strong><small>逻辑请求</small></div><div><span>首 Token P95</span><strong>{fmt(summary?.ttft_ms.p95 ?? data.ttft_ms.p95, " ms")}</strong><small>有效 TTFT 样本</small></div></section><section className="mon-panel mon-dependency-trend-panel"><header><div><span className="mon-panel-kicker">DEPENDENCY WINDOW</span><h2>依赖退化趋势</h2><p>错误和 P95 同窗展示，按 5 分钟刷新；空桶保留，方便看出恢复时间。</p></div><span className="mon-usage-refresh-state"><Activity size={14} />5 min</span></header><OperationalTrendChart points={health?.trend ?? []} errorLabel="组件错误" errorKey="component_errors" latencyKey="component_latency_ms" /></section><div className="mon-components-grid"><DependencyTable title="组件健康矩阵" description="失败率、P95 和重试同时看，避免只看平均耗时。" rows={componentRows} kind="component" catalog={catalog} /><DependencyTable title="Provider 健康" description="Provider 连接的错误、P95 和重试；配置来源于多模型厂商管理。" rows={health?.providers ?? []} kind="provider" catalog={catalog} /><DependencyTable title="模型健康矩阵" description="共享真实模型 ID 和配置档位，识别单一模型回归。" rows={modelRows} kind="model" catalog={catalog} /></div><section className="mon-panel mon-fixed-panel mon-dependency-anomalies"><header><div><span className="mon-panel-kicker">ACTION QUEUE</span><h2>依赖异常排名</h2><p>只列出有错误或 P95 超阈值的依赖；点击后在运行链路中查看受影响链路。</p></div><span className="mon-usage-panel-count">{fmt(health?.anomalies.length ?? 0)} 项</span></header><div className="mon-anomaly-list">{health?.anomalies?.length ? health.anomalies.map((row) => <button type="button" key={`${row.type}-${row.key}`} onClick={() => onOpenTrace?.(row.key)}><span className={`mon-anomaly-dot ${row.status}`} /><strong>{row.key}</strong><small>{row.type} · {healthStatusLabel(row.status as DependencyHealthRow["status"])} · {fmt(row.errors)} 错误 · P95 {fmt(row.p95_ms, " ms")}</small><b>查链路 →</b></button>) : <Empty text="当前窗口没有待处理依赖异常" />}</div></section></div>;
+}
+
+const ERROR_PAGE_SIZE = 12;
+
+function ErrorSummaryBand({ analysis }: { analysis: ErrorAnalysis | null }) {
+  const summary = analysis?.summary;
+  return <section className="mon-error-summary-band"><div className="mon-summary-lead"><span>影响请求</span><strong>{fmt(summary?.affected_requests)}</strong><small>全用户错误指纹去重</small></div><div><span>错误发生</span><strong className="danger-text">{fmt(summary?.total_errors)}</strong><small>{fmt(summary?.error_groups)} 个问题组</small></div><div><span>影响用户</span><strong>{fmt(summary?.affected_users)}</strong><small>已脱敏聚合</small></div><div><span>进行中</span><strong className={summary?.ongoing_groups ? "danger-text" : "success-text"}>{fmt(summary?.ongoing_groups)}</strong><small>未观察到恢复</small></div><div><span>已恢复</span><strong className="success-text">{fmt(summary?.recovered_groups)}</strong><small>成功调用在后</small></div></section>;
+}
+
+export function MonitorErrorsPage({ days, onOpenProblem }: { days: number; onOpenProblem?: (fingerprint: string) => void }) {
+  const [analysis, setAnalysis] = useState<ErrorAnalysis | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
+  const [offset, setOffset] = useState(0);
+  const load = useCallback(async () => {
+    setLoading(true);
+    try { setAnalysis(await monitorApi.errors({ days, limit: ERROR_PAGE_SIZE, offset, windowMinutes: 120, bucketMinutes: 5 })); setLoadError(""); } catch (reason) { setLoadError(reason instanceof Error ? reason.message : String(reason)); } finally { setLoading(false); }
+  }, [days, offset]);
+  useEffect(() => { queueMicrotask(() => void load()); const timer = window.setInterval(() => void load(), USAGE_REFRESH_INTERVAL_MS); return () => window.clearInterval(timer); }, [load]);
+  const rows = analysis?.items ?? [];
+  return <div className="mon-page mon-errors-page"><PageIntro eyebrow="ERRORS · INCIDENTS · RECOVERY" title="错误分析" description="回答‘发生了什么、影响多大、是否恢复’：按稳定错误指纹聚合，不暴露 Prompt、工具参数或原始错误消息；点击问题跳到已过滤的运行链路。" meta={loading ? "5 min · 读取中" : `${fmt(analysis?.total)} 个问题组`} /><ErrorSummaryBand analysis={analysis} /><section className="mon-panel mon-error-trend-panel"><header><div><span className="mon-panel-kicker">INCIDENT WINDOW</span><h2>错误与恢复趋势</h2><p>请求错误、组件错误和 P95 响应同窗显示，帮助判断故障开始、扩散和恢复。</p></div><span className="mon-usage-refresh-state"><Activity size={14} />5 min</span></header><OperationalTrendChart points={analysis?.trend ?? []} errorLabel="请求错误" /></section><section className="mon-panel mon-route-table-panel mon-error-table-panel"><header><div><span className="mon-panel-kicker">FINGERPRINT GROUPS</span><h2>问题指纹</h2><p>同一错误类型、组件和操作名合并为一组；详情按需跳到链路页。</p></div><AlertTriangle className="mon-panel-health-icon" /></header><div className="mon-error-list">{loadError ? <div className="mon-inline-warning"><AlertTriangle size={14} />{loadError}</div> : null}{rows.map((row) => <button className="mon-error-row" type="button" key={row.fingerprint ?? `${row.error_kind}-${row.kind}-${row.name}`} onClick={() => row.fingerprint && onOpenProblem?.(row.fingerprint)} disabled={!row.fingerprint || !onOpenProblem}><span className={`mon-error-state ${row.recovery_status ?? "stale"}`}>{row.recovery_status === "ongoing" ? "进行中" : row.recovery_status === "recovered" ? "已恢复" : "陈旧"}</span><span className="mon-error-main"><strong>{row.error_kind}</strong><small>{row.kind} · {row.name}</small><small>{row.provider_models?.join(" · ") || "Provider 未标注"} · {row.chains?.slice(0, 2).join("、") || "链路未标注"}</small></span><span><b>{fmt(row.count)}</b><small>发生</small></span><span><b>{fmt(row.affected_users)}</b><small>用户</small></span><span><b>{fmt(row.latency_ms?.p95, " ms")}</b><small>P90 {fmt(row.latency_ms?.p90, " ms")} · P95 · P99 {fmt(row.latency_ms?.p99, " ms")}</small></span><time>{time(row.last_seen)}</time><span className="mon-error-open">查链路 →</span></button>)}{!loading && !rows.length && !loadError ? <Empty text="当前周期没有错误" /> : null}{loading && !analysis ? <div className="mon-loading-row"><RefreshCw className="spin" size={14} />正在加载问题指纹…</div> : null}</div><footer className="mon-error-pagination"><span>{analysis?.total ? `${offset + 1}-${Math.min(offset + rows.length, analysis.total)} / ${analysis.total}` : "0 个问题组"}</span><div><button type="button" aria-label="上一页错误" disabled={offset === 0 || loading} onClick={() => setOffset((current) => Math.max(0, current - ERROR_PAGE_SIZE))}><ChevronLeft size={14} />上一页</button><button type="button" aria-label="下一页错误" disabled={!analysis?.has_more || loading} onClick={() => setOffset((current) => current + ERROR_PAGE_SIZE)}>下一页<ChevronRight size={14} /></button></div></footer></section></div>;
 }
 
 export function MonitorStoragePage({ storage, retentionDays, onPrune }: { storage: Record<string, unknown>; retentionDays: number; onPrune: () => Promise<void> }) {

@@ -7,7 +7,11 @@ from core.observability.context import TelemetryContext, bind_telemetry_context
 from core.observability.models import SpanKind, SpanStatus, TokenUsage
 from core.observability.runtime import TelemetryRuntime
 from core.observability.service import ObservabilityService
-from core.observability.summary import build_telemetry_overview
+from core.observability.summary import (
+    build_dependency_health,
+    build_error_analysis,
+    build_telemetry_overview,
+)
 from core.observability.traces import build_trace_group_page, derive_trace_identity
 from core.identity import AuthenticatedPrincipal
 from core.identity import AccessDeniedError
@@ -104,6 +108,30 @@ def test_trace_group_page_aggregates_by_chain_and_returns_only_one_page():
     assert page["items"][0]["error_count"] == 1
     assert page["items"][0]["user_ids"] == ["alice"]
     assert page["items"][0]["sample_trace_id"] == "trace-1"
+
+    filtered = build_trace_group_page(
+        rows,
+        spans=[
+            {
+                "trace_id": "trace-1",
+                "kind": "model",
+                "name": "gateway.model",
+                "status": "error",
+                "error_kind": "TimeoutError",
+            }
+        ],
+        query="TimeoutError|model|gateway.model",
+    )
+    assert filtered["total"] == 1
+    assert filtered["items"][0]["chain_id"] == "workflow-42"
+
+    trace_only = build_trace_group_page(
+        rows,
+        query="TimeoutError|trace|/api/v1/chat",
+        focus="errors",
+    )
+    assert trace_only["total"] == 1
+    assert trace_only["items"][0]["chain_id"] == "workflow-42"
 
 
 def test_trace_group_page_promotes_failed_internal_span_even_when_trace_is_ok():
@@ -291,6 +319,216 @@ def test_telemetry_overview_exposes_langsmith_style_latency_percentiles():
 
     assert overview["latency_ms"] == {"p50": 50, "p90": 90, "p95": 95, "p99": 99}
     assert overview["ttft_ms"] == {"p50": 50, "p90": 90, "p95": 95, "p99": 99}
+
+
+def test_dependency_health_aggregates_all_users_and_keeps_a_five_minute_window():
+    now = datetime(2026, 9, 5, 12, 0, tzinfo=timezone.utc)
+    traces = [
+        {
+            "trace_id": "trace-alice",
+            "user_id": "alice",
+            "workspace_id": "workspace-a",
+            "started_at": "2026-09-05T11:55:00+00:00",
+            "completed_at": "2026-09-05T11:55:04+00:00",
+            "duration_ms": 4000,
+            "ttft_ms": 800,
+            "status": "ok",
+            "total_tokens": 100,
+        },
+        {
+            "trace_id": "trace-bob",
+            "user_id": "bob",
+            "workspace_id": "workspace-b",
+            "started_at": "2026-09-05T11:55:10+00:00",
+            "completed_at": "2026-09-05T11:55:12+00:00",
+            "duration_ms": 2000,
+            "ttft_ms": 400,
+            "status": "error",
+            "total_tokens": 60,
+        },
+    ]
+    spans = [
+        {
+            "trace_id": "trace-alice",
+            "span_id": "model-1",
+            "kind": "model",
+            "name": "gateway.model",
+            "started_at": "2026-09-05T11:55:00+00:00",
+            "completed_at": "2026-09-05T11:55:03+00:00",
+            "duration_ms": 3000,
+            "status": "ok",
+            "attempt": 1,
+            "total_tokens": 100,
+            "attributes": {"provider": "openai", "provider_model": "gpt-5.4"},
+        },
+        {
+            "trace_id": "trace-bob",
+            "span_id": "model-2",
+            "kind": "model",
+            "name": "gateway.model",
+            "started_at": "2026-09-05T11:55:10+00:00",
+            "completed_at": "2026-09-05T11:55:12+00:00",
+            "duration_ms": 2000,
+            "status": "timeout",
+            "attempt": 2,
+            "error_kind": "TimeoutError",
+            "total_tokens": 60,
+            "attributes": {"provider": "openai", "provider_model": "gpt-5.4"},
+        },
+    ]
+
+    result = build_dependency_health(traces, spans, days=30, now=now)
+
+    assert result["scope"] == "system"
+    assert result["summary"]["active_users"] == 2
+    assert result["summary"]["requests"] == 2
+    assert result["summary"]["component_calls"] == 2
+    assert result["models"][0]["provider_model"] == "gpt-5.4"
+    assert result["models"][0]["users"] == 2
+    assert result["models"][0]["latency_ms"]["p95"] == 3000
+    assert len(result["trend"]) == 24
+    assert result["trend"][-1]["requests"] == 2
+    assert result["trend"][-1]["component_errors"] == 1
+
+
+def test_error_analysis_groups_fingerprints_reports_impact_and_recovery_without_raw_messages():
+    now = datetime(2026, 9, 5, 12, 0, tzinfo=timezone.utc)
+    traces = [
+        {
+            "trace_id": "trace-error",
+            "user_id": "alice",
+            "workspace_id": "workspace-a",
+            "started_at": "2026-09-05T11:40:00+00:00",
+            "completed_at": "2026-09-05T11:40:05+00:00",
+            "duration_ms": 5000,
+            "status": "error",
+            "error_kind": "TimeoutError",
+        },
+        {
+            "trace_id": "trace-recovered",
+            "user_id": "bob",
+            "workspace_id": "workspace-b",
+            "started_at": "2026-09-05T11:50:00+00:00",
+            "completed_at": "2026-09-05T11:50:02+00:00",
+            "duration_ms": 2000,
+            "status": "ok",
+        },
+    ]
+    spans = [
+        {
+            "trace_id": "trace-error",
+            "span_id": "span-error",
+            "kind": "model",
+            "name": "gateway.model",
+            "started_at": "2026-09-05T11:40:00+00:00",
+            "completed_at": "2026-09-05T11:40:05+00:00",
+            "duration_ms": 5000,
+            "status": "timeout",
+            "error_kind": "TimeoutError",
+            "error_message": "secret prompt content must never leave the detail view",
+            "attributes": {"provider": "openai", "provider_model": "gpt-5.4"},
+        },
+        {
+            "trace_id": "trace-recovered",
+            "span_id": "span-recovered",
+            "kind": "model",
+            "name": "gateway.model",
+            "started_at": "2026-09-05T11:50:00+00:00",
+            "completed_at": "2026-09-05T11:50:02+00:00",
+            "duration_ms": 2000,
+            "status": "ok",
+            "attributes": {"provider": "openai", "provider_model": "gpt-5.4"},
+        },
+    ]
+
+    result = build_error_analysis(traces, spans, days=30, now=now)
+    item = next(row for row in result["items"] if row["kind"] == "model")
+
+    assert item["fingerprint"] == "TimeoutError|model|gateway.model"
+    assert item["count"] == 1
+    assert item["trace_count"] == 1
+    assert item["affected_users"] == 1
+    assert item["provider_models"] == ["openai / gpt-5.4"]
+    assert item["recovery_status"] == "recovered"
+    assert "error_message" not in item
+    assert result["summary"]["affected_requests"] == 1
+    assert result["summary"]["recovered_groups"] == 1
+
+
+def test_error_analysis_does_not_recover_an_older_fingerprint_after_a_newer_failure():
+    now = datetime(2026, 9, 5, 12, 0, tzinfo=timezone.utc)
+    traces = [
+        {
+            "trace_id": trace_id,
+            "user_id": "alice",
+            "workspace_id": "workspace-a",
+            "started_at": timestamp,
+            "completed_at": timestamp,
+            "status": "ok",
+        }
+        for trace_id, timestamp in (
+            ("trace-timeout", "2026-09-05T11:40:00+00:00"),
+            ("trace-auth", "2026-09-05T11:45:00+00:00"),
+            ("trace-success", "2026-09-05T11:50:00+00:00"),
+        )
+    ]
+    spans = [
+        {
+            "trace_id": "trace-timeout",
+            "span_id": "span-timeout",
+            "kind": "model",
+            "name": "gateway.model",
+            "started_at": "2026-09-05T11:40:00+00:00",
+            "completed_at": "2026-09-05T11:40:01+00:00",
+            "duration_ms": 1000,
+            "status": "timeout",
+            "error_kind": "TimeoutError",
+        },
+        {
+            "trace_id": "trace-auth",
+            "span_id": "span-auth",
+            "kind": "model",
+            "name": "gateway.model",
+            "started_at": "2026-09-05T11:45:00+00:00",
+            "completed_at": "2026-09-05T11:45:01+00:00",
+            "duration_ms": 1000,
+            "status": "denied",
+            "error_kind": "AuthError",
+        },
+        {
+            "trace_id": "trace-success",
+            "span_id": "span-success",
+            "kind": "model",
+            "name": "gateway.model",
+            "started_at": "2026-09-05T11:50:00+00:00",
+            "completed_at": "2026-09-05T11:50:01+00:00",
+            "duration_ms": 1000,
+            "status": "ok",
+        },
+    ]
+
+    result = build_error_analysis(traces, spans, days=30, now=now)
+    statuses = {row["error_kind"]: row["recovery_status"] for row in result["items"]}
+
+    assert statuses == {"TimeoutError": "stale", "AuthError": "recovered"}
+
+
+def test_operational_trend_uses_a_real_sliding_window_and_counts_denied_requests():
+    now = datetime(2026, 9, 5, 12, 3, 7, tzinfo=timezone.utc)
+    traces = [{
+        "trace_id": "trace-denied",
+        "user_id": "alice",
+        "workspace_id": "workspace-a",
+        "started_at": "2026-09-05T12:02:00+00:00",
+        "completed_at": "2026-09-05T12:02:01+00:00",
+        "status": "denied",
+    }]
+
+    result = build_dependency_health(traces, [], days=30, now=now)
+
+    assert result["to"] == now.isoformat()
+    assert result["trend"][-1]["period_end"] == now.isoformat()
+    assert result["trend"][-1]["errors"] == 1
 
 
 @pytest.mark.parametrize(

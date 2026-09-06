@@ -25,6 +25,23 @@ class ObservabilityService:
         result = await asyncio.to_thread(self.runtime.repository.overview, days)
         return {**result, "runtime": self.runtime.health()}
 
+    async def dependency_health(
+        self,
+        principal: AuthenticatedPrincipal,
+        *,
+        days: int = 30,
+        window_minutes: int = 120,
+        bucket_minutes: int = 5,
+    ) -> dict[str, Any]:
+        """Return bounded all-user dependency health for model/component triage."""
+        self._require_admin(principal)
+        return await asyncio.to_thread(
+            self.runtime.repository.dependency_health,
+            days,
+            window_minutes=window_minutes,
+            bucket_minutes=bucket_minutes,
+        )
+
     async def traces(
         self,
         principal: AuthenticatedPrincipal,
@@ -162,6 +179,27 @@ class ObservabilityService:
     ) -> list[dict[str, Any]]:
         self._require_admin(principal)
         return await asyncio.to_thread(self.runtime.repository.errors, days, limit)
+
+    async def error_analysis(
+        self,
+        principal: AuthenticatedPrincipal,
+        *,
+        days: int = 30,
+        limit: int = 100,
+        offset: int = 0,
+        window_minutes: int = 120,
+        bucket_minutes: int = 5,
+    ) -> dict[str, Any]:
+        """Return redacted error fingerprints and a bounded incident trend."""
+        self._require_admin(principal)
+        return await asyncio.to_thread(
+            self.runtime.repository.error_analysis,
+            days,
+            limit=limit,
+            offset=offset,
+            window_minutes=window_minutes,
+            bucket_minutes=bucket_minutes,
+        )
 
     async def health(self, principal: AuthenticatedPrincipal) -> dict[str, Any]:
         self._require_admin(principal)

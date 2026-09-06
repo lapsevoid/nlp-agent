@@ -5,6 +5,7 @@ const { monitorApi } = vi.hoisted(() => ({
     login: vi.fn().mockResolvedValue({ csrf_token: "test-csrf" }),
     createWsTicket: vi.fn().mockResolvedValue({ ticket: "test-ticket", expires_in: 60 }),
     overview: vi.fn().mockResolvedValue({ requests: 0, errors: 0, error_rate: 0, period_days: 30, latency_ms: { p50: 0, p90: 0, p95: 0, p99: 0 }, ttft_ms: { p50: 0, p90: 0, p95: 0, p99: 0 }, tokens: {} }),
+    dependencies: vi.fn().mockResolvedValue({ scope: "system", period_days: 30, from: "2026-09-04T08:00:00Z", to: "2026-09-04T10:00:00Z", summary: { requests: 0, component_calls: 0, errors: 0, component_errors: 0, error_rate: 0, active_users: 0, active_workspaces: 0, latency_ms: { p50: 0, p90: 0, p95: 0, p99: 0 }, ttft_ms: { p50: 0, p90: 0, p95: 0, p99: 0 }, total_tokens: 0 }, trend: [], components: [], providers: [], models: [], anomalies: [] }),
     traces: vi.fn().mockResolvedValue({ items: [] }), usage: vi.fn().mockResolvedValue({ items: [] }),
     traceGroups: vi.fn().mockResolvedValue({ items: [], total: 0, offset: 0, limit: 24, has_more: false }),
     traceGroup: vi.fn().mockResolvedValue({ chain: null, traces: [], spans: [], events: [] }),
@@ -30,6 +31,7 @@ describe("MonitorApp navigation", () => {
     monitorApi.login.mockReset().mockResolvedValue({ csrf_token: "test-csrf" });
     monitorApi.systemUsage.mockReset().mockResolvedValue({ scope: "system", events: 0, priced_events: 0, unpriced_events: 0, credits_complete: true, credit_status: "complete", credits_micro: 0, priced_credits_micro: 0, tokens: {}, breakdown: [], users: [], workspaces: [], providers: [], purposes: [], models: [] });
     monitorApi.systemUsageTrend.mockReset().mockResolvedValue({ scope: "system", period_days: 1, from: "2026-09-04T08:00:00Z", to: "2026-09-04T10:00:00Z", granularity: "five_minute", events: 0, priced_events: 0, unpriced_events: 0, credits_complete: true, credit_status: "complete", credits_micro: 0, priced_credits_micro: 0, tokens: {}, breakdown: [], users: [], workspaces: [], providers: [], purposes: [], models: [] });
+    monitorApi.dependencies.mockReset().mockResolvedValue({ scope: "system", period_days: 30, from: "2026-09-04T08:00:00Z", to: "2026-09-04T10:00:00Z", summary: { requests: 0, component_calls: 0, errors: 0, component_errors: 0, error_rate: 0, active_users: 0, active_workspaces: 0, latency_ms: { p50: 0, p90: 0, p95: 0, p99: 0 }, ttft_ms: { p50: 0, p90: 0, p95: 0, p99: 0 }, total_tokens: 0 }, trend: [], components: [], providers: [], models: [], anomalies: [] });
     monitorApi.systemUsageUsers.mockReset().mockResolvedValue({ items: [], total: 0, offset: 0, limit: 12, has_more: false });
     monitorApi.traces.mockReset().mockResolvedValue({ items: [] });
     monitorApi.traceGroups.mockReset().mockResolvedValue({ items: [], total: 0, offset: 0, limit: 24, has_more: false });
@@ -149,6 +151,45 @@ describe("MonitorApp navigation", () => {
     expect(location.pathname).toBe("/monitor/usage");
     expect(await screen.findByRole("heading", { name: "Token 与缓存" })).toBeVisible();
     expect(screen.queryByRole("heading", { name: "系统总览", level: 1 })).not.toBeInTheDocument();
+  });
+
+  it("loads dependency health only on the component route and links an anomaly to traces", async () => {
+    history.replaceState({}, "", "/monitor/components");
+    monitorApi.dependencies.mockResolvedValueOnce({
+      scope: "system", period_days: 30, from: "2026-09-04T08:00:00Z", to: "2026-09-04T10:00:00Z",
+      summary: { requests: 12, component_calls: 18, errors: 2, component_errors: 3, error_rate: 2 / 12, active_users: 4, active_workspaces: 2, latency_ms: { p50: 120, p90: 900, p95: 1400, p99: 2200 }, ttft_ms: { p50: 40, p90: 120, p95: 180, p99: 260 }, total_tokens: 1200 },
+      trend: [],
+      components: [{ label: "model · gateway.model", kind: "model", name: "gateway.model", requests: 18, successes: 15, errors: 3, failed_requests: 3, error_rate: 3 / 18, retries: 2, total_tokens: 1200, latency_ms: { p50: 200, p90: 900, p95: 1400, p99: 2200 }, ttft_ms: { p50: 60, p90: 180, p95: 220, p99: 300 }, users: 4, workspaces: 2, error_kinds: ["TimeoutError"], first_seen: "2026-09-04T09:00:00Z", last_seen: "2026-09-04T10:00:00Z", status: "degraded" }],
+      providers: [], models: [], anomalies: [{ type: "component", key: "model · gateway.model", status: "degraded", errors: 3, error_rate: 3 / 18, p95_ms: 1400, last_seen: "2026-09-04T10:00:00Z" }],
+    });
+
+    render(<MonitorApp />);
+
+    expect(await screen.findByRole("heading", { name: "组件与模型", level: 1 })).toBeVisible();
+    expect(await screen.findByText("gateway.model")).toBeVisible();
+    expect(screen.getByText("依赖异常排名")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: /model · gateway\.model/ }));
+    expect(location.pathname).toBe("/monitor/traces");
+    expect(location.search).toContain("focus=errors");
+  });
+
+  it("groups errors with impact metrics and links problems to filtered traces", async () => {
+    history.replaceState({}, "", "/monitor/errors");
+    monitorApi.errors.mockResolvedValueOnce({
+      scope: "system", period_days: 30, from: "2026-09-04T08:00:00Z", to: "2026-09-04T10:00:00Z",
+      summary: { error_groups: 1, total_errors: 3, affected_requests: 2, affected_users: 2, ongoing_groups: 1, recovered_groups: 0, error_rate: .1 }, trend: [], total: 1, offset: 0, limit: 12, has_more: false,
+      items: [{ fingerprint: "TimeoutError|model|gateway.model", error_kind: "TimeoutError", kind: "model", name: "gateway.model", count: 3, trace_count: 2, affected_users: 2, affected_workspaces: 1, first_seen: "2026-09-04T09:00:00Z", last_seen: "2026-09-04T10:00:00Z", latency_ms: { p50: 900, p90: 1400, p95: 1400, p99: 1400 }, provider_models: ["openai / gpt-5.4"], chains: ["文档处理"], recovery_status: "ongoing", sample_trace_id: "trace-1" }],
+    });
+
+    render(<MonitorApp />);
+
+    expect(await screen.findByRole("heading", { name: "错误分析", level: 1 })).toBeVisible();
+    expect(await screen.findByText("影响用户")).toBeVisible();
+    const problem = await screen.findByRole("button", { name: /TimeoutError.*gateway\.model/ });
+    fireEvent.click(problem);
+    expect(location.pathname).toBe("/monitor/traces");
+    expect(location.search).toContain("focus=errors");
+    expect(location.search).toContain("TimeoutError%7Cmodel%7Cgateway.model");
   });
 
   it("opens authorization audit inside the monitor plane", async () => {
