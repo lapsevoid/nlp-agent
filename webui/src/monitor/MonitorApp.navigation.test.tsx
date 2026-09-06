@@ -225,7 +225,7 @@ describe("MonitorApp navigation", () => {
     fireEvent.click(screen.getByRole("button", { name: "审计日志" }));
 
     expect(await screen.findByRole("heading", { name: "审计日志", level: 2 })).toBeVisible();
-    expect(monitorApi.authorizationAudit).toHaveBeenCalledWith({ limit: 50, offset: 0 });
+    expect(monitorApi.authorizationAudit).toHaveBeenCalledWith({ limit: 20, offset: 0 });
   });
 
   it("offers direct monitor login when the shared session is missing", async () => {

@@ -2,6 +2,7 @@ import {
   Activity, AlertTriangle, CheckCircle2, CircleDot, Cpu, RefreshCw, ShieldAlert,
   TerminalSquare, TimerReset, Wifi,
 } from "lucide-react";
+import { useState } from "react";
 
 export const MAX_SANDBOX_LOGS = 120;
 export const SANDBOX_LOG_RETENTION_MS = 10 * 60 * 1000;
@@ -92,10 +93,41 @@ function timestamp(value: string | null | undefined): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
-function capacityTimestamp(value: number): number {
+function finiteNumber(value: unknown, fallback = 0): number {
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function capacityTimestamp(value: unknown): number {
   // The API stores Unix seconds; tolerate milliseconds so stale browser state
   // cannot move the chart back to 1970 after a hot reload.
-  return value > 100_000_000_000 ? value / 1000 : value;
+  const parsed = finiteNumber(value);
+  if (parsed <= 0) return 0;
+  return parsed > 100_000_000_000 ? parsed / 1000 : parsed;
+}
+
+export function normalizeSandboxCapacitySamples(
+  samples: ReadonlyArray<SandboxCapacitySample>,
+): SandboxCapacitySample[] {
+  const unique = new Map<number, SandboxCapacitySample>();
+  for (const sample of samples) {
+    const raw = sample as unknown as Record<string, unknown>;
+    const normalizedTimestamp = capacityTimestamp(raw.timestamp);
+    if (!normalizedTimestamp) continue;
+    const adaptiveTarget = finiteNumber(raw.adaptive_target, Number.NaN);
+    unique.set(normalizedTimestamp, {
+      timestamp: normalizedTimestamp,
+      ready: Math.max(0, finiteNumber(raw.ready)),
+      creating: Math.max(0, finiteNumber(raw.creating)),
+      target: Math.max(0, finiteNumber(raw.target)),
+      deficit: Math.max(0, finiteNumber(raw.deficit)),
+      ...(Number.isFinite(adaptiveTarget) ? { adaptive_target: Math.max(0, adaptiveTarget) } : {}),
+      ...(Number.isFinite(finiteNumber(raw.arrival_rate_per_min, Number.NaN))
+        ? { arrival_rate_per_min: Math.max(0, finiteNumber(raw.arrival_rate_per_min)) }
+        : {}),
+    });
+  }
+  return [...unique.values()].sort((left, right) => left.timestamp - right.timestamp);
 }
 
 export function mergeSandboxCapacitySamples(
@@ -103,14 +135,8 @@ export function mergeSandboxCapacitySamples(
   incoming: SandboxCapacitySample[],
   now = Date.now(),
 ): SandboxCapacitySample[] {
-  const normalizedCurrent = current
-    .filter((sample) => Number.isFinite(sample.timestamp))
-    .map((sample) => ({ ...sample, timestamp: capacityTimestamp(sample.timestamp) }))
-    .sort((left, right) => left.timestamp - right.timestamp);
-  const normalizedIncoming = incoming
-    .filter((sample) => Number.isFinite(sample.timestamp))
-    .map((sample) => ({ ...sample, timestamp: capacityTimestamp(sample.timestamp) }))
-    .sort((left, right) => left.timestamp - right.timestamp);
+  const normalizedCurrent = normalizeSandboxCapacitySamples(current);
+  const normalizedIncoming = normalizeSandboxCapacitySamples(incoming);
   const unique = new Map<number, SandboxCapacitySample>();
   for (const sample of [...normalizedCurrent, ...normalizedIncoming]) {
     unique.set(sample.timestamp, sample);
@@ -119,7 +145,7 @@ export function mergeSandboxCapacitySamples(
   const latestCurrent = normalizedCurrent.at(-1);
   const latestIncoming = normalizedIncoming.at(-1);
   if (latestIncoming && (!latestCurrent || latestIncoming.timestamp <= latestCurrent.timestamp)) {
-    const syntheticTimestamp = Math.max(now / 1000, (latestCurrent?.timestamp ?? 0) + 0.001);
+    const syntheticTimestamp = Math.max(capacityTimestamp(now), (latestCurrent?.timestamp ?? 0) + 0.001);
     unique.set(syntheticTimestamp, { ...latestIncoming, timestamp: syntheticTimestamp });
   }
   return [...unique.values()]
@@ -170,11 +196,8 @@ function levelLabel(level: string): string {
 }
 
 function CapacityChart({ samples }: { samples: SandboxCapacitySample[] }) {
-  const visible = samples
-    .filter((sample) => Number.isFinite(sample.timestamp))
-    .map((sample) => ({ ...sample, timestamp: capacityTimestamp(sample.timestamp) }))
-    .sort((left, right) => left.timestamp - right.timestamp)
-    .slice(-MAX_SANDBOX_CAPACITY_SAMPLES);
+  const visible = normalizeSandboxCapacitySamples(samples).slice(-MAX_SANDBOX_CAPACITY_SAMPLES);
+  const [activeIndex, setActiveIndex] = useState<number | null>(null);
   const width = 960;
   const height = 270;
   const padding = { top: 22, right: 28, bottom: 32, left: 42 };
@@ -191,21 +214,35 @@ function CapacityChart({ samples }: { samples: SandboxCapacitySample[] }) {
   }).join(" ");
   const latest = visible.at(-1);
   const latestPoint = latest ? point(latest.ready, visible.length - 1) : null;
+  const activeSample = activeIndex == null ? undefined : visible[activeIndex];
+  const activePoint = activeSample ? point(activeSample.ready, activeIndex!) : null;
+  const tooltipPlacement = activePoint && activePoint.y < padding.top + 62 ? "below" : "above";
+  const tooltipLeft = activePoint ? Math.min(88, Math.max(12, activePoint.x / width * 100)) : 50;
+  const activeLabel = activeSample
+    ? `${dateTime(new Date(activeSample.timestamp * 1000).toISOString())}：待命 ${number(activeSample.ready)}，目标 ${number(activeSample.target)}，创建中 ${number(activeSample.creating)}`
+    : "";
 
   return <div className="sandbox-capacity-chart">
     <div className="sandbox-chart-legend"><span><i className="ready" />待命实例</span><span><i className="target" />目标容量</span><span><i className="creating" />创建中</span><small>{visible.length ? `最近 ${visible.length} 个采样` : "等待采样"}</small></div>
-    {visible.length < 2 ? <div className="sandbox-chart-empty"><Activity size={18} />等待第二个采样点…</div> : <svg role="img" aria-label="Sandbox 容量实时趋势" viewBox={`0 0 ${width} ${height}`}>
+    {!visible.length ? <div className="sandbox-chart-empty"><Activity size={18} />等待采样</div> : <div className="sandbox-chart-stage"><svg role="img" aria-label="Sandbox 容量实时趋势" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none">
       <title>Sandbox 容量实时趋势</title>
       <defs><linearGradient id="sandbox-ready-fill" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stopColor="#695bd7" stopOpacity=".22" /><stop offset="1" stopColor="#695bd7" stopOpacity="0" /></linearGradient></defs>
       {[0, 1, 2, 3, 4].map((line) => { const y = padding.top + chartHeight - line / 4 * chartHeight; return <line key={line} x1={padding.left} x2={width - padding.right} y1={y} y2={y} className="sandbox-chart-grid" />; })}
-      <path d={`${path("ready")} L${padding.left + chartWidth},${padding.top + chartHeight} L${padding.left},${padding.top + chartHeight} Z`} className="sandbox-chart-area" />
+      <text x={padding.left - 8} y={padding.top + 4} textAnchor="end">{number(max)}</text>
+      <text x={padding.left - 8} y={padding.top + chartHeight + 4} textAnchor="end">0</text>
+      {visible.length > 1 && <path d={`${path("ready")} L${padding.left + chartWidth},${padding.top + chartHeight} L${padding.left},${padding.top + chartHeight} Z`} className="sandbox-chart-area" />}
       <path d={path("target")} className="sandbox-chart-line target" />
       <path d={path("creating")} className="sandbox-chart-line creating" />
       <path d={path("ready")} className="sandbox-chart-line ready" />
-      {latestPoint && <><circle cx={latestPoint.x} cy={latestPoint.y} r="8" className="sandbox-chart-pulse" /><circle cx={latestPoint.x} cy={latestPoint.y} r="4" className="sandbox-chart-dot" /></>}
+      {visible.map((sample, index) => {
+        const readyPoint = point(sample.ready, index);
+        const label = `${dateTime(new Date(sample.timestamp * 1000).toISOString())}：待命 ${number(sample.ready)}，目标 ${number(sample.target)}，创建中 ${number(sample.creating)}`;
+        return <g key={`${sample.timestamp}-${index}`} className="sandbox-chart-point-hit" tabIndex={0} role="button" aria-label={label} onMouseEnter={() => setActiveIndex(index)} onMouseLeave={() => setActiveIndex((current) => current === index ? null : current)} onFocus={() => setActiveIndex(index)} onBlur={() => setActiveIndex((current) => current === index ? null : current)}><title>{label}</title><rect x={Math.max(padding.left, readyPoint.x - 24)} y={padding.top} width="48" height={chartHeight} className="sandbox-chart-hit" /><circle cx={readyPoint.x} cy={readyPoint.y} r={index === visible.length - 1 ? 4 : 3} className="sandbox-chart-dot" /></g>;
+      })}
+      {latestPoint && <circle cx={latestPoint.x} cy={latestPoint.y} r="8" className="sandbox-chart-pulse" />}
       <text x={padding.left} y={height - 8}>{dateTime(new Date(visible[0].timestamp * 1000).toISOString())}</text>
       <text x={width - padding.right} y={height - 8} textAnchor="end">{dateTime(new Date(visible.at(-1)!.timestamp * 1000).toISOString())}</text>
-    </svg>}
+    </svg>{activeSample && activePoint ? <div className="sandbox-chart-tooltip" data-placement={tooltipPlacement} style={{ left: `${tooltipLeft}%`, top: `${activePoint.y / height * 100}%` }} role="status" aria-live="polite"><strong>{activeLabel}</strong><span>缺口 {number(activeSample.deficit)} · 到达率 {number(activeSample.arrival_rate_per_min, " /min")}</span></div> : null}{visible.length < 2 && <div className="sandbox-chart-hint"><Activity size={15} />正在积累趋势样本</div>}</div>}
   </div>;
 }
 

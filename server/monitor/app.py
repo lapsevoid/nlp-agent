@@ -86,10 +86,11 @@ def create_monitor_app(
         app.state.monitor_retention = retention
         await rbac_runtime.start()
         retention_task = None
-        if retention["enabled"]:
+        repository = getattr(runtime, "repository", None)
+        if retention["enabled"] and repository is not None:
             retention_task = asyncio.create_task(
                 run_monitor_retention(
-                    runtime.repository,
+                    repository,
                     trace_days=int(retention["trace_days"]),
                     event_days=int(retention["event_days"]),
                     initial_delay_s=int(retention["initial_delay_s"]),

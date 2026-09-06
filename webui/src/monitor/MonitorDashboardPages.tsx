@@ -394,13 +394,38 @@ export function MonitorErrorsPage({ days, onOpenProblem }: { days: number; onOpe
   return <div className="mon-page mon-errors-page"><PageIntro eyebrow="ERRORS · INCIDENTS · RECOVERY" title="错误分析" description="回答‘发生了什么、影响多大、是否恢复’：按稳定错误指纹聚合，不暴露 Prompt、工具参数或原始错误消息；点击问题跳到已过滤的运行链路。" meta={loading ? "5 min · 读取中" : `${fmt(analysis?.total)} 个问题组`} /><ErrorSummaryBand analysis={analysis} /><section className="mon-panel mon-error-trend-panel"><header><div><span className="mon-panel-kicker">INCIDENT WINDOW</span><h2>错误与恢复趋势</h2><p>请求错误、组件错误和 P95 响应同窗显示，帮助判断故障开始、扩散和恢复。</p></div><span className="mon-usage-refresh-state"><Activity size={14} />5 min</span></header><OperationalTrendChart points={analysis?.trend ?? []} errorLabel="请求错误" /></section><section className="mon-panel mon-route-table-panel mon-error-table-panel"><header><div><span className="mon-panel-kicker">FINGERPRINT GROUPS</span><h2>问题指纹</h2><p>同一错误类型、组件和操作名合并为一组；详情按需跳到链路页。</p></div><AlertTriangle className="mon-panel-health-icon" /></header><div className="mon-error-list">{loadError ? <div className="mon-inline-warning"><AlertTriangle size={14} />{loadError}</div> : null}{rows.map((row) => <button className="mon-error-row" type="button" key={row.fingerprint ?? `${row.error_kind}-${row.kind}-${row.name}`} onClick={() => row.fingerprint && onOpenProblem?.(row.fingerprint)} disabled={!row.fingerprint || !onOpenProblem}><span className={`mon-error-state ${row.recovery_status ?? "stale"}`}>{row.recovery_status === "ongoing" ? "进行中" : row.recovery_status === "recovered" ? "已恢复" : "陈旧"}</span><span className="mon-error-main"><strong>{row.error_kind}</strong><small>{row.kind} · {row.name}</small><small>{row.provider_models?.join(" · ") || "Provider 未标注"} · {row.chains?.slice(0, 2).join("、") || "链路未标注"}</small></span><span><b>{fmt(row.count)}</b><small>发生</small></span><span><b>{fmt(row.affected_users)}</b><small>用户</small></span><span><b>{fmt(row.latency_ms?.p95, " ms")}</b><small>P90 {fmt(row.latency_ms?.p90, " ms")} · P95 · P99 {fmt(row.latency_ms?.p99, " ms")}</small></span><time>{time(row.last_seen)}</time><span className="mon-error-open">查链路 →</span></button>)}{!loading && !rows.length && !loadError ? <Empty text="当前周期没有错误" /> : null}{loading && !analysis ? <div className="mon-loading-row"><RefreshCw className="spin" size={14} />正在加载问题指纹…</div> : null}</div><footer className="mon-error-pagination"><span>{analysis?.total ? `${offset + 1}-${Math.min(offset + rows.length, analysis.total)} / ${analysis.total}` : "0 个问题组"}</span><div><button type="button" aria-label="上一页错误" disabled={offset === 0 || loading} onClick={() => setOffset((current) => Math.max(0, current - ERROR_PAGE_SIZE))}><ChevronLeft size={14} />上一页</button><button type="button" aria-label="下一页错误" disabled={!analysis?.has_more || loading} onClick={() => setOffset((current) => current + ERROR_PAGE_SIZE)}>下一页<ChevronRight size={14} /></button></div></footer></section></div>;
 }
 
+function storageCount(storage: Record<string, unknown>, key: string, fallback = 0) {
+  const value = Number(storage[key]);
+  return Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
+function storageBytes(value: unknown) {
+  const bytes = Number(value);
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  if (bytes < 1024) return `${Math.round(bytes)} B`;
+  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+  return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
+}
+
+function storageIntervalLabel(value: unknown) {
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds) || seconds <= 0) return "每月";
+  const days = seconds / (24 * 60 * 60);
+  return days >= 27 ? "每月" : days >= 1 ? `每 ${Math.round(days)} 天` : `每 ${Math.max(1, Math.round(seconds / 3600))} 小时`;
+}
+
 export function MonitorStoragePage({ storage, retentionDays, onPrune }: { storage: Record<string, unknown>; retentionDays: number; onPrune: () => Promise<void> }) {
   const [pruning, setPruning] = useState(false);
+  const [pruneError, setPruneError] = useState("");
   const prune = async () => {
     if (!confirm(`清理 ${retentionDays} 天以前的 Trace 与 Event？`)) return;
     setPruning(true);
     try {
       await onPrune();
+      setPruneError("");
+    } catch (reason) {
+      setPruneError(reason instanceof Error ? reason.message : String(reason));
     } finally {
       setPruning(false);
     }
@@ -409,5 +434,10 @@ export function MonitorStoragePage({ storage, retentionDays, onPrune }: { storag
   const scheduledRetention = retention?.enabled !== false;
   const traceRetentionDays = retention?.trace_days ?? retentionDays;
   const eventRetentionDays = retention?.event_days ?? retentionDays;
-  return <div className="mon-page mon-storage-page"><PageIntro eyebrow="RETENTION · TELEMETRY STORAGE" title="数据留存" description="查看 Telemetry 存储状态。监控数据按月自动清理，避免长期堆积占用存储；UsageEvent 计费账本不由此操作删除。" meta={scheduledRetention ? `自动清理 · Trace ${traceRetentionDays} 天` : "自动清理已关闭"} /><section className="mon-panel mon-storage-route-panel"><header><div><h2>Telemetry 存储状态</h2><p>{scheduledRetention ? `每月自动清理超过 ${traceRetentionDays} 天的 Trace / Span、超过 ${eventRetentionDays} 天的 Event。` : "自动清理已关闭，请由管理员手动维护留存。"}</p></div><Server className="mon-panel-health-icon" /></header><div className="mon-storage-json"><pre className="mon-json">{JSON.stringify(storage, null, 2)}</pre><button className="mon-storage-prune" type="button" onClick={() => void prune()} disabled={pruning}><HardDrive size={16} />{pruning ? "正在清理…" : `立即清理超过 ${retentionDays} 天的数据`}</button></div></section></div>;
+  const traces = storageCount(storage, "traces");
+  const spans = storageCount(storage, "spans");
+  const events = storageCount(storage, "events");
+  const records = storageCount(storage, "records", traces + spans + events);
+  const databaseName = String(storage.database ?? "Telemetry store").split(/[\\/]/).at(-1) || "Telemetry store";
+  return <div className="mon-page mon-storage-page"><PageIntro eyebrow="RETENTION · TELEMETRY STORAGE" title="数据留存" description="监控数据按留存策略自动回收，页面只呈现容量与清理状态；UsageEvent 计费账本不由此操作删除。" meta={scheduledRetention ? `${storageIntervalLabel(retention?.interval_s)}检查 · Trace ${traceRetentionDays} 天` : "自动清理已关闭"} /><section className="mon-panel mon-storage-health-panel"><header><div><span className="mon-panel-kicker">TELEMETRY STORE</span><h2>存储健康</h2><p>{scheduledRetention ? `系统会${storageIntervalLabel(retention?.interval_s)}清理超过 ${traceRetentionDays} 天的 Trace / Span 与超过 ${eventRetentionDays} 天的 Event。` : "自动清理已关闭，请由管理员手动维护留存。"}</p></div><span className={`mon-storage-status ${scheduledRetention ? "active" : "paused"}`}><Server size={14} />{scheduledRetention ? "自动清理中" : "需要手动维护"}</span></header><div className="mon-storage-metrics"><article><span>数据记录</span><strong>{fmt(records)}</strong><small>Trace、Span、Event 合计</small></article><article><span>Trace / Span</span><strong>{fmt(traces + spans)}</strong><small>{fmt(traces)} Trace · {fmt(spans)} Span</small></article><article><span>Event</span><strong>{fmt(events)}</strong><small>事件与标记记录</small></article><article><span>存储占用</span><strong>{storageBytes(storage.database_bytes)}</strong><small>{databaseName}</small></article></div><div className="mon-storage-policy"><div><span>Trace / Span 留存</span><strong>{traceRetentionDays} 天</strong></div><div><span>Event 留存</span><strong>{eventRetentionDays} 天</strong></div><div><span>清理节奏</span><strong>{storageIntervalLabel(retention?.interval_s)}检查</strong></div><div><span>计费账本</span><strong>保留</strong></div></div></section><section className="mon-panel mon-storage-action-panel"><header><div><span className="mon-panel-kicker">MAINTENANCE</span><h2>维护操作</h2><p>手动清理只处理超过留存窗口的监控数据，不影响用户会话、UsageEvent 或业务数据。</p></div><HardDrive className="mon-panel-health-icon" /></header><div className="mon-storage-action"><div><strong>立即执行一次清理</strong><span>适合策略调整后回收历史 Trace / Span 与 Event。</span></div><button className="mon-storage-prune" type="button" onClick={() => void prune()} disabled={pruning}><HardDrive size={16} />{pruning ? "正在清理…" : `立即清理超过 ${retentionDays} 天的数据`}</button></div>{pruneError ? <div className="mon-storage-error"><AlertTriangle size={15} />清理失败：{pruneError}</div> : null}</section></div>;
 }
