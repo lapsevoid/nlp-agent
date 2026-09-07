@@ -18,6 +18,9 @@ def test_migration_graph_has_one_head_after_all_feature_branches_are_merged() ->
         "20260907_49_reset_permission"
     )
     assert scripts.get_revision("20260907_49_reset_permission").down_revision == (
+        "20260904_49_billable_features"
+    )
+    assert scripts.get_revision("20260904_49_billable_features").down_revision == (
         "20260904_48_developer_merge"
     )
     assert scripts.get_revision("20260904_48_developer_merge").down_revision == (

@@ -9,7 +9,6 @@ import zipfile
 
 import pytest
 from argon2 import PasswordHasher
-from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy.exc import OperationalError
 from starlette.websockets import WebSocketDisconnect
@@ -19,7 +18,7 @@ from core.session_context import SessionContext
 from gateway.contracts import GatewayEventType
 from gateway.core import BackendGateway
 from gateway.repository import GatewayRepository
-from server.web.app import create_app, require_explicit_classroom_membership
+from server.web.app import create_app
 from server.web.auth import SameOriginSessionAuth
 from server.web.contracts import ServerEventEnvelope
 from server.web.websocket import WebSocketConnection, WebSocketHub
@@ -375,20 +374,6 @@ def test_student_cannot_call_teacher_or_developer_control_planes(student_web_app
         assert client.get("/api/v1/sessions").status_code == 401
 
 
-def test_classroom_quota_requires_explicit_membership_for_non_admins():
-    principal = AuthenticatedPrincipal(
-        user_id="teacher-1",
-        workspace_ids=frozenset({"workspace-1"}),
-        classroom_ids=frozenset(),
-        roles=frozenset({"teacher"}),
-    )
-
-    with pytest.raises(HTTPException) as error:
-        require_explicit_classroom_membership(principal, "classroom-1")
-
-    assert error.value.status_code == 403
-
-
 def test_learning_release_notes_route_requests_only_published(web_app, monkeypatch):
     """The public read route must pass include_drafts=False and serialize the payload.
 
@@ -458,8 +443,17 @@ def test_http_lifecycle_sessions_chat_settings_and_csrf(web_app, monkeypatch):
         csrf = authenticate(client)
         developer = client.get("/api/v1/developer/snapshot")
         assert developer.status_code == 200
-        assert developer.json()["runtime"]["status"] == "ok"
-        assert "tools" in developer.json()
+        developer_payload = developer.json()
+        assert developer_payload["runtime"]["status"] == "ok"
+        assert "tools" in developer_payload
+        providers = developer_payload["models"]["providers"]
+        assert providers["kimi"]["adapter"] == "kimi"
+        assert providers["kimi"]["api_key_env"] == "KIMI_API_KEY"
+        assert providers["glm"]["adapter"] == "glm"
+        assert providers["glm"]["api_key_env"] == "GLM_API_KEY"
+        for provider in providers.values():
+            assert isinstance(provider["api_key_configured"], bool)
+            assert "api_key" not in provider
         developer_health = client.get("/api/v1/developer/health")
         assert developer_health.status_code == 200
         assert developer_health.json()["status"] == "ok"

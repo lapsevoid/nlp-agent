@@ -8,7 +8,7 @@ from server.rbac.catalog import permission_id, permission_row, permission_scope,
 
 
 revision = "20260907_49_reset_permission"
-down_revision = "20260904_48_developer_merge"
+down_revision = "20260904_49_billable_features"
 branch_labels = None
 depends_on = None
 

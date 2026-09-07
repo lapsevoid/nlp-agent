@@ -177,17 +177,40 @@ class VisionOCRConfig(StrictConfigModel):
 
 
 class VisionVLMConfig(StrictConfigModel):
-    model_route: str = "vision-worker"
+    # Image understanding is an application service, not a chat-profile
+    # capability.  Keep one route so profile changes cannot swap providers.
+    model_route: Literal["vision-worker"] = "vision-worker"
     max_image_bytes: int = Field(default=6_000_000, ge=1_024, le=100_000_000)
     send_ocr_context: bool = True
+    standard_image_max_pixels: int = Field(
+        default=1_048_576, ge=2_304, le=200_000_000
+    )
+    high_image_max_pixels: int = Field(
+        default=4_194_304, ge=2_304, le=200_000_000
+    )
 
-    @field_validator("model_route")
-    @classmethod
-    def validate_model_route(cls, value: str) -> str:
-        route = value.strip()
-        if not route:
-            raise ValueError("vision VLM model route cannot be blank")
-        return route
+    @model_validator(mode="after")
+    def validate_image_unit_tiers(self) -> "VisionVLMConfig":
+        if self.high_image_max_pixels <= self.standard_image_max_pixels:
+            raise ValueError(
+                "vision VLM high_image_max_pixels must exceed "
+                "standard_image_max_pixels"
+            )
+        return self
+
+    def fallback_image_units(self, *, width: int, height: int, task: str) -> int:
+        """Map the application-sent image dimensions and mode to 1/2/3 units."""
+
+        pixels = width * height
+        if pixels <= self.standard_image_max_pixels:
+            units = 1
+        elif pixels <= self.high_image_max_pixels:
+            units = 2
+        else:
+            units = 3
+        if task in {"table", "chart", "formula"}:
+            return 3
+        return units
 
 
 class VisionResultConfig(StrictConfigModel):
