@@ -276,7 +276,7 @@ describe("WhiteboardPanel", () => {
     await waitFor(() => expect(updateLibrary).toHaveBeenCalled());
   });
 
-  it("does not install bundled libraries when clearing the engine library fails", async () => {
+  it("recovers the bundled library when clearing the engine library initially fails", async () => {
     vi.useRealTimers();
     const updateLibrary = vi.fn()
       .mockRejectedValueOnce(new Error("library unavailable"))
