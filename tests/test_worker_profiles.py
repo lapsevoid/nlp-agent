@@ -277,6 +277,35 @@ def test_pinned_coordinator_and_worker_prompt_versions_exist():
     assert "{{today}}" in template
 
 
+def test_worker_initial_messages_keep_kv_cache_prefix_stable():
+    from server.tools.worker_tool import _build_worker_initial_messages
+
+    first = _build_worker_initial_messages(
+        "先分析再输出。",
+        "完成任务。",
+        current_time="2026-09-07 10:00:00 Sunday",
+    )
+    second = _build_worker_initial_messages(
+        "先分析再输出。",
+        "完成任务。",
+        current_time="2026-09-07 10:01:00 Sunday",
+    )
+
+    assert [message.type for message in first] == [
+        "system",
+        "system",
+        "system",
+        "human",
+    ]
+    assert first[0].content == second[0].content
+    assert first[1].content == second[1].content
+    assert "2026-09-07 10:00:00 Sunday" not in first[0].content
+    assert "2026-09-07 10:00:00 Sunday" not in first[1].content
+    assert "2026-09-07 10:00:00 Sunday" in first[2].content
+    assert "2026-09-07 10:01:00 Sunday" in second[2].content
+    assert first[3].content == "【任务指令】：\n完成任务。"
+
+
 def test_coordinator_prompt_v1_5_teaches_academic_search_routing():
     root = Path(__file__).resolve().parents[1]
     prompt = (root / "core" / "prompt_runtime" / "templates" / "coordinator.v1.5.md").read_text(encoding="utf-8")

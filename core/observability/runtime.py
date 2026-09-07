@@ -38,7 +38,16 @@ def usage_from_metadata(metadata: dict[str, Any] | None) -> TokenUsage:
     data = metadata or {}
     input_tokens = int(data.get("input_tokens", data.get("prompt_tokens", 0)) or 0)
     output_tokens = int(data.get("output_tokens", data.get("completion_tokens", 0)) or 0)
-    cached_tokens = int(data.get("cached_tokens", data.get("input_token_details", {}).get("cache_read", 0)) or 0)
+    cached_tokens = int(
+        data.get(
+            "cached_tokens",
+            data.get(
+                "prompt_cache_hit_tokens",
+                data.get("input_token_details", {}).get("cache_read", 0),
+            ),
+        )
+        or 0
+    )
     cache_miss_tokens = int(data.get("prompt_cache_miss_tokens", data.get("input_token_details", {}).get("cache_miss", 0)) or 0)
     reasoning_tokens = int(data.get("reasoning_tokens", data.get("output_token_details", {}).get("reasoning", 0)) or 0)
     total = int(data.get("total_tokens", input_tokens + output_tokens) or 0)
