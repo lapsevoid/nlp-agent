@@ -103,7 +103,7 @@ def test_deploy_workflows_overlay_published_digests_without_mutating_server_env(
         assert "The deployment directory" in workflow
 
 
-def test_test_deploy_cleans_before_pull_and_keeps_runtime_image_cached() -> None:
+def test_test_deploy_cleans_before_pull_and_has_no_workflow_timeout() -> None:
     workflow = yaml.safe_load(
         (ROOT / ".github" / "workflows" / "publish-test-image.yml").read_text(
             encoding="utf-8"
@@ -127,7 +127,7 @@ def test_test_deploy_cleans_before_pull_and_keeps_runtime_image_cached() -> None
     assert 'docker pull --quiet "$SANDBOX_CONFIGURED_REF"' in deploy["run"]
     assert "pull --quiet nova-migrate nova-web nova-worker nova-monitor nova-sandbox-manager nginx" in deploy["run"]
     assert 'docker image inspect "$SANDBOX_CONFIGURED_REF"' in deploy["run"]
-    assert workflow["jobs"]["deploy"]["timeout-minutes"] == 20
+    assert "timeout-minutes" not in workflow["jobs"]["deploy"]
 
 
 def test_ci_workflow_can_be_dispatched_after_a_skip_ci_metadata_commit() -> None:
