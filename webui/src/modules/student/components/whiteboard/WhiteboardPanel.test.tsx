@@ -3,9 +3,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const excalidraw = vi.hoisted(() => ({
   render: vi.fn(),
+  loadLibraryFromBlob: vi.fn().mockResolvedValue([]),
 }));
 
 vi.mock("@excalidraw/excalidraw", () => ({
+  loadLibraryFromBlob: excalidraw.loadLibraryFromBlob,
   Excalidraw: (props: { initialData?: unknown; onChange?: (elements: unknown, appState: unknown, files: unknown) => void; children?: React.ReactNode }) => {
     excalidraw.render(props);
     return <><button type="button" onClick={() => props.onChange?.([{ id: "line-1", type: "line" }] as never, { theme: "light", viewBackgroundColor: "#fff" } as never, {})}>模拟绘图</button>{props.children}</>;
@@ -35,6 +37,8 @@ describe("WhiteboardPanel", () => {
   beforeEach(() => {
     localStorage.clear();
     excalidraw.render.mockClear();
+    excalidraw.loadLibraryFromBlob.mockClear();
+    excalidraw.loadLibraryFromBlob.mockResolvedValue([]);
     vi.useFakeTimers();
   });
 
@@ -82,6 +86,7 @@ describe("WhiteboardPanel", () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalled());
     await waitFor(() => expect(updateLibrary).toHaveBeenCalled());
     expect(fetchMock).toHaveBeenCalledTimes(WHITEBOARD_LIBRARY_ASSETS.length);
+    expect(excalidraw.loadLibraryFromBlob).toHaveBeenCalledTimes(WHITEBOARD_LIBRARY_ASSETS.length);
     expect(updateLibrary).toHaveBeenCalledTimes(WHITEBOARD_LIBRARY_ASSETS.length);
     expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(expect.arrayContaining([
       expect.stringContaining("deep-learning.excalidrawlib"),
@@ -91,7 +96,8 @@ describe("WhiteboardPanel", () => {
       expect.stringContaining("montessori-basic-grammar-symbols.excalidrawlib"),
       expect.stringContaining("bubbles.excalidrawlib"),
     ]));
-    expect(updateLibrary).toHaveBeenCalledWith(expect.objectContaining({ merge: true, defaultStatus: "published" }));
+    expect(updateLibrary).toHaveBeenNthCalledWith(1, expect.objectContaining({ merge: false, defaultStatus: "published" }));
+    expect(updateLibrary.mock.calls.slice(1).every(([options]) => options.merge === true && options.defaultStatus === "published")).toBe(true);
   });
 
   it("writes scene changes to local storage for that user", () => {

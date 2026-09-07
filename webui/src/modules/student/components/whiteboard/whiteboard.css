@@ -22,6 +22,26 @@
   display: none;
 }
 
+/* Keep the native library canvas and item rendering, but make the library a
+ * read-only catalogue of our bundled teaching assets. These selectors target
+ * Excalidraw's public component class names; the package source is untouched.
+ */
+.whiteboard-panel .library-menu-control-buttons,
+.whiteboard-panel .library-menu-dropdown-container,
+.whiteboard-panel .library-unit__checkbox {
+  display: none;
+}
+
+/* The bundled items are loaded as published items, so the personal section is
+ * not useful here. Hide it (including pending/unpublished user-created items)
+ * while leaving the published teaching-library grid visible.
+ */
+.whiteboard-panel .library-menu-items-container__header:not(.library-menu-items-container__header--excal),
+.whiteboard-panel .library-menu-items__no-items,
+.whiteboard-panel .library-menu-items-container__grid:has(~ .library-menu-items-container__header--excal) {
+  display: none;
+}
+
 .whiteboard-loading {
   display: grid;
   width: 100%;

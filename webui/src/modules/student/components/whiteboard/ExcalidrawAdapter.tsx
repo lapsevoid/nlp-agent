@@ -1,6 +1,6 @@
 import { useCallback, useRef } from "react";
 
-import { Excalidraw, MainMenu } from "@excalidraw/excalidraw";
+import { Excalidraw, loadLibraryFromBlob, MainMenu } from "@excalidraw/excalidraw";
 import type { ExcalidrawElement } from "@excalidraw/excalidraw/element/types";
 import type {
   AppState,
@@ -34,19 +34,53 @@ export function ExcalidrawAdapter({ initialScene, onChange }: {
     if (libraryLoadStarted.current) return;
     libraryLoadStarted.current = true;
 
-    void Promise.all(WHITEBOARD_LIBRARY_ASSETS.map(async (asset) => {
-      try {
-        const response = await fetch(whiteboardLibraryUrl(asset.fileName));
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        await api.updateLibrary({
-          libraryItems: await response.blob(),
-          merge: true,
-          defaultStatus: "published",
-        });
-      } catch (error) {
-        console.warn(`[whiteboard] failed to load ${asset.name} library`, error);
+    const loadBundledLibraries = async () => {
+      const loadedLibraries = (await Promise.all(WHITEBOARD_LIBRARY_ASSETS.map(async (asset) => {
+        try {
+          const response = await fetch(whiteboardLibraryUrl(asset.fileName));
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          return {
+            asset,
+            libraryItems: await loadLibraryFromBlob(await response.blob(), "published"),
+          };
+        } catch (error) {
+          console.warn(`[whiteboard] failed to load ${asset.name} library`, error);
+          return null;
+        }
+      }))).filter((library): library is NonNullable<typeof library> => library !== null);
+
+      // Replace the current in-memory library before adding the bundled items.
+      // This prevents libraries added in another board instance from leaking into
+      // this board while preserving the official library UI and item rendering.
+      let merge = false;
+      let installedLibrary = false;
+      for (const { asset, libraryItems } of loadedLibraries) {
+        try {
+          await api.updateLibrary({
+            libraryItems,
+            merge,
+            defaultStatus: "published",
+          });
+          merge = true;
+          installedLibrary = true;
+        } catch (error) {
+          console.warn(`[whiteboard] failed to install ${asset.name} library`, error);
+        }
       }
-    }));
+      if (!installedLibrary) {
+        try {
+          await api.updateLibrary({
+            libraryItems: [],
+            merge: false,
+            defaultStatus: "published",
+          });
+        } catch (error) {
+          console.warn("[whiteboard] failed to clear the library", error);
+        }
+      }
+    };
+
+    void loadBundledLibraries();
   }, []);
 
   return <section className="whiteboard-panel" aria-label="白板绘图">
