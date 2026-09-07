@@ -1,5 +1,5 @@
 import { Maximize2, Minimize2, Moon, PanelRightClose, PanelRightOpen, Sun, Wifi, WifiOff, X } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "@/platform/http/api";
 
 import { Composer } from "@/modules/student/components/Composer";
@@ -18,6 +18,8 @@ import { ToolDock, type ToolDockTabDropPosition, type ToolDockTool } from "@/mod
 import { useStudentWorkspace } from "@/modules/student/workspace/public";
 import { useSessionScrollRestoration } from "@/modules/student/workspace/hooks/useSessionScrollRestoration";
 import type { CourseTopic, TeacherCatalog } from "@/shared/types";
+
+const WhiteboardPanel = lazy(() => import("@/modules/student/components/whiteboard/WhiteboardPanel").then(({ WhiteboardPanel: panel }) => ({ default: panel })));
 
 export function StudentWorkspace({ onNavigateTo, onOpenInSandbox }: { onNavigateTo?: (path: string) => void; onOpenInSandbox?: (code: string, language: string) => void } = {}) {
   const workspace = useStudentWorkspace();
@@ -197,6 +199,7 @@ export function StudentWorkspace({ onNavigateTo, onOpenInSandbox }: { onNavigate
       }}
       learningPanel={<LearningPanel open onClose={() => closeTool("learning")} title={activeTitle} context={workspace.preferences.context} meta={workspace.activeMeta} messages={workspace.messages} catalog={learningCatalog} onPrompt={(content) => { setToolDockOpen(false); setToolDockExpanded(false); setToolMenuOpen(false); void workspace.send(content); }} onMeta={(patch) => { if (workspace.activeSessionId) workspace.updateSessionMeta(workspace.activeSessionId, patch); }} />}
       knowledgeBookPanel={<KnowledgeBookPanel workspaceId={workspace.workspaceId} onAskNova={statusOnline && !workspace.isRunning ? (prompt) => { setToolDockExpanded(false); setToolMenuOpen(false); void workspace.send(prompt); } : undefined} onOpenInSandbox={openCodeInSandbox} />}
+      whiteboardPanel={<Suspense fallback={<div className="whiteboard-loading" role="status">正在加载白板…</div>}><WhiteboardPanel userId={workspace.authSession?.user_id ?? null} /></Suspense>}
       sandboxSource={sandboxSource}
       filesUserId={workspace.authSession?.user_id ?? null}
       filesWorkspaceId={workspace.workspaceId}
