@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -72,6 +74,33 @@ describe("WhiteboardPanel", () => {
     expect(screen.getByTestId("whiteboard-main-menu")).toBeInTheDocument();
     expect(screen.getByTestId("whiteboard-help-menu-item")).toBeInTheDocument();
     expect(screen.queryByTestId("whiteboard-excalidraw-links")).not.toBeInTheDocument();
+  });
+
+  it("hides only the embed action in Excalidraw's extra-tools menu", () => {
+    const style = document.createElement("style");
+    style.textContent = readFileSync("src/modules/student/components/whiteboard/whiteboard.css", "utf8");
+    document.head.appendChild(style);
+
+    const panel = document.createElement("section");
+    panel.className = "whiteboard-panel";
+    panel.innerHTML = `
+      <div class="App-toolbar__extra-tools-dropdown">
+        <div class="dropdown-menu-container">
+          <button data-testid="toolbar-frame"></button>
+          <button data-testid="toolbar-embeddable"></button>
+          <button data-testid="toolbar-laser"></button>
+          <div>Generate</div>
+          <button data-testid="toolbar-embeddable"></button>
+        </div>
+      </div>`;
+    document.body.appendChild(panel);
+
+    const [embed, mermaid] = panel.querySelectorAll<HTMLButtonElement>('[data-testid="toolbar-embeddable"]');
+    expect(getComputedStyle(embed).display).toBe("none");
+    expect(getComputedStyle(mermaid).display).not.toBe("none");
+
+    panel.remove();
+    style.remove();
   });
 
   it("loads the bundled teaching libraries through the Excalidraw API", async () => {

@@ -45,7 +45,7 @@
 /* Excalidraw 0.18.1 exposes the embed and Mermaid entries with the same test
  * id. The embed action is the item immediately before Laser; Mermaid remains
  * available as the supported diagram import path. */
-.whiteboard-panel .App-toolbar__extra-tools-dropdown > button[data-testid="toolbar-embeddable"]:has(+ button[data-testid="toolbar-laser"]) {
+.whiteboard-panel .App-toolbar__extra-tools-dropdown .dropdown-menu-container > button[data-testid="toolbar-embeddable"]:has(+ button[data-testid="toolbar-laser"]) {
   display: none;
 }
 
