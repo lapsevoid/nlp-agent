@@ -433,7 +433,7 @@ function getMaxDockWidth() {
 }
 
 function ToolDockDecoration() {
-  return <span className="tool-dock-decoration" data-testid="tool-dock-decoration" aria-hidden="true"><i /><i /><i /></span>;
+  return <span className="tool-dock-decoration" data-testid="tool-dock-decoration" aria-hidden="true">·</span>;
 }
 
 function ToolPicker({ onOpenTool }: { onOpenTool: (tool: ToolDockTool) => void }) {

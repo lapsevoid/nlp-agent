@@ -135,6 +135,7 @@ describe("student stream rendering", () => {
     expect(home).toBeInTheDocument();
     expect(home?.querySelectorAll("kbd")).toHaveLength(0);
     expect(home?.querySelectorAll('[data-testid="tool-dock-decoration"]')).toHaveLength(5);
+    expect([...home?.querySelectorAll<HTMLElement>('[data-testid="tool-dock-decoration"]') ?? []].every((mark) => mark.textContent === "·")).toBe(true);
     expect(home).not.toHaveTextContent("Ctrl+Alt");
   });
 
@@ -492,6 +493,7 @@ describe("student stream rendering", () => {
     expect(screen.queryByRole("menuitem", { name: "打开终端工具" })).not.toBeInTheDocument();
     expect(menu.querySelectorAll("kbd")).toHaveLength(0);
     expect(menu.querySelectorAll('[data-testid="tool-dock-decoration"]')).toHaveLength(5);
+    expect([...menu.querySelectorAll<HTMLElement>('[data-testid="tool-dock-decoration"]')].every((mark) => mark.textContent === "·")).toBe(true);
     expect(menu).not.toHaveTextContent("Ctrl+Alt+F");
     expect(screen.getByRole("menuitem", { name: "打开白板工具" })).toBeVisible();
     expect(screen.getByRole("tab", { name: "文件" })).toBeVisible();
