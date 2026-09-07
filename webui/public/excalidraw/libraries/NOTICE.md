@@ -1,4 +1,15 @@
-# Whiteboard library attributions
+# Third-party notices for the embedded Excalidraw whiteboard
+
+## `@excalidraw/excalidraw`
+
+This application embeds `@excalidraw/excalidraw` version `0.18.1` as a React
+component. The npm package declares the MIT license; the upstream license is
+available at <https://github.com/excalidraw/excalidraw/blob/master/LICENSE>.
+
+The full MIT license text below applies to the embedded Excalidraw component
+and to the bundled public library files listed in the next section.
+
+## Bundled public libraries
 
 These Excalidraw library files are vendored from the official public library
 directory at <https://github.com/excalidraw/excalidraw-libraries/tree/main/libraries>.
