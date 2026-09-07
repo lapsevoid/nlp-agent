@@ -42,6 +42,9 @@ def test_monitor_root_without_trailing_slash_serves_the_spa_shell(tmp_path, monk
 
     assert response.status_code == 200
     assert response.text == "<html>Monitor</html>"
+    assert response.headers["x-frame-options"] == "DENY"
+    assert response.headers["content-security-policy"].startswith("default-src 'self'")
+    assert response.headers["permissions-policy"] == "camera=(), microphone=(), geolocation=()"
 
 
 def test_reset_cleanup_keeps_active_checkpoint_database_and_removes_orphans(tmp_path):
@@ -122,7 +125,7 @@ def test_monitor_system_usage_reads_the_detailed_all_user_ledger(tmp_path):
         def __init__(self):
             self.calls: list[int] = []
 
-        def system_snapshot(self, *, days: int):
+        def system_snapshot(self, *, days: int, include_users: bool = True):
             self.calls.append(days)
             return {
                 "scope": "system",
@@ -135,7 +138,7 @@ def test_monitor_system_usage_reads_the_detailed_all_user_ledger(tmp_path):
                 "credits_micro": 200,
                 "priced_credits_micro": 200,
                 "tokens": {"total_tokens": 20},
-                "users": [{"user_id": "alice", "events": 2}],
+                "users": [{"user_id": "alice", "events": 2}] if include_users else [],
             }
 
         def system_user_page(self, *, days: int, limit: int, offset: int):
@@ -166,6 +169,7 @@ def test_monitor_system_usage_reads_the_detailed_all_user_ledger(tmp_path):
         assert login.status_code == 201
         response = client.get("/api/v1/observability/usage/system?days=7")
         compact = client.get("/api/v1/observability/usage/system?days=7&include_users=false")
+        unpaged_users = client.get("/api/v1/observability/usage/system?days=7&include_users=true")
         users = client.get("/api/v1/observability/usage/system/users?days=7&limit=12&offset=0")
         trend = client.get("/api/v1/observability/usage/system/trend?window_minutes=120&bucket_minutes=5")
 
@@ -176,6 +180,8 @@ def test_monitor_system_usage_reads_the_detailed_all_user_ledger(tmp_path):
     assert "providers" in response.json()["catalog"]
     assert compact.status_code == 200
     assert compact.json()["users"] == []
+    assert unpaged_users.status_code == 422
+    assert unpaged_users.json()["code"] == "user_breakdown_requires_pagination"
     assert reader.calls == [7, 7]
     assert users.status_code == 200
     assert users.json()["items"][0]["user_id"] == "alice"

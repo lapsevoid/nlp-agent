@@ -83,6 +83,7 @@ monitor:
     enabled: true
     trace_days: 30
     event_days: 30
+    audit_days: 180
     interval_s: 2592000
     initial_delay_s: 60
 

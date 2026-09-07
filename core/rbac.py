@@ -45,6 +45,7 @@ class Permission(StrEnum):
     SYSTEM_TOOL_CONFIG_MANAGE = "system:tool_config:manage"
     SYSTEM_RUNTIME_MONITOR = "system:runtime:monitor"
     SYSTEM_RUNTIME_INSPECT = "system:runtime:inspect"
+    SYSTEM_RUNTIME_RESET = "system:runtime:reset"
     SYSTEM_USER_MANAGE = "system:user:manage"
     SYSTEM_ROLE_MANAGE = "system:role:manage"
     SYSTEM_RELEASE_NOTES_MANAGE = "system:release_notes:manage"
@@ -130,6 +131,7 @@ _DEVELOPER: Final[frozenset[Permission]] = _TEACHER | {
     Permission.SYSTEM_TOOL_CONFIG_MANAGE,
     Permission.SYSTEM_RUNTIME_MONITOR,
     Permission.SYSTEM_RUNTIME_INSPECT,
+    Permission.SYSTEM_RUNTIME_RESET,
     Permission.SYSTEM_USER_MANAGE,
     Permission.SYSTEM_ROLE_MANAGE,
     Permission.SYSTEM_RELEASE_NOTES_MANAGE,

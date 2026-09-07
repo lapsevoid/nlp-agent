@@ -98,6 +98,14 @@ function finiteNumber(value: unknown, fallback = 0): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+export interface SandboxPage<T> {
+  items: T[];
+  total: number;
+  offset: number;
+  limit: number;
+  has_more: boolean;
+}
+
 function capacityTimestamp(value: unknown): number {
   // The API stores Unix seconds; tolerate milliseconds so stale browser state
   // cannot move the chart back to 1970 after a hot reload.
@@ -259,22 +267,36 @@ export function SandboxMonitorPage({
   logs,
   runtimes,
   executions,
+  runtimeTotal = runtimes.length,
+  executionTotal = executions.length,
+  runtimeHasMore = false,
+  executionHasMore = false,
+  listLoading = false,
   live,
   loading,
   logLoading,
   error = "",
   onRefresh,
+  onLoadMoreRuntimes = () => undefined,
+  onLoadMoreExecutions = () => undefined,
   onDrain,
 }: {
   overview: SandboxOverview | null;
   logs: SandboxLogEntry[];
   runtimes: SandboxRuntime[];
   executions: SandboxExecution[];
+  runtimeTotal?: number;
+  executionTotal?: number;
+  runtimeHasMore?: boolean;
+  executionHasMore?: boolean;
+  listLoading?: boolean;
   live: boolean;
   loading: boolean;
   logLoading: boolean;
   error?: string;
   onRefresh: () => void;
+  onLoadMoreRuntimes?: () => void;
+  onLoadMoreExecutions?: () => void;
   onDrain: (runtimeId: string) => void;
 }) {
   const visibleStates = STATE_ORDER.map((state) => [state, overview?.runtime_states[state] ?? 0] as const);
@@ -298,8 +320,8 @@ export function SandboxMonitorPage({
         <section className="sandbox-monitor-panel sandbox-log-panel"><header><div><span className="sandbox-section-kicker">SIGNAL STREAM</span><h3>运行日志</h3><p>只显示异常和状态变化，自动清理 10 分钟以前的记录。</p></div><span className="sandbox-log-count">{logLoading ? "同步中…" : `${visibleLogs.length} 条`}</span></header><div className="sandbox-log-list" aria-live="polite">{visibleLogs.map((item) => <article key={item.id}><span className={`sandbox-log-level ${item.level}`}>{levelLabel(item.level)}</span><div><strong>{item.message}</strong><small>{dateTime(item.timestamp)} · {item.event_type}{item.runtime_id ? ` · ${item.runtime_id.slice(0, 10)}` : ""}</small></div></article>)}{!visibleLogs.length && <EmptyState text="暂无需要关注的运行日志" />}</div></section>
       </div>
       <div className="sandbox-monitor-columns lower">
-        <section className="sandbox-monitor-panel sandbox-inventory-panel"><header><div><span className="sandbox-section-kicker">RUNTIME INVENTORY</span><h3>运行时实例</h3></div></header><div className="sandbox-runtime-list">{runtimes.slice(0, 12).map((runtime) => <article key={runtime.id}><span className={`sandbox-state-dot ${runtime.state}`} /><div><strong>{runtime.id.slice(0, 16)}</strong><small>{STATE_LABELS[runtime.state] ?? runtime.state} · {runtime.node_id ?? "未绑定节点"}</small></div>{["assigned", "ready_unbound", "claiming"].includes(runtime.state) && <button type="button" onClick={() => onDrain(runtime.id)}>排空</button>}</article>)}{!runtimes.length && <EmptyState text="暂无运行时实例" />}</div></section>
-        <section className="sandbox-monitor-panel sandbox-execution-panel"><header><div><span className="sandbox-section-kicker">EXECUTION QUEUE</span><h3>最近执行</h3></div></header><div className="sandbox-execution-list">{executions.slice(0, 12).map((execution) => <article key={execution.id}><span className={`sandbox-execution-status ${execution.status}`} /> <div><strong>{execution.id.slice(0, 16)}</strong><small>{execution.status} · {dateTime(execution.started_at)}</small></div><span className="sandbox-execution-runtime">{execution.runtime_instance_id?.slice(0, 10) ?? "—"}</span></article>)}{!executions.length && <EmptyState text="暂无执行记录" />}</div></section>
+        <section className="sandbox-monitor-panel sandbox-inventory-panel"><header><div><span className="sandbox-section-kicker">RUNTIME INVENTORY</span><h3>运行时实例</h3></div><span className="sandbox-health-total">已加载 {runtimes.length} / {runtimeTotal}</span></header><div className="sandbox-runtime-list">{runtimes.map((runtime) => <article key={runtime.id}><span className={`sandbox-state-dot ${runtime.state}`} /><div><strong>{runtime.id.slice(0, 16)}</strong><small>{STATE_LABELS[runtime.state] ?? runtime.state} · {runtime.node_id ?? "未绑定节点"}</small></div>{["assigned", "ready_unbound", "claiming"].includes(runtime.state) && <button type="button" onClick={() => onDrain(runtime.id)}>排空</button>}</article>)}{!runtimes.length && <EmptyState text="暂无运行时实例" />}</div>{runtimeHasMore && <button className="sandbox-load-more" type="button" onClick={onLoadMoreRuntimes} disabled={listLoading}>{listLoading ? "加载中…" : "加载更多运行时"}</button>}</section>
+        <section className="sandbox-monitor-panel sandbox-execution-panel"><header><div><span className="sandbox-section-kicker">EXECUTION QUEUE</span><h3>最近执行</h3></div><span className="sandbox-health-total">已加载 {executions.length} / {executionTotal}</span></header><div className="sandbox-execution-list">{executions.map((execution) => <article key={execution.id}><span className={`sandbox-execution-status ${execution.status}`} /> <div><strong>{execution.id.slice(0, 16)}</strong><small>{execution.status} · {dateTime(execution.started_at)}</small></div><span className="sandbox-execution-runtime">{execution.runtime_instance_id?.slice(0, 10) ?? "—"}</span></article>)}{!executions.length && <EmptyState text="暂无执行记录" />}</div>{executionHasMore && <button className="sandbox-load-more" type="button" onClick={onLoadMoreExecutions} disabled={listLoading}>{listLoading ? "加载中…" : "加载更多执行记录"}</button>}</section>
       </div>
     </>}
   </div>;

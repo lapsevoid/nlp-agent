@@ -19,7 +19,13 @@ const { monitorApi } = vi.hoisted(() => ({
   },
 }));
 
-const { authenticate } = vi.hoisted(() => ({ authenticate: vi.fn().mockResolvedValue({}) }));
+const { authenticate } = vi.hoisted(() => ({ authenticate: vi.fn().mockResolvedValue({
+  user_id: "developer",
+  roles: ["developer"],
+  permissions: ["system:runtime:monitor", "system:runtime:reset"],
+  csrf_token: "test-csrf",
+  expires_at: 1_800_000_000,
+}) }));
 
 vi.mock("./api", () => ({ authenticate, monitorApi }));
 
@@ -27,7 +33,13 @@ import { MonitorApp } from "./MonitorApp";
 
 describe("MonitorApp navigation", () => {
   beforeEach(() => {
-    authenticate.mockReset().mockResolvedValue({});
+    authenticate.mockReset().mockResolvedValue({
+      user_id: "developer",
+      roles: ["developer"],
+      permissions: ["system:runtime:monitor", "system:runtime:reset"],
+      csrf_token: "test-csrf",
+      expires_at: 1_800_000_000,
+    });
     monitorApi.login.mockReset().mockResolvedValue({ csrf_token: "test-csrf" });
     monitorApi.createWsTicket.mockReset().mockResolvedValue({ ticket: "test-ticket", expires_in: 60 });
     monitorApi.events.mockReset().mockResolvedValue({ items: [] });
@@ -249,7 +261,7 @@ describe("MonitorApp navigation", () => {
 
     render(<MonitorApp />);
 
-    expect(await screen.findByText("当前账号没有监控权限，请使用开发者账号登录。"))
+    expect(await screen.findByText("当前账号没有监控权限，请联系管理员授权。"))
       .toBeVisible();
   });
 

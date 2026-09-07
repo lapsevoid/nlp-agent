@@ -13,6 +13,7 @@ import sys
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -57,6 +58,19 @@ SANDBOX_USERS = (
     ("charlie", "Charlie"),
     ("diana", "Diana"),
 )
+
+
+def is_local_endpoint(url: str) -> bool:
+    """Return whether a DSN points at an exact loopback hostname.
+
+    The demo seed performs scoped deletes, so accepting a remote endpoint based
+    on a substring such as ``"localhost" in url`` would be an unsafe default.
+    """
+    try:
+        hostname = (urlsplit(url).hostname or "").casefold().rstrip(".")
+    except ValueError:
+        return False
+    return hostname in {"localhost", "127.0.0.1", "::1"}
 
 
 def _uuid(kind: str, index: int = 0) -> str:
@@ -408,6 +422,8 @@ def _seed_sandbox_capacity_samples(samples: list[dict]) -> str:
     redis_url = settings.NLP_AGENT_REDIS_URL.strip()
     if not redis_url:
         return "Redis 未配置，容量历史将在监控进程运行后逐步采样"
+    if not is_local_endpoint(redis_url):
+        return "Redis 不是本机地址，已跳过模拟容量历史写入"
     try:
         import redis
 
@@ -447,7 +463,7 @@ def main() -> int:
     if args.count < 1:
         raise SystemExit("--count must be at least 1")
     database_url = settings.NLP_AGENT_DATABASE_URL.strip()
-    if not database_url or not any(host in database_url for host in ("127.0.0.1", "localhost")):
+    if not database_url or not is_local_endpoint(database_url):
         raise SystemExit("Refusing to seed: NLP_AGENT_DATABASE_URL must point to localhost")
 
     engine = create_engine(database_url.replace("mysql+aiomysql://", "mysql+pymysql://"), pool_pre_ping=True)

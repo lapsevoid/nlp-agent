@@ -4,7 +4,12 @@ from pathlib import Path
 
 from datetime import datetime, timezone
 
-from scripts.seed_monitor_demo import MARKER, _build_observability, _build_sandbox_demo
+from scripts.seed_monitor_demo import (
+    MARKER,
+    _build_observability,
+    _build_sandbox_demo,
+    is_local_endpoint,
+)
 
 
 def test_demo_seed_builds_dense_multi_user_observability_data():
@@ -71,3 +76,11 @@ def test_demo_seed_builds_bounded_sandbox_monitor_data_without_user_code():
     assert all(row["resource_summary_json"]["demo_seed_id"] == MARKER for row in executions)
     assert all("code" not in row["resource_summary_json"] for row in executions)
     assert {sample["demo_seed_id"] for sample in samples} == {MARKER}
+
+
+def test_demo_seed_accepts_only_exact_loopback_endpoints():
+    assert is_local_endpoint("mysql+aiomysql://user:secret@localhost:3306/nlp")
+    assert is_local_endpoint("redis://127.0.0.1:6379/0")
+    assert is_local_endpoint("redis://[::1]:6379/0")
+    assert not is_local_endpoint("mysql+aiomysql://user:localhost@db.internal/nlp")
+    assert not is_local_endpoint("redis://127.0.0.1.evil.example/0")

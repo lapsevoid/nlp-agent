@@ -103,6 +103,28 @@ def test_developer_has_system_capabilities_without_implicit_sensitive_data_acces
     )
 
 
+def test_reset_capability_is_explicitly_separate_from_monitor_read_access() -> None:
+    authorization = AuthorizationService()
+    monitor_only = AuthenticatedPrincipal(
+        user_id="developer-1",
+        permissions=frozenset({Permission.SYSTEM_RUNTIME_MONITOR.value}),
+    )
+    reset_operator = monitor_only.model_copy(
+        update={
+            "permissions": frozenset(
+                {
+                    Permission.SYSTEM_RUNTIME_MONITOR.value,
+                    Permission.SYSTEM_RUNTIME_RESET.value,
+                }
+            )
+        }
+    )
+
+    assert authorization.allowed(monitor_only, Permission.SYSTEM_RUNTIME_MONITOR)
+    assert not authorization.allowed(monitor_only, Permission.SYSTEM_RUNTIME_RESET)
+    assert authorization.allowed(reset_operator, Permission.SYSTEM_RUNTIME_RESET)
+
+
 def test_require_reports_a_stable_access_denied_error() -> None:
     authorization = AuthorizationService()
 

@@ -47,3 +47,34 @@ async def test_monthly_retention_waits_before_first_cleanup_and_repeats(monkeypa
 
     assert sleeps == [7, 30]
     assert repository.calls == [(31, 31)]
+
+
+@pytest.mark.asyncio
+async def test_monthly_retention_can_prune_audit_logs_with_a_longer_policy(monkeypatch):
+    repository = RetentionRepository()
+    sleeps: list[float] = []
+    audit_calls: list[int] = []
+
+    async def fake_sleep(delay: float):
+        sleeps.append(delay)
+        raise asyncio.CancelledError
+
+    async def cleanup_audit():
+        audit_calls.append(180)
+        return {"audit_logs": 4}
+
+    monkeypatch.setattr("server.monitor.retention.asyncio.sleep", fake_sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await run_monitor_retention(
+            repository,
+            trace_days=30,
+            event_days=30,
+            initial_delay_s=0,
+            interval_s=30,
+            audit_cleanup=cleanup_audit,
+        )
+
+    assert audit_calls == [180]
+    assert repository.calls == [(30, 30)]
+    assert sleeps == [30]

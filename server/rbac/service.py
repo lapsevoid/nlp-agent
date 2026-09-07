@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import inspect
 
 import uuid
@@ -435,6 +435,20 @@ class RbacService:
                 for row in reason_rows
             ],
         }
+
+    async def prune_audit(
+        self, session: AsyncSession, *, retention_days: int
+    ) -> int:
+        """Delete authorization records older than the monitor audit policy."""
+        cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
+            days=max(30, int(retention_days))
+        )
+        result = await session.execute(
+            delete(AuthorizationAuditLogModel).where(
+                AuthorizationAuditLogModel.created_at < cutoff
+            )
+        )
+        return max(0, int(result.rowcount or 0))
 
     async def read_sensitive_checkpoint(
         self,

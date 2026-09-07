@@ -85,6 +85,7 @@ class SpanRecord(BaseModel):
     started_at: datetime = Field(default_factory=utc_now)
     completed_at: datetime | None = None
     duration_ms: int | None = Field(default=None, ge=0)
+    ttft_ms: int | None = Field(default=None, ge=0)
     status: SpanStatus = SpanStatus.RUNNING
     attempt: int = Field(default=1, ge=1)
     usage: TokenUsage = Field(default_factory=TokenUsage)

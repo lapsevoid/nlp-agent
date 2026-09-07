@@ -827,6 +827,36 @@ def test_system_usage_exposes_bounded_user_pages_and_five_minute_trend():
     assert all("T" in row["day"] for row in trend["breakdown"])
 
 
+def test_system_snapshot_without_users_uses_aggregate_queries_not_raw_usage_rows(monkeypatch):
+    engine = _engine()
+    with engine.begin() as connection:
+        connection.execute(
+            insert(UsageEventModel).values(
+                _usage_event(
+                    operation_id="op-aggregate-only",
+                    user_id="aggregate-user",
+                    occurred_at=NOW - timedelta(hours=1),
+                )
+            )
+        )
+
+    reader = UsageReadService(engine)
+
+    def fail_if_raw_rows_are_loaded(**_kwargs):
+        raise AssertionError("system snapshot should not materialize raw usage rows")
+
+    monkeypatch.setattr(reader, "_usage_rows", fail_if_raw_rows_are_loaded)
+    snapshot = reader.system_snapshot(
+        days=7,
+        now=NOW,
+        include_users=False,
+    )
+
+    assert snapshot["events"] == 1
+    assert snapshot["users"] == []
+    assert snapshot["tokens"]["total_tokens"] == 10
+
+
 def test_alert_status_can_be_acknowledged_and_resolved():
     engine = _engine()
     with engine.begin() as connection:

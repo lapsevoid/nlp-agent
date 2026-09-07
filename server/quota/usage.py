@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 from typing import Any, Literal
 
-from sqlalchemy import Engine, case, create_engine, func, select
+from sqlalchemy import BigInteger, Engine, case, cast, create_engine, func, literal, literal_column, select
 
 from server.infrastructure.mysql.models import ObservabilityRecordModel
 from server.quota.models import UsageEventModel
@@ -23,6 +23,8 @@ TOKEN_FIELDS = (
 )
 
 UsageGranularity = Literal["day", "week", "five_minute"]
+SystemUsageDimension = Literal["users", "workspaces", "providers", "purposes", "models"]
+SYSTEM_DIMENSION_PREVIEW_LIMIT = 50
 
 
 def _utc_now() -> datetime:
@@ -94,6 +96,7 @@ class UsageReadService:
         *,
         days: int = 30,
         granularity: UsageGranularity = "day",
+        include_users: bool = True,
         now: datetime | None = None,
     ) -> dict[str, Any]:
         """Return the detailed, unscoped usage view used by the monitor.
@@ -107,6 +110,12 @@ class UsageReadService:
             raise ValueError("granularity must be 'day', 'week', or 'five_minute'")
         end = _utc(now or _utc_now())
         start = end - timedelta(days=max(1, days))
+        if granularity == "day":
+            return self._system_snapshot_sql(
+                start=start,
+                end=end,
+                include_users=include_users,
+            )
         rows = self._usage_rows(start=start, end=end)
         snapshot = self._snapshot(
             user_id=None,
@@ -129,6 +138,226 @@ class UsageReadService:
             }
         )
         return snapshot
+
+    @staticmethod
+    def _aggregate_expressions(table):
+        return [
+            func.count().label("events"),
+            func.coalesce(
+                func.sum(case((table.c.credits_micro.is_(None), 1), else_=0)), 0
+            ).label("unpriced_events"),
+            func.coalesce(
+                func.sum(case((table.c.credits_micro.is_not(None), 1), else_=0)), 0
+            ).label("priced_events"),
+            func.coalesce(
+                func.sum(
+                    case((table.c.credits_micro.is_not(None), table.c.credits_micro), else_=0)
+                ),
+                0,
+            ).label("priced_credits_micro"),
+            *[
+                func.coalesce(func.sum(table.c[field]), 0).label(field)
+                for field in TOKEN_FIELDS
+            ],
+        ]
+
+    @staticmethod
+    def _dimension_item(row, key: str, *, secondary_key: str | None = None) -> dict[str, Any]:
+        events = int(row["events"] or 0)
+        unpriced_events = int(row["unpriced_events"] or 0)
+        priced_credits_micro = int(row["priced_credits_micro"] or 0)
+        item: dict[str, Any] = {
+            key: str(row[key] or "unknown"),
+            "events": events,
+            "priced_events": int(row["priced_events"] or 0),
+            "unpriced_events": unpriced_events,
+            "credits_complete": unpriced_events == 0,
+            "credit_status": "complete" if unpriced_events == 0 else "partial",
+            "credits_micro": priced_credits_micro if unpriced_events == 0 else None,
+            "priced_credits_micro": priced_credits_micro,
+            "tokens": {
+                field: int(row[field] or 0) for field in TOKEN_FIELDS
+            },
+        }
+        if secondary_key is not None:
+            item[secondary_key] = str(row[secondary_key] or "unknown")
+        return item
+
+    def _system_snapshot_sql(
+        self,
+        *,
+        start: datetime,
+        end: datetime,
+        include_users: bool,
+    ) -> dict[str, Any]:
+        """Build the day-granularity monitor snapshot using SQL rollups.
+
+        The monitor must not materialize every user's raw fact rows just to
+        render totals.  Aggregates remain bounded by the number of dimensions
+        and days; the optional user list is loaded only for the explicit
+        drill-down request, which has its own paged endpoint.
+        """
+        table = UsageEventModel.__table__
+        conditions = (
+            table.c.occurred_at >= start,
+            table.c.occurred_at < end,
+            table.c.archived_at.is_(None),
+        )
+        totals_query = select(*self._aggregate_expressions(table)).where(*conditions)
+        period = func.date(table.c.occurred_at).label("period_label")
+        # Keep the overview trend one row per day. Grouping by purpose,
+        # provider, and model made this lightweight snapshot grow with every
+        # integration; those dimensions have their own paginated endpoint.
+        breakdown_query = (
+            select(period, *self._aggregate_expressions(table))
+            .where(*conditions)
+            .group_by(period)
+            .order_by(period)
+        )
+
+        dimensions = {
+            "workspaces": ("workspace_id", None),
+            "providers": ("provider", None),
+            "purposes": ("purpose", None),
+            "models": ("provider_model", "provider"),
+        }
+        if include_users:
+            dimensions["users"] = ("user_id", None)
+
+        with self._engine.connect() as connection:
+            totals = connection.execute(totals_query).mappings().one()
+            breakdown_rows = connection.execute(breakdown_query).mappings().all()
+            dimension_rows = {}
+            for name, (key, secondary_key) in dimensions.items():
+                columns = [table.c[key]]
+                if secondary_key is not None:
+                    columns.append(table.c[secondary_key])
+                query = (
+                    select(*columns, *self._aggregate_expressions(table))
+                    .where(*conditions)
+                    .group_by(*columns)
+                    .order_by(func.count().desc(), *columns)
+                    .limit(SYSTEM_DIMENSION_PREVIEW_LIMIT)
+                )
+                dimension_rows[name] = connection.execute(query).mappings().all()
+
+        unpriced_events = int(totals["unpriced_events"] or 0)
+        priced_credits_micro = int(totals["priced_credits_micro"] or 0)
+        output_breakdown = []
+        for row in breakdown_rows:
+            day = str(row["period_label"] or "")[:10]
+            period_start = datetime.fromisoformat(f"{day}T00:00:00+00:00")
+            output_breakdown.append(
+                {
+                    "day": day,
+                    "period_start": period_start.isoformat(),
+                    "period_end": (period_start + timedelta(days=1)).isoformat(),
+                    "granularity": "day",
+                    "purpose": "all",
+                    "provider": "all",
+                    "provider_model": "all",
+                    "events": int(row["events"] or 0),
+                    "priced_events": int(row["priced_events"] or 0),
+                    "unpriced_events": int(row["unpriced_events"] or 0),
+                    "priced_credits_micro": int(row["priced_credits_micro"] or 0),
+                    **{field: int(row[field] or 0) for field in TOKEN_FIELDS},
+                }
+            )
+
+        output = {
+            "scope": "system",
+            "user_id": None,
+            "workspace_id": None,
+            "period_days": max(1, (end - start).days),
+            "from": start.isoformat(),
+            "to": end.isoformat(),
+            "granularity": "day",
+            "events": int(totals["events"] or 0),
+            "priced_events": int(totals["priced_events"] or 0),
+            "unpriced_events": unpriced_events,
+            "credits_complete": unpriced_events == 0,
+            "credit_status": "complete" if unpriced_events == 0 else "partial",
+            "credits_micro": priced_credits_micro if unpriced_events == 0 else None,
+            "priced_credits_micro": priced_credits_micro,
+            "tokens": {field: int(totals[field] or 0) for field in TOKEN_FIELDS},
+            "breakdown": output_breakdown,
+        }
+        for name, (key, secondary_key) in dimensions.items():
+            output[name] = [
+                self._dimension_item(row, key, secondary_key=secondary_key)
+                for row in dimension_rows[name]
+            ]
+        for name in ("users", "workspaces", "providers", "purposes", "models"):
+            output.setdefault(name, [])
+        return output
+
+    def system_dimension_page(
+        self,
+        *,
+        dimension: SystemUsageDimension,
+        days: int = 30,
+        limit: int = 12,
+        offset: int = 0,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Return one SQL-aggregated page for a high-cardinality dimension."""
+        dimension_config: dict[SystemUsageDimension, tuple[str, str | None]] = {
+            "users": ("user_id", None),
+            "workspaces": ("workspace_id", None),
+            "providers": ("provider", None),
+            "purposes": ("purpose", None),
+            "models": ("provider_model", "provider"),
+        }
+        if dimension not in dimension_config:
+            raise ValueError(f"unsupported usage dimension: {dimension}")
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        if offset < 0:
+            raise ValueError("offset must not be negative")
+        key, secondary_key = dimension_config[dimension]
+        end = _utc(now or _utc_now())
+        start = end - timedelta(days=max(1, days))
+        table = UsageEventModel.__table__
+        conditions = (
+            table.c.occurred_at >= start,
+            table.c.occurred_at < end,
+            table.c.archived_at.is_(None),
+        )
+        columns = [table.c[key]]
+        if secondary_key is not None:
+            columns.append(table.c[secondary_key])
+        grouped = (
+            select(*columns)
+            .where(*conditions)
+            .group_by(*columns)
+            .subquery()
+        )
+        page_query = (
+            select(*columns, *self._aggregate_expressions(table))
+            .where(*conditions)
+            .group_by(*columns)
+            .order_by(func.count().desc(), *columns)
+            .offset(offset)
+            .limit(min(max(1, limit), 100))
+        )
+        with self._engine.connect() as connection:
+            total = int(connection.execute(select(func.count()).select_from(grouped)).scalar_one())
+            rows = connection.execute(page_query).mappings().all()
+        return {
+            "scope": "system",
+            "dimension": dimension,
+            "period_days": max(1, days),
+            "from": start.isoformat(),
+            "to": end.isoformat(),
+            "items": [
+                self._dimension_item(row, key, secondary_key=secondary_key)
+                for row in rows
+            ],
+            "total": total,
+            "offset": offset,
+            "limit": min(max(1, limit), 100),
+            "has_more": offset + len(rows) < total,
+        }
 
     def system_user_page(
         self,
@@ -227,14 +456,30 @@ class UsageReadService:
             raise ValueError("bucket_minutes must be between 1 and window_minutes")
         end = _utc(now or _utc_now())
         start = end - timedelta(minutes=window_minutes)
-        rows = self._usage_rows(start=start, end=end)
-        snapshot = self._snapshot(
-            user_id=None,
-            workspace_id=None,
+        table = UsageEventModel.__table__
+        conditions = (
+            table.c.occurred_at >= start,
+            table.c.occurred_at < end,
+            table.c.archived_at.is_(None),
+        )
+        with self._engine.connect() as connection:
+            bucket = self._bucket_epoch_expression(
+                connection, table, bucket_minutes=bucket_minutes
+            )
+            query = (
+                select(bucket.label("bucket_epoch"), *self._aggregate_expressions(table))
+                .where(*conditions)
+                .group_by(bucket)
+                .order_by(bucket)
+            )
+            rows = connection.execute(query).mappings().all()
+        # The trend is a chart feed, not a ledger export. Aggregate in the
+        # database so a busy five-minute window produces one row per bucket,
+        # regardless of how many users or provider attempts created it.
+        snapshot = self._aggregate_bucket_snapshot(
             start=start,
             end=end,
             rows=rows,
-            granularity="five_minute",
             bucket_minutes=bucket_minutes,
         )
         snapshot.update(
@@ -250,6 +495,90 @@ class UsageReadService:
             }
         )
         return snapshot
+
+    @staticmethod
+    def _bucket_epoch_expression(connection: Any, table: Any, *, bucket_minutes: int):
+        """Return a portable epoch bucket expression for the configured DB."""
+        bucket_seconds = bucket_minutes * 60
+        dialect = str(getattr(connection.dialect, "name", "")).lower()
+        if dialect == "mysql":
+            epoch_seconds = func.timestampdiff(
+                literal_column("SECOND"),
+                literal("1970-01-01 00:00:00"),
+                table.c.occurred_at,
+            )
+        elif dialect == "sqlite":
+            epoch_seconds = cast(func.strftime("%s", table.c.occurred_at), BigInteger)
+        else:
+            # PostgreSQL-compatible fallback for deployments that use a
+            # different analytics database in development or CI.
+            epoch_seconds = cast(func.extract("epoch", table.c.occurred_at), BigInteger)
+        return cast(
+            func.floor(epoch_seconds / bucket_seconds) * bucket_seconds,
+            BigInteger,
+        )
+
+    @staticmethod
+    def _aggregate_bucket_snapshot(
+        *,
+        start: datetime,
+        end: datetime,
+        rows: list[dict[str, Any]],
+        bucket_minutes: int,
+    ) -> dict[str, Any]:
+        token_totals = {field: 0 for field in TOKEN_FIELDS}
+        events = priced_events = unpriced_events = priced_credits_micro = 0
+        breakdown: list[dict[str, Any]] = []
+        bucket_delta = timedelta(minutes=bucket_minutes)
+        for row in rows:
+            bucket_epoch = int(row["bucket_epoch"])
+            period_start = datetime.fromtimestamp(bucket_epoch, tz=timezone.utc)
+            row_events = int(row["events"] or 0)
+            row_priced = int(row["priced_events"] or 0)
+            row_unpriced = int(row["unpriced_events"] or 0)
+            row_credits = int(row["priced_credits_micro"] or 0)
+            events += row_events
+            priced_events += row_priced
+            unpriced_events += row_unpriced
+            priced_credits_micro += row_credits
+            token_values = {
+                field: int(row[field] or 0) for field in TOKEN_FIELDS
+            }
+            for field, value in token_values.items():
+                token_totals[field] += value
+            breakdown.append(
+                {
+                    "day": period_start.date().isoformat(),
+                    "period_start": period_start.isoformat(),
+                    "period_end": (period_start + bucket_delta).isoformat(),
+                    "granularity": "five_minute" if bucket_minutes == 5 else f"{bucket_minutes}_minute",
+                    "purpose": "all",
+                    "provider": "all",
+                    "provider_model": "all",
+                    "events": row_events,
+                    "priced_events": row_priced,
+                    "unpriced_events": row_unpriced,
+                    "priced_credits_micro": row_credits,
+                    **token_values,
+                }
+            )
+        return {
+            "user_id": None,
+            "workspace_id": None,
+            "period_days": max(1, (end - start).days),
+            "from": start.isoformat(),
+            "to": end.isoformat(),
+            "granularity": "five_minute" if bucket_minutes == 5 else f"{bucket_minutes}_minute",
+            "events": events,
+            "priced_events": priced_events,
+            "unpriced_events": unpriced_events,
+            "credits_complete": unpriced_events == 0,
+            "credit_status": "complete" if unpriced_events == 0 else "partial",
+            "credits_micro": priced_credits_micro if unpriced_events == 0 else None,
+            "priced_credits_micro": priced_credits_micro,
+            "tokens": token_totals,
+            "breakdown": breakdown,
+        }
 
     def shadow_comparison(
         self,

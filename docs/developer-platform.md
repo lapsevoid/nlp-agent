@@ -77,13 +77,17 @@ The platform includes:
 - input/output/reasoning/cache-hit/cache-miss Token usage;
 - session aggregates and error grouping;
 - complete Trace details with Coordinator/Worker/model/tool spans;
-- raw Trace/Event/Tool JSON for debugging;
+- redacted Trace/Event metadata for debugging (prompts, outputs and credentials are never persisted);
 - live telemetry events over `/ws/observability`;
 - telemetry queue/database health and explicit retention cleanup;
-- automatic monthly cleanup of Trace/Span/Event rows older than 30 days.
+- automatic monthly cleanup of Trace/Span/Event rows older than 30 days;
+- authorization audit records retained for 180 days by default and pruned by
+  the same monthly maintenance task.
 
 The monitor uses the same environment's control-plane MySQL schema and requires
-its own same-origin WebSocket ticket. Cleanup mutations still require CSRF
+its own same-origin WebSocket ticket. Interactive OpenAPI documentation is
+disabled on the monitor surface, and the public readiness probe only exposes
+process status. Cleanup mutations still require CSRF
 protection and the `system:runtime:monitor` permission; no production monitor
 credential or database endpoint is shared with test. Automatic retention is
 configured under `monitor.retention` in `configs/agent_config.yaml` (or with

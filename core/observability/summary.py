@@ -21,6 +21,10 @@ LEGACY_TOKEN_FIELDS = (
 
 _FAILURE_STATUSES = {"error", "timeout", "cancelled", "denied"}
 _ERROR_STATUSES = {"error", "timeout"}
+# Summary endpoints are dashboards, not export endpoints. Keep every response
+# bounded even when an installation has many providers, models, components, or
+# event names. Dedicated paginated endpoints remain the source for full detail.
+MAX_SUMMARY_DIMENSIONS = 100
 
 
 def _utc(value: datetime) -> datetime:
@@ -53,6 +57,20 @@ def _usage_value(row: dict[str, Any], field: str) -> int:
     return int(value or 0)
 
 
+def _ttft_value(row: dict[str, Any]) -> int | None:
+    """Read the canonical span TTFT, with compatibility for legacy payloads."""
+    value = row.get("ttft_ms")
+    if value is None and isinstance(row.get("attributes"), dict):
+        value = row["attributes"].get("ttft_ms")
+    if value is None:
+        return None
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return None
+    return value if value >= 0 else None
+
+
 def _percentile(values: Iterable[int], percentile: float) -> int | None:
     ordered = sorted(values)
     if not ordered:
@@ -69,7 +87,7 @@ def _dimension_counts(values: Iterable[Any]) -> list[dict[str, Any]]:
     return [
         {"value": value, "requests": count}
         for value, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
-    ]
+    ][:MAX_SUMMARY_DIMENSIONS]
 
 
 def _token_totals(rows: Iterable[dict[str, Any]]) -> dict[str, int]:
@@ -191,7 +209,7 @@ def _model_rows(spans: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 else 0,
             }
         )
-    return sorted(result, key=lambda item: (-item["requests"], item["provider_model"]))
+    return sorted(result, key=lambda item: (-item["requests"], item["provider_model"]))[:MAX_SUMMARY_DIMENSIONS]
 
 
 def _error_groups(spans: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -227,7 +245,7 @@ def _error_groups(spans: list[dict[str, Any]]) -> list[dict[str, Any]]:
         result,
         key=lambda item: (item["count"], item["last_seen"] or ""),
         reverse=True,
-    )
+    )[:MAX_SUMMARY_DIMENSIONS]
 
 
 def _period_rows(rows: Iterable[dict[str, Any]], since: datetime) -> list[dict[str, Any]]:
@@ -314,8 +332,9 @@ def _health_dimensions(
         group["total_tokens"] += _usage_value(row, "total_tokens")
         if row.get("duration_ms") is not None:
             group["_durations"].append(int(row.get("duration_ms") or 0))
-        if row.get("ttft_ms") is not None:
-            group["_ttfts"].append(int(row.get("ttft_ms") or 0))
+        ttft_ms = _ttft_value(row)
+        if ttft_ms is not None:
+            group["_ttfts"].append(ttft_ms)
         group["_users"].add(str(row.get("_user_id") or row.get("user_id") or "unknown"))
         group["_workspaces"].add(
             str(row.get("_workspace_id") or row.get("workspace_id") or "unknown")
@@ -370,7 +389,7 @@ def _health_dimensions(
             -item["requests"],
             str(item.get("label") or item.get("provider") or item.get("name") or ""),
         ),
-    )
+    )[:MAX_SUMMARY_DIMENSIONS]
 
 
 def _percentile_metrics(values: Iterable[int]) -> dict[str, int | None]:
@@ -457,8 +476,9 @@ def _operational_trend(
         bucket["_users"].add(str(row.get("user_id") or "unknown"))
         if row.get("duration_ms") is not None:
             bucket["_durations"].append(int(row.get("duration_ms") or 0))
-        if row.get("ttft_ms") is not None:
-            bucket["_ttfts"].append(int(row.get("ttft_ms") or 0))
+        ttft_ms = _ttft_value(row)
+        if ttft_ms is not None:
+            bucket["_ttfts"].append(ttft_ms)
     for row in spans:
         bucket = bucket_for(row)
         if bucket is None:
@@ -524,7 +544,7 @@ def build_dependency_health(
         dimension="model",
     )
     durations = [int(row["duration_ms"]) for row in trace_rows if row.get("duration_ms") is not None]
-    ttfts = [int(row["ttft_ms"]) for row in trace_rows if row.get("ttft_ms") is not None]
+    ttfts = [ttft_ms for row in trace_rows if (ttft_ms := _ttft_value(row)) is not None]
     failed_span_trace_ids = {
         str(row.get("_trace_id") or "")
         for row in context_spans
@@ -586,6 +606,7 @@ def build_dependency_health(
         "providers": providers,
         "models": models,
         "anomalies": anomalies[:20],
+        "dimension_limit": MAX_SUMMARY_DIMENSIONS,
     }
 
 
@@ -834,7 +855,7 @@ def build_telemetry_overview(
     errors = sum(row.get("status") in _ERROR_STATUSES for row in trace_rows)
     failed_requests = sum(row.get("status") in _FAILURE_STATUSES for row in trace_rows)
     durations = [int(row["duration_ms"]) for row in trace_rows if row.get("duration_ms") is not None]
-    ttfts = [int(row["ttft_ms"]) for row in trace_rows if row.get("ttft_ms") is not None]
+    ttfts = [ttft_ms for row in trace_rows if (ttft_ms := _ttft_value(row)) is not None]
     timestamps = [
         _parse_datetime(row.get("completed_at") or row.get("started_at"))
         for row in trace_rows
@@ -890,15 +911,16 @@ def build_telemetry_overview(
             "sources": _dimension_counts(row.get("source") for row in trace_rows),
             "span_kinds": _dimension_counts(row.get("kind") for row in span_rows),
         },
-        "component_spans": component_rows,
-        "span_kinds": span_kind_rows,
-        "models": _model_rows(span_rows),
-        "error_groups": _error_groups(span_rows),
+        "component_spans": component_rows[:MAX_SUMMARY_DIMENSIONS],
+        "span_kinds": span_kind_rows[:MAX_SUMMARY_DIMENSIONS],
+        "models": _model_rows(span_rows)[:MAX_SUMMARY_DIMENSIONS],
+        "error_groups": _error_groups(span_rows)[:MAX_SUMMARY_DIMENSIONS],
         "events_by_level": dict(
             sorted(Counter(str(row.get("level") or "unknown") for row in event_rows).items())
         ),
         "event_names": _dimension_counts(row.get("name") for row in event_rows),
-        "top_users": _user_summary(trace_rows),
+        "top_users": _user_summary(trace_rows)[:MAX_SUMMARY_DIMENSIONS],
+        "dimension_limit": MAX_SUMMARY_DIMENSIONS,
         "latest_trace_at": latest_trace.isoformat() if latest_trace else None,
         "latest_event_at": latest_event.isoformat() if latest_event else None,
     }
