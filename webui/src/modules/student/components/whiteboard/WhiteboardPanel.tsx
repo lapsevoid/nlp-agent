@@ -25,6 +25,10 @@ export function WhiteboardPanel({ userId, onSceneChange }: WhiteboardPanelProps)
   const latestScene = useRef<StoredWhiteboardScene | null>(initialScene);
   const saveTimer = useRef<number | null>(null);
 
+  useEffect(() => {
+    if (initialScene) onSceneChange?.(initialScene);
+  }, [initialScene, onSceneChange]);
+
   const persistLatestScene = useCallback(() => {
     if (userId && latestScene.current) writeWhiteboardScene(userId, latestScene.current);
   }, [userId]);

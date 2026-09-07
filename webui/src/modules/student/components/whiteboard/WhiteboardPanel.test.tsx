@@ -64,4 +64,19 @@ describe("WhiteboardPanel", () => {
       files: {},
     }));
   });
+
+  it("forwards a restored scene before the next edit", () => {
+    const onSceneChange = vi.fn();
+    const savedScene = {
+      schemaVersion: 1,
+      elements: [{ id: "saved-1", type: "rectangle" }],
+      appState: { theme: "dark" },
+      files: {},
+    };
+    localStorage.setItem(storageKeyForUser("student-1"), JSON.stringify(savedScene));
+
+    render(<WhiteboardPanel userId="student-1" onSceneChange={onSceneChange} />);
+
+    expect(onSceneChange).toHaveBeenCalledWith(savedScene);
+  });
 });
