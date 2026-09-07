@@ -163,7 +163,7 @@ describe("student stream rendering", () => {
       },
     });
 
-    expect(uploadButton).toBeEnabled();
+    await waitFor(() => expect(uploadButton).toBeEnabled());
     fireEvent(screen.getByRole("textbox", { name: "学习问题" }), paste);
 
     expect(paste.defaultPrevented).toBe(true);
