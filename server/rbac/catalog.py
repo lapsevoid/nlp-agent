@@ -50,6 +50,7 @@ PERMISSION_LABELS: dict[Permission, tuple[str, str]] = {
     Permission.SYSTEM_TOOL_CONFIG_MANAGE: ("管理工具配置", "管理工具和 MCP 服务配置，包括启用状态、调用策略和安全限制。"),
     Permission.SYSTEM_RUNTIME_MONITOR: ("监控运行状态", "查看服务、Worker、Agent 和任务队列的运行状态及基础指标。"),
     Permission.SYSTEM_RUNTIME_INSPECT: ("查看运行时详情", "查看运行时诊断、配置状态和故障排查信息，不代表可以修改配置。"),
+    Permission.SYSTEM_RUNTIME_RESET: ("重置运行时数据", "清理本地运行会话、遥测和调试数据，仅限明确授权的运维操作。"),
     Permission.SYSTEM_USER_MANAGE: ("管理用户", "创建、编辑、禁用、恢复用户，并管理用户角色和登录会话。"),
     Permission.SYSTEM_ROLE_MANAGE: ("管理角色权限", "为游客、学生、教师、开发者四个固定角色分配权限和数据作用域，不能创建新角色。"),
     Permission.SYSTEM_RELEASE_NOTES_MANAGE: ("管理发布说明", "创建、编辑、发布或下线开发者工作台中的版本说明。"),

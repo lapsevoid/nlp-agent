@@ -36,6 +36,7 @@ dependencies = [
     "opencv-python-headless>=4.8",
     "numpy>=1.26",
     "python-multipart>=0.0.20",
+    "defusedxml>=0.7.1",
 ]
 
 [dependency-groups]

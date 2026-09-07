@@ -624,6 +624,9 @@ def create_app(
             if sandbox_manager is not None:
                 await sandbox_manager.close()
             await sandbox_model_service.close()
+            from server.tools.academic.service import close_academic_search_service
+
+            await close_academic_search_service()
             await gateway.begin_shutdown()
             await hub.close()
             await gateway.close()

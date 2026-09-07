@@ -1,3 +1,4 @@
+from server.tools.api.academic_search_tool import academic_search
 from server.tools.api.file_read_tool import read_local_file
 from server.tools.api.image_analyze_tool import image_analyze
 from server.tools.api.time_tool import get_current_time
@@ -65,6 +66,21 @@ def register_builtin_tools(catalog: ToolCatalog | None = None) -> list[str]:
             max_concurrency=2,
             retry=ToolRetryPolicy(max_attempts=2),
             factory=lambda: web_fetch.model_copy(deep=True),
+        ),
+        ToolDescriptor(
+            name=academic_search.name,
+            description=academic_search.description,
+            source=ToolSource.BUILTIN,
+            provider="academic-open-apis",
+            scopes=frozenset({ToolScope.COORDINATOR, ToolScope.WORKER}),
+            capabilities=frozenset({"academic.search"}),
+            risk=ToolRisk.MEDIUM,
+            read_only=True,
+            concurrency_safe=True,
+            timeout_s=35,
+            max_concurrency=4,
+            retry=ToolRetryPolicy(max_attempts=1),
+            factory=lambda: academic_search.model_copy(deep=True),
         ),
         ToolDescriptor(
             name=image_analyze.name,
