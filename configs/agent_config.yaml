@@ -79,6 +79,13 @@ monitor:
   allowed_hosts: [127.0.0.1, localhost, testserver]
   allowed_origins: [http://127.0.0.1:8766, http://localhost:8766, http://127.0.0.1:5174]
   static_dir: webui/monitor-dist
+  retention:
+    enabled: true
+    trace_days: 30
+    event_days: 30
+    audit_days: 180
+    interval_s: 2592000
+    initial_delay_s: 60
 
 providers:
   deepseek:

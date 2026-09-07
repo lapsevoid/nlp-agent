@@ -836,7 +836,8 @@ class ResilientChatModel:
                                 break
                             first = False
                             received = True
-                            visible = visible or self._visible_chunk(chunk)
+                            chunk_visible = self._visible_chunk(chunk)
+                            visible = visible or chunk_visible
                             normalized = (
                                 normalize_chunk(chunk)
                                 if isinstance(chunk, AIMessageChunk)
@@ -862,7 +863,7 @@ class ResilientChatModel:
                             ).get("finish_reason")
                             if finish:
                                 finish_reason = finish
-                            if span is not None:
+                            if span is not None and chunk_visible:
                                 if "ttft_ms" not in span.attributes:
                                     span.annotate(
                                         ttft_ms=max(

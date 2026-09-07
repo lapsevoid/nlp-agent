@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -5,6 +6,9 @@ from langchain_core.messages import AIMessage, AIMessageChunk
 
 from core.coordinator_runtime import CoordinatorRuntime
 from core.learning import ExerciseState, LearningContext, LearningProgress, TeachingMaterials
+from core.observability.context import TelemetryContext, bind_telemetry_context
+from core.observability.models import SpanStatus
+from core.observability.runtime import TelemetryRuntime
 from core.session_context import SessionContext
 from core.worker_events import WorkerEventBus
 from gateway.contracts import GatewayEventType
@@ -40,6 +44,29 @@ class StreamingGraph(RecordingGraph):
             "event": "on_chat_model_stream",
             "metadata": {"langgraph_node": "coordinator"},
             "data": {"chunk": AIMessageChunk(content="late answer")},
+        }
+
+
+class ToolThenPublicStreamingGraph(RecordingGraph):
+    async def astream_events(self, _state, *, config, version):
+        self.configs.append(config)
+        yield {
+            "event": "on_chat_model_stream",
+            "metadata": {"langgraph_node": "coordinator"},
+            "data": {
+                "chunk": AIMessageChunk(
+                    content="",
+                    tool_call_chunks=[
+                        {"name": "search_docs", "args": "{}", "id": "call-1", "index": 0}
+                    ],
+                )
+            },
+        }
+        await asyncio.sleep(0.06)
+        yield {
+            "event": "on_chat_model_stream",
+            "metadata": {"langgraph_node": "coordinator"},
+            "data": {"chunk": AIMessageChunk(content="public answer")},
         }
 
 
@@ -122,7 +149,35 @@ async def test_engine_injects_teacher_topic_and_blueprint_into_graph_config(monk
     assert configurable["review_blueprint"] == {}
     assert configurable["guided_session"]["objective"] == "理解 Attention"
     assert configurable["guided_blueprint"]["guidance"] == "先用问题帮助学生区分 QKV。"
+    assert configurable["telemetry_session_id"] == "learning-session"
+    assert configurable["telemetry_trace_id"]
+    assert configurable["telemetry_span_id"]
     await engine._runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_engine_preserves_runtime_telemetry_when_contextvar_is_missing(monkeypatch):
+    graph = RecordingGraph()
+    engine = LangGraphAgentEngine()
+    engine._app = graph
+    telemetry = TelemetryContext.create(
+        session_id="runtime-session", turn_id="runtime-turn", user_id="alice"
+    )
+    engine._runtime = SimpleNamespace(
+        telemetry_context=lambda session_id: telemetry if session_id == "runtime-session" else None
+    )
+    monkeypatch.setattr("gateway.engine.current_telemetry_context", lambda: None)
+
+    await engine._invoke(
+        [],
+        SessionContext(session_id="runtime-session", user_id="alice"),
+        False,
+        "runtime-turn",
+    )
+
+    configurable = graph.configs[0]["configurable"]
+    assert configurable["telemetry_trace_id"] == telemetry.trace_id
+    assert configurable["telemetry_span_id"] == telemetry.span_id
 
 
 @pytest.mark.asyncio
@@ -144,6 +199,31 @@ async def test_engine_emits_named_tool_lifecycle_events_for_the_webui():
         (GatewayEventType.TOOL_STARTED, {"name": "search_docs"}),
         (GatewayEventType.TOOL_COMPLETED, {"name": "search_docs"}),
     ]
+
+
+@pytest.mark.asyncio
+async def test_engine_marks_trace_ttft_only_when_public_text_is_emitted(monkeypatch, tmp_path):
+    telemetry = TelemetryRuntime(tmp_path / "telemetry.sqlite3", flush_interval_s=0.01)
+    monkeypatch.setattr("gateway.engine.global_telemetry", telemetry)
+    telemetry_context = TelemetryContext.create(
+        session_id="public-ttft-session", turn_id="public-ttft-turn", user_id="alice"
+    )
+    session_context = SessionContext(
+        session_id="public-ttft-session", user_id="alice"
+    )
+    telemetry.start_trace(telemetry_context)
+    engine = LangGraphAgentEngine()
+    engine._app = ToolThenPublicStreamingGraph()
+
+    with bind_telemetry_context(telemetry_context):
+        await engine._invoke([], session_context, False, "public-ttft-turn")
+    telemetry.complete_trace(telemetry_context, status=SpanStatus.OK)
+    await telemetry.flush()
+
+    trace = telemetry.repository.list_traces(limit=1)[0]
+    assert trace["ttft_ms"] >= 50
+    assert trace["ttft_ms"] <= trace["duration_ms"]
+    await telemetry.close()
 
 
 @pytest.mark.asyncio

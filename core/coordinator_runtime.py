@@ -35,18 +35,24 @@ async def invoke_model_with_telemetry(
     model: object, messages: list[BaseMessage], config: object, *, name: str
 ) -> object:
     """Invoke an LLM while recording response usage in the active trace."""
-    telemetry = current_telemetry_context()
+    telemetry = (
+        TelemetryContext.from_config(config)  # type: ignore[arg-type]
+        if isinstance(config, dict)
+        else None
+    ) or current_telemetry_context()
     if telemetry is None:
         return await model.ainvoke(messages, config=config)  # type: ignore[attr-defined]
-    if getattr(model, "emits_model_telemetry", False):
-        response = await model.ainvoke(messages, config=config)  # type: ignore[attr-defined]
-        global_telemetry.mark_ttft(telemetry)
-        return response
-    async with global_telemetry.span(SpanKind.MODEL, name, context=telemetry) as span:
-        response = await model.ainvoke(messages, config=config)  # type: ignore[attr-defined]
-        span.set_usage(getattr(response, "usage_metadata", None))
-        global_telemetry.mark_ttft(telemetry)
-        return response
+    # LangGraph may execute a node in a task whose ContextVar does not inherit
+    # the caller's binding. Re-bind the context recovered from RunnableConfig
+    # so model attempts and first-token timing remain attached to this Trace.
+    with bind_telemetry_context(telemetry):
+        if getattr(model, "emits_model_telemetry", False):
+            response = await model.ainvoke(messages, config=config)  # type: ignore[attr-defined]
+            return response
+        async with global_telemetry.span(SpanKind.MODEL, name, context=telemetry) as span:
+            response = await model.ainvoke(messages, config=config)  # type: ignore[attr-defined]
+            span.set_usage(getattr(response, "usage_metadata", None))
+            return response
 
 
 @dataclass(slots=True)
@@ -97,6 +103,11 @@ class CoordinatorRuntime:
         if runtime is None or not runtime.foreground_active:
             return None
         return runtime.active_turn_id or None
+
+    def telemetry_context(self, session_id: str) -> TelemetryContext | None:
+        """Return the active root context for graph adapters that lose ContextVars."""
+        runtime = self._sessions.get(session_id)
+        return runtime.telemetry_context if runtime is not None else None
 
     async def inject_user_message(
         self, context: SessionContext, message: BaseMessage

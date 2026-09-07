@@ -330,6 +330,31 @@ async def test_model_invocation_records_usage_in_a_model_span(monkeypatch, tmp_p
 
 
 @pytest.mark.asyncio
+async def test_model_invocation_uses_telemetry_context_from_graph_config(monkeypatch, tmp_path):
+    telemetry = TelemetryRuntime(tmp_path / "telemetry.sqlite3", flush_interval_s=0.01)
+
+    class Model:
+        async def ainvoke(self, _messages, config=None):
+            return type("Response", (), {"usage_metadata": {"total_tokens": 7}})()
+
+    monkeypatch.setattr("core.coordinator_runtime.global_telemetry", telemetry)
+    context = TelemetryContext.create(session_id="config-session", turn_id="config-turn")
+    telemetry.start_trace(context)
+    await invoke_model_with_telemetry(
+        Model(), [], {"configurable": context.configurable()}, name="coordinator.model"
+    )
+    telemetry.complete_trace(context)
+    await telemetry.flush()
+
+    detail = telemetry.repository.trace_detail(context.trace_id)
+    assert detail is not None
+    assert len(detail["spans"]) == 1
+    assert detail["spans"][0]["kind"] == SpanKind.MODEL.value
+    assert detail["trace"]["total_tokens"] == 7
+    await telemetry.close()
+
+
+@pytest.mark.asyncio
 async def test_coordinator_stores_evaluation_batch_labels_on_the_root_trace(monkeypatch, tmp_path):
     telemetry = TelemetryRuntime(tmp_path / "telemetry.sqlite3", flush_interval_s=0.01)
 

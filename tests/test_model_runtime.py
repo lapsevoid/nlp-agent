@@ -4,6 +4,8 @@ from pathlib import Path
 import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 
+import core.coordinator_runtime as coordinator_runtime_module
+import core.model_runtime.runtime as model_runtime_module
 from core.model_runtime.adapters.deepseek import DeepSeekChatModel
 from core.model_runtime.adapters.qwen import QwenAdapter
 from core.model_runtime.contracts import (
@@ -28,6 +30,9 @@ from core.model_runtime.runtime import (
     StreamInterruptedError,
     classify_model_error,
 )
+from core.observability.context import TelemetryContext, bind_telemetry_context
+from core.observability.runtime import TelemetryRuntime
+from core.observability.models import SpanStatus
 
 
 def preset(*, attempts=1):
@@ -97,6 +102,83 @@ class FakeStreamModel(FakeModel):
             if isinstance(value, BaseException):
                 raise value
             yield value
+
+
+class DelayedStreamModel(FakeStreamModel):
+    async def astream(self, _input, config=None, **_kwargs):
+        self.calls += 1
+        yield AIMessageChunk(content="first")
+        await asyncio.sleep(0.08)
+        yield AIMessageChunk(content="second")
+
+
+class DelayedFirstStreamModel(FakeStreamModel):
+    def __init__(self, delay_s):
+        super().__init__([])
+        self.delay_s = delay_s
+
+    async def astream(self, _input, config=None, **_kwargs):
+        self.calls += 1
+        await asyncio.sleep(self.delay_s)
+        yield AIMessageChunk(content="first")
+        yield AIMessageChunk(content="second")
+
+
+@pytest.mark.asyncio
+async def test_model_span_ttft_is_recorded_when_the_first_chunk_arrives(tmp_path, monkeypatch):
+    telemetry = TelemetryRuntime(tmp_path / "telemetry.sqlite3", flush_interval_s=0.01)
+    monkeypatch.setattr(model_runtime_module, "global_telemetry", telemetry)
+    monkeypatch.setattr(coordinator_runtime_module, "global_telemetry", telemetry)
+    context = TelemetryContext.create(
+        session_id="ttft-session", turn_id="ttft-turn", workspace_id="workspace-1"
+    )
+    model = ResilientChatModel([candidate("stream", DelayedStreamModel([]))])
+
+    telemetry.start_trace(context)
+    with bind_telemetry_context(context):
+        await coordinator_runtime_module.invoke_model_with_telemetry(
+            model, [HumanMessage(content="hello")], {}, name="coordinator.model"
+        )
+    telemetry.complete_trace(context, status=SpanStatus.OK)
+    await telemetry.flush()
+
+    trace = telemetry.repository.list_traces(limit=1)[0]
+    assert trace["duration_ms"] >= 70
+    spans = telemetry.repository.trace_detail(trace["trace_id"])["spans"]
+    model_span = next(span for span in spans if span["name"] == "model.request")
+    assert trace["ttft_ms"] is None
+    assert model_span["attributes"]["ttft_ms"] < model_span["duration_ms"] - 40
+    await telemetry.close()
+
+
+@pytest.mark.asyncio
+async def test_trace_ttft_waits_for_the_public_gateway_boundary(tmp_path, monkeypatch):
+    telemetry = TelemetryRuntime(tmp_path / "telemetry.sqlite3", flush_interval_s=0.01)
+    monkeypatch.setattr(model_runtime_module, "global_telemetry", telemetry)
+    monkeypatch.setattr(coordinator_runtime_module, "global_telemetry", telemetry)
+    context = TelemetryContext.create(
+        session_id="ttft-worker-session", turn_id="ttft-worker-turn", workspace_id="workspace-1"
+    )
+    worker_model = ResilientChatModel(
+        [candidate("worker", FakeStreamModel([AIMessageChunk(content="worker")]))]
+    )
+    coordinator_model = ResilientChatModel(
+        [candidate("coordinator", DelayedFirstStreamModel(0.08))]
+    )
+
+    telemetry.start_trace(context)
+    with bind_telemetry_context(context.child(worker_id="worker-first")):
+        await worker_model.ainvoke([HumanMessage(content="worker")], config={})
+    with bind_telemetry_context(context):
+        await coordinator_runtime_module.invoke_model_with_telemetry(
+            coordinator_model, [HumanMessage(content="coordinator")], {}, name="coordinator.model"
+        )
+    telemetry.complete_trace(context, status=SpanStatus.OK)
+    await telemetry.flush()
+
+    trace = telemetry.repository.list_traces(limit=1)[0]
+    assert trace["ttft_ms"] is None
+    await telemetry.close()
 
 
 def test_typed_config_rejects_incapable_fallback():

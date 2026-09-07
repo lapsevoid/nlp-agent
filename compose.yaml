@@ -131,7 +131,9 @@ services:
       NLP_AGENT_MONITOR_HOST: 0.0.0.0
       NLP_AGENT_MONITOR_PORT: 8766
     ports:
-      - "${NOVA_MONITOR_HOST_PORT:-8766}:8766"
+      # Bind to loopback by default.  Set NOVA_MONITOR_BIND_ADDRESS explicitly
+      # when an internal reverse proxy/VPN should expose the monitor.
+      - "${NOVA_MONITOR_BIND_ADDRESS:-127.0.0.1}:${NOVA_MONITOR_HOST_PORT:-8766}:8766"
     restart: unless-stopped
     profiles: ["monitor"]
     depends_on:

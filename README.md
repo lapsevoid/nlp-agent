@@ -158,8 +158,9 @@ Compose 会先启动 MySQL 8.4，再由 `nova-migrate` 运行 `python main.py bo
 docker compose --profile monitor up -d
 ```
 
-主服务访问地址为 `http://服务器IP:8765`，监控地址为
-`http://服务器IP:8766`。数据会分别保存在 Compose 项目作用域内的
+主服务访问地址为 `http://服务器IP:8765`。监控端口默认只绑定本机，地址为
+`http://127.0.0.1:8766`；如需通过内网反向代理或 VPN 暴露，显式设置
+`NOVA_MONITOR_BIND_ADDRESS`。数据会分别保存在 Compose 项目作用域内的
 `mysql-data` 和 `redis-data` 卷中，更新镜像不会丢失会话数据。测试和生产必须
 使用不同的 Compose 项目名、数据库、Redis、密钥和网络；监控端口只开放给内网或 VPN。
 
