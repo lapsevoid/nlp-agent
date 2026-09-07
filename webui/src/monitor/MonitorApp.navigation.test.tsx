@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 const { monitorApi } = vi.hoisted(() => ({
   monitorApi: {
@@ -489,7 +489,7 @@ describe("MonitorApp navigation", () => {
     expect(screen.getByText("来自多模型厂商管理")).toBeVisible();
     expect(screen.getAllByText(/openai_compatible/).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/default/).length).toBeGreaterThan(0);
-    expect(monitorApi.systemUsageTrend).toHaveBeenCalledWith(120, 5);
+    await waitFor(() => expect(monitorApi.systemUsageTrend).toHaveBeenCalledWith(120, 5));
     expect(await screen.findByRole("img", { name: "最近 120 分钟 Token 趋势" })).toBeVisible();
     expect(await screen.findByRole("button", { name: /2026-09-04 09:55.*3 次事件.*3,000 Token/ })).toBeVisible();
   });
