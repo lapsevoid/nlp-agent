@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const excalidraw = vi.hoisted(() => ({
@@ -28,6 +28,7 @@ vi.mock("@excalidraw/excalidraw", () => ({
 }));
 
 import { WhiteboardPanel } from "./WhiteboardPanel";
+import { WHITEBOARD_LIBRARY_ASSETS } from "./libraryAssets";
 import { storageKeyForUser } from "./storage";
 
 describe("WhiteboardPanel", () => {
@@ -37,7 +38,10 @@ describe("WhiteboardPanel", () => {
     vi.useFakeTimers();
   });
 
-  afterEach(() => vi.useRealTimers());
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
 
   it("loads the current user's local scene into the embedded engine", () => {
     localStorage.setItem(storageKeyForUser("student-1"), JSON.stringify({
@@ -62,6 +66,32 @@ describe("WhiteboardPanel", () => {
     expect(screen.getByTestId("whiteboard-main-menu")).toBeInTheDocument();
     expect(screen.getByTestId("whiteboard-help-menu-item")).toBeInTheDocument();
     expect(screen.queryByTestId("whiteboard-excalidraw-links")).not.toBeInTheDocument();
+  });
+
+  it("loads the bundled teaching libraries through the Excalidraw API", async () => {
+    vi.useRealTimers();
+    const updateLibrary = vi.fn().mockResolvedValue([]);
+    const blob = new Blob([JSON.stringify({ type: "excalidrawlib", version: 2, libraryItems: [] })], { type: "application/json" });
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, blob: () => Promise.resolve(blob) });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<WhiteboardPanel userId="student-1" />);
+    const props = excalidraw.render.mock.calls.at(-1)?.[0] as { excalidrawAPI?: (api: { updateLibrary: typeof updateLibrary }) => void };
+    props.excalidrawAPI?.({ updateLibrary });
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    await waitFor(() => expect(updateLibrary).toHaveBeenCalled());
+    expect(fetchMock).toHaveBeenCalledTimes(WHITEBOARD_LIBRARY_ASSETS.length);
+    expect(updateLibrary).toHaveBeenCalledTimes(WHITEBOARD_LIBRARY_ASSETS.length);
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(expect.arrayContaining([
+      expect.stringContaining("deep-learning.excalidrawlib"),
+      expect.stringContaining("data-processing.excalidrawlib"),
+      expect.stringContaining("mathematical-symbols.excalidrawlib"),
+      expect.stringContaining("flow-chart-symbols.excalidrawlib"),
+      expect.stringContaining("montessori-basic-grammar-symbols.excalidrawlib"),
+      expect.stringContaining("bubbles.excalidrawlib"),
+    ]));
+    expect(updateLibrary).toHaveBeenCalledWith(expect.objectContaining({ merge: true, defaultStatus: "published" }));
   });
 
   it("writes scene changes to local storage for that user", () => {
