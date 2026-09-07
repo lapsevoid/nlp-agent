@@ -15,6 +15,19 @@
   flex: 1 1 auto;
 }
 
+/* HelpDialog is rendered in Excalidraw's modal portal, so these host-level
+ * rules intentionally target its public CSS classes instead of its DOM text. */
+.excalidraw-modal-container .HelpDialog__header {
+  display: none;
+}
+
+/* AI is disabled for this embedded board; remove its two corresponding
+ * flowchart shortcuts while retaining the native help entry and basic editor
+ * shortcuts. */
+.excalidraw-modal-container .HelpDialog__island--editor > .HelpDialog__island-content > .HelpDialog__shortcut:nth-child(-n + 2) {
+  display: none;
+}
+
 .whiteboard-loading {
   display: grid;
   width: 100%;

@@ -6,10 +6,25 @@ const excalidraw = vi.hoisted(() => ({
 }));
 
 vi.mock("@excalidraw/excalidraw", () => ({
-  Excalidraw: (props: { initialData?: unknown; onChange?: (elements: unknown, appState: unknown, files: unknown) => void }) => {
+  Excalidraw: (props: { initialData?: unknown; onChange?: (elements: unknown, appState: unknown, files: unknown) => void; children?: React.ReactNode }) => {
     excalidraw.render(props);
-    return <button type="button" onClick={() => props.onChange?.([{ id: "line-1", type: "line" }] as never, { theme: "light", viewBackgroundColor: "#fff" } as never, {})}>模拟绘图</button>;
+    return <><button type="button" onClick={() => props.onChange?.([{ id: "line-1", type: "line" }] as never, { theme: "light", viewBackgroundColor: "#fff" } as never, {})}>模拟绘图</button>{props.children}</>;
   },
+  MainMenu: Object.assign(({ children }: { children?: React.ReactNode }) => <nav data-testid="whiteboard-main-menu">{children}</nav>, {
+    DefaultItems: {
+      LoadScene: () => null,
+      SaveToActiveFile: () => null,
+      Export: () => null,
+      SaveAsImage: () => null,
+      SearchMenu: () => null,
+      Help: () => <span data-testid="whiteboard-help-menu-item" />,
+      ClearCanvas: () => null,
+      ToggleTheme: () => null,
+      ChangeCanvasBackground: () => null,
+      Socials: () => <span data-testid="whiteboard-excalidraw-links" />,
+    },
+    Separator: () => null,
+  }),
 }));
 
 import { WhiteboardPanel } from "./WhiteboardPanel";
@@ -39,6 +54,14 @@ describe("WhiteboardPanel", () => {
       langCode: "zh-CN",
       aiEnabled: false,
     }));
+  });
+
+  it("keeps the native help entry without rendering Excalidraw links", () => {
+    render(<WhiteboardPanel userId="student-1" />);
+
+    expect(screen.getByTestId("whiteboard-main-menu")).toBeInTheDocument();
+    expect(screen.getByTestId("whiteboard-help-menu-item")).toBeInTheDocument();
+    expect(screen.queryByTestId("whiteboard-excalidraw-links")).not.toBeInTheDocument();
   });
 
   it("writes scene changes to local storage for that user", () => {
