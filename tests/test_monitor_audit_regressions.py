@@ -194,8 +194,8 @@ def test_monitor_permission_can_read_all_user_observability_without_admin_role()
 
 def test_observability_service_rejects_a_principal_without_monitor_permission() -> None:
     class Repository:
-        def list_traces(self, **_kwargs):
-            raise AssertionError("unauthorized trace query must not reach the repository")
+        def overview(self, **_kwargs):
+            raise AssertionError("unauthorized monitor query must not reach the repository")
 
     class Runtime:
         repository = Repository()
@@ -204,7 +204,7 @@ def test_observability_service_rejects_a_principal_without_monitor_permission() 
     guest = AuthenticatedPrincipal(user_id="guest", roles=frozenset({"guest"}))
 
     with pytest.raises(AccessDeniedError):
-        asyncio.run(service.traces(guest))
+        asyncio.run(service.overview(guest))
 
 
 @pytest.mark.asyncio
