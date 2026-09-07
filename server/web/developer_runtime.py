@@ -76,11 +76,13 @@ async def reload_runtime(*, reload_mcp: bool = False, reload_skills: bool = Fals
     from core.skill_loader import skill_loader
     from core.tool_registry import physical_tool_manager
     from server.agent.node.coordinator import invalidate_coordinator_caches
+    from server.tools.academic.service import close_academic_search_service
 
     settings._config = __import__("core.runtime_config", fromlist=["load_runtime_config"]).load_runtime_config()
     # ModelFactory caches provider clients and typed runtime config. Rebuild it
     # after any developer override so the next turn observes the new route.
     model_factory._global_model_factory = None
+    await close_academic_search_service()
     physical_tool_manager.refresh_config()
     if reload_skills:
         skill_loader.profiles = physical_tool_manager.config.worker_profiles
