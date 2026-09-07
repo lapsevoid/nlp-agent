@@ -21,10 +21,19 @@ export interface WhiteboardPanelProps {
  * embedded Excalidraw scene to per-user browser storage.
  */
 export function WhiteboardPanel({ userId, onSceneChange }: WhiteboardPanelProps) {
+  if (!userId) {
+    return <div className="whiteboard-shell whiteboard-auth-required" role="status">请登录后使用白板。</div>;
+  }
+
+  return <AuthenticatedWhiteboardPanel userId={userId} onSceneChange={onSceneChange} />;
+}
+
+function AuthenticatedWhiteboardPanel({ userId, onSceneChange }: WhiteboardPanelProps & { userId: string }) {
   const initialScene = useMemo<StoredWhiteboardScene | null>(() => userId ? readWhiteboardScene(userId) : null, [userId]);
   const latestScene = useRef<StoredWhiteboardScene | null>(initialScene);
   const saveTimer = useRef<number | null>(null);
   const [saveErrorUserId, setSaveErrorUserId] = useState<string | null>(null);
+  const [libraryLoadError, setLibraryLoadError] = useState(false);
 
   useEffect(() => {
     latestScene.current = initialScene;
@@ -46,13 +55,17 @@ export function WhiteboardPanel({ userId, onSceneChange }: WhiteboardPanelProps)
         window.clearTimeout(saveTimer.current);
         saveTimer.current = null;
       }
-      persistLatestScene(false);
+      persistLatestScene(true);
     };
 
     window.addEventListener("pagehide", flushLatestScene);
     return () => {
       window.removeEventListener("pagehide", flushLatestScene);
-      flushLatestScene();
+      if (saveTimer.current !== null) {
+        window.clearTimeout(saveTimer.current);
+        saveTimer.current = null;
+      }
+      persistLatestScene(false);
     };
   }, [persistLatestScene]);
 
@@ -71,7 +84,13 @@ export function WhiteboardPanel({ userId, onSceneChange }: WhiteboardPanelProps)
   }, [onSceneChange, persistLatestScene, userId]);
 
   return <div className="whiteboard-shell">
-    <ExcalidrawAdapter key={userId ?? "anonymous"} initialScene={initialScene} onChange={handleChange} />
+    <ExcalidrawAdapter
+      key={userId}
+      initialScene={initialScene}
+      onChange={handleChange}
+      onLibraryLoadError={() => setLibraryLoadError(true)}
+    />
+    {libraryLoadError && <div className="whiteboard-library-warning" role="status">部分教学素材加载失败，请刷新白板后重试。</div>}
     {userId !== null && saveErrorUserId === userId && <div className="whiteboard-save-warning" role="alert">本地保存失败，请导出白板文件备份。</div>}
   </div>;
 }

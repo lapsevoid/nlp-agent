@@ -9,12 +9,14 @@ const excalidraw = vi.hoisted(() => ({
 }));
 
 vi.mock("@excalidraw/excalidraw", () => ({
+  CaptureUpdateAction: { NEVER: "NEVER" },
   loadLibraryFromBlob: excalidraw.loadLibraryFromBlob,
   Excalidraw: (props: { initialData?: unknown; onChange?: (elements: unknown, appState: unknown, files: unknown) => void; validateEmbeddable?: (link: string) => boolean | undefined; children?: React.ReactNode }) => {
     excalidraw.render(props);
     return <><button type="button" onClick={() => props.onChange?.([{ id: "line-1", type: "line" }] as never, { theme: "light", viewBackgroundColor: "#fff" } as never, {})}>模拟绘图</button>{props.children}</>;
   },
   MainMenu: Object.assign(({ children }: { children?: React.ReactNode }) => <nav data-testid="whiteboard-main-menu">{children}</nav>, {
+    Item: ({ children, ...props }: { children?: React.ReactNode; onClick?: () => void }) => <button type="button" {...props}>{children}</button>,
     DefaultItems: {
       LoadScene: () => null,
       SaveToActiveFile: () => null,
@@ -34,6 +36,7 @@ vi.mock("@excalidraw/excalidraw", () => ({
 import { WhiteboardPanel } from "./WhiteboardPanel";
 import { WHITEBOARD_LIBRARY_ASSETS } from "./libraryAssets";
 import { storageKeyForUser } from "./storage";
+import { resetBundledLibrariesCache } from "./ExcalidrawAdapter";
 
 describe("WhiteboardPanel", () => {
   beforeEach(() => {
@@ -41,6 +44,7 @@ describe("WhiteboardPanel", () => {
     excalidraw.render.mockClear();
     excalidraw.loadLibraryFromBlob.mockClear();
     excalidraw.loadLibraryFromBlob.mockResolvedValue([]);
+    resetBundledLibrariesCache();
     vi.useFakeTimers();
   });
 
@@ -91,11 +95,17 @@ describe("WhiteboardPanel", () => {
     }));
   });
 
-  it("keeps the native help entry without rendering Excalidraw links", () => {
+  it("shows only supported shortcuts in the in-product help", () => {
     render(<WhiteboardPanel userId="student-1" />);
 
     expect(screen.getByTestId("whiteboard-main-menu")).toBeInTheDocument();
-    expect(screen.getByTestId("whiteboard-help-menu-item")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "帮助" }));
+    expect(screen.getByRole("dialog", { name: "白板快捷键" })).toBeInTheDocument();
+    expect(screen.getByText("选择工具")).toBeInTheDocument();
+    expect(screen.getByText("撤销")).toBeInTheDocument();
+    expect(screen.getByText("重做")).toBeInTheDocument();
+    expect(screen.queryByText("Crop image")).not.toBeInTheDocument();
+    expect(screen.queryByText("Create a flowchart from a generic element")).not.toBeInTheDocument();
     expect(screen.queryByTestId("whiteboard-excalidraw-links")).not.toBeInTheDocument();
   });
 
@@ -184,7 +194,7 @@ describe("WhiteboardPanel", () => {
     await waitFor(() => expect(updateLibrary).toHaveBeenCalled());
     expect(fetchMock).toHaveBeenCalledTimes(WHITEBOARD_LIBRARY_ASSETS.length);
     expect(excalidraw.loadLibraryFromBlob).toHaveBeenCalledTimes(WHITEBOARD_LIBRARY_ASSETS.length);
-    expect(updateLibrary).toHaveBeenCalledTimes(WHITEBOARD_LIBRARY_ASSETS.length);
+    expect(updateLibrary).toHaveBeenCalledTimes(WHITEBOARD_LIBRARY_ASSETS.length + 1);
     expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(expect.arrayContaining([
       expect.stringContaining("deep-learning.excalidrawlib"),
       expect.stringContaining("data-processing.excalidrawlib"),
@@ -193,7 +203,7 @@ describe("WhiteboardPanel", () => {
       expect.stringContaining("montessori-basic-grammar-symbols.excalidrawlib"),
       expect.stringContaining("bubbles.excalidrawlib"),
     ]));
-    expect(updateLibrary).toHaveBeenNthCalledWith(1, expect.objectContaining({ merge: false, defaultStatus: "published" }));
+    expect(updateLibrary).toHaveBeenNthCalledWith(1, expect.objectContaining({ libraryItems: [], merge: false, defaultStatus: "published" }));
     expect(updateLibrary.mock.calls.slice(1).every(([options]) => options.merge === true && options.defaultStatus === "published")).toBe(true);
 
     const secondUpdateLibrary = vi.fn().mockResolvedValue([]);
@@ -203,6 +213,47 @@ describe("WhiteboardPanel", () => {
     await waitFor(() => expect(secondUpdateLibrary).toHaveBeenCalled());
     expect(fetchMock).toHaveBeenCalledTimes(WHITEBOARD_LIBRARY_ASSETS.length);
     expect(excalidraw.loadLibraryFromBlob).toHaveBeenCalledTimes(WHITEBOARD_LIBRARY_ASSETS.length);
+  });
+
+  it("retries bundled library loading after a failed attempt", async () => {
+    vi.useRealTimers();
+    const updateLibrary = vi.fn().mockResolvedValue([]);
+    const blob = new Blob([JSON.stringify({ type: "excalidrawlib", version: 2, libraryItems: [] })], { type: "application/json" });
+    const fetchMock = vi.fn()
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValue({ ok: true, blob: () => Promise.resolve(blob) });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<WhiteboardPanel userId="student-1" />);
+    const firstProps = excalidraw.render.mock.calls.at(-1)?.[0] as { excalidrawAPI?: (api: { updateLibrary: typeof updateLibrary }) => void };
+    firstProps.excalidrawAPI?.({ updateLibrary });
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(WHITEBOARD_LIBRARY_ASSETS.length));
+
+    const secondUpdateLibrary = vi.fn().mockResolvedValue([]);
+    render(<WhiteboardPanel userId="student-2" />);
+    const secondProps = excalidraw.render.mock.calls.at(-1)?.[0] as { excalidrawAPI?: (api: { updateLibrary: typeof secondUpdateLibrary }) => void };
+    secondProps.excalidrawAPI?.({ updateLibrary: secondUpdateLibrary });
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(WHITEBOARD_LIBRARY_ASSETS.length * 2));
+    expect(secondUpdateLibrary).toHaveBeenCalled();
+    expect(screen.getByText("部分教学素材加载失败，请刷新白板后重试。")).toBeInTheDocument();
+  });
+
+  it("does not install libraries after the adapter unmounts", async () => {
+    vi.useRealTimers();
+    let resolveFetch: ((response: Response) => void) | undefined;
+    const fetchMock = vi.fn().mockImplementation(() => new Promise<Response>((resolve) => { resolveFetch = resolve; }));
+    vi.stubGlobal("fetch", fetchMock);
+    const updateLibrary = vi.fn().mockResolvedValue([]);
+
+    const view = render(<WhiteboardPanel userId="student-1" />);
+    const props = excalidraw.render.mock.calls.at(-1)?.[0] as { excalidrawAPI?: (api: { updateLibrary: typeof updateLibrary }) => void };
+    props.excalidrawAPI?.({ updateLibrary });
+    view.unmount();
+    resolveFetch?.({ ok: true, blob: () => Promise.resolve(new Blob(["{}"], { type: "application/json" })) } as Response);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(updateLibrary).toHaveBeenCalledTimes(1);
   });
 
   it("writes scene changes to local storage for that user", () => {
@@ -226,6 +277,19 @@ describe("WhiteboardPanel", () => {
     expect(stored.elements).toEqual([{ id: "line-1", type: "line" }]);
   });
 
+  it("shows a backup warning when the page-hide flush fails", () => {
+    const setItem = vi.spyOn(window.localStorage, "setItem").mockImplementation(() => {
+      throw new Error("quota exceeded");
+    });
+
+    render(<WhiteboardPanel userId="student-1" />);
+    fireEvent.click(screen.getByRole("button", { name: "模拟绘图" }));
+    act(() => window.dispatchEvent(new Event("pagehide")));
+
+    expect(screen.getByRole("alert")).toHaveTextContent("本地保存失败");
+    setItem.mockRestore();
+  });
+
   it("shows a backup warning when the browser rejects a scene write", () => {
     const setItem = vi.spyOn(window.localStorage, "setItem").mockImplementation(() => {
       throw new Error("quota exceeded");
@@ -239,10 +303,35 @@ describe("WhiteboardPanel", () => {
     setItem.mockRestore();
   });
 
-  it("does not show a save warning for an unauthenticated board", () => {
+  it("does not mount an editable board for an unauthenticated user", () => {
     render(<WhiteboardPanel userId={null} />);
 
+    expect(excalidraw.render).not.toHaveBeenCalled();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("removes embeddable elements from imported scene changes", () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, blob: () => Promise.resolve(new Blob(["{}"], { type: "application/json" })) }));
+    const updateScene = vi.fn();
+    const onSceneChange = vi.fn();
+    render(<WhiteboardPanel userId="student-1" onSceneChange={onSceneChange} />);
+    const props = excalidraw.render.mock.calls.at(-1)?.[0] as {
+      onChange?: (elements: unknown, appState: unknown, files: unknown) => void;
+      excalidrawAPI?: (api: { updateScene: typeof updateScene; updateLibrary: ReturnType<typeof vi.fn> }) => void;
+    };
+    props.excalidrawAPI?.({ updateScene, updateLibrary: vi.fn().mockResolvedValue([]) });
+    props.onChange?.([
+      { id: "embed-1", type: "embeddable" },
+      { id: "line-1", type: "line" },
+    ], { theme: "light" }, {});
+
+    expect(updateScene).toHaveBeenCalledWith(expect.objectContaining({
+      elements: [{ id: "line-1", type: "line" }],
+      captureUpdate: "NEVER",
+    }));
+    expect(onSceneChange).toHaveBeenLastCalledWith(expect.objectContaining({
+      elements: [{ id: "line-1", type: "line" }],
+    }));
   });
 
   it("forwards structured scene changes to page-level actions", () => {
