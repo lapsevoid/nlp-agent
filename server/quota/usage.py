@@ -548,7 +548,7 @@ class UsageReadService:
                 token_totals[field] += value
             breakdown.append(
                 {
-                    "day": period_start.date().isoformat(),
+                    "day": period_start.isoformat(),
                     "period_start": period_start.isoformat(),
                     "period_end": (period_start + bucket_delta).isoformat(),
                     "granularity": "five_minute" if bucket_minutes == 5 else f"{bucket_minutes}_minute",

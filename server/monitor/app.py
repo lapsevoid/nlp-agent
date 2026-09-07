@@ -99,6 +99,7 @@ def create_monitor_app(
         app.state.quota_usage_reader = usage_reader
         app.state.monitor_retention = retention
         monitor_redis = None
+        set_auth_redis_client = getattr(database_auth, "set_redis_client", None)
         redis_url = settings.NLP_AGENT_REDIS_URL.strip()
         if redis_url:
             try:
@@ -107,13 +108,16 @@ def create_monitor_app(
                 monitor_redis = redis_async.from_url(
                     redis_url, decode_responses=True
                 )
-                database_auth.set_redis_client(monitor_redis)
+                if callable(set_auth_redis_client):
+                    set_auth_redis_client(monitor_redis)
             except (ImportError, ValueError):
                 # Keep the local limiter as a safe compatibility fallback for
                 # development images that do not include Redis support.
-                database_auth.set_redis_client(None)
+                if callable(set_auth_redis_client):
+                    set_auth_redis_client(None)
         else:
-            database_auth.set_redis_client(None)
+            if callable(set_auth_redis_client):
+                set_auth_redis_client(None)
         await rbac_runtime.start()
         retention_task = None
         repository = getattr(runtime, "repository", None)

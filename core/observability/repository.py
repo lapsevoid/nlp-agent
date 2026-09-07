@@ -72,7 +72,6 @@ class TelemetryRepository:
                     error_kind TEXT, error_message TEXT, attributes_json TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_traces_started ON traces(started_at DESC);
-                CREATE INDEX IF NOT EXISTS idx_traces_completed ON traces(completed_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_traces_session ON traces(session_id, started_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_traces_status ON traces(status, started_at DESC);
                 CREATE TABLE IF NOT EXISTS spans (
@@ -93,7 +92,6 @@ class TelemetryRepository:
                 CREATE INDEX IF NOT EXISTS idx_spans_trace ON spans(trace_id, started_at);
                 CREATE INDEX IF NOT EXISTS idx_spans_kind ON spans(kind, started_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_spans_started ON spans(started_at DESC);
-                CREATE INDEX IF NOT EXISTS idx_spans_completed ON spans(completed_at DESC);
                 CREATE TABLE IF NOT EXISTS events (
                     event_id TEXT PRIMARY KEY, timestamp TEXT NOT NULL, level TEXT NOT NULL,
                     name TEXT NOT NULL, trace_id TEXT, span_id TEXT, session_id TEXT,
@@ -119,16 +117,24 @@ class TelemetryRepository:
             }
             if "ttft_ms" not in columns:
                 self._conn.execute("ALTER TABLE spans ADD COLUMN ttft_ms INTEGER")
+            self._ensure_column("traces", "completed_at", "TEXT")
             self._ensure_column("traces", "cache_miss_tokens", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column("traces", "reasoning_tokens", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column("traces", "chain_id", "TEXT")
             self._ensure_column("traces", "chain_name", "TEXT")
             self._ensure_column("traces", "entrypoint", "TEXT")
             self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_traces_completed ON traces(completed_at DESC)"
+            )
+            self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_traces_chain ON traces(chain_id, started_at DESC)"
             )
+            self._ensure_column("spans", "completed_at", "TEXT")
             self._ensure_column("spans", "cache_miss_tokens", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column("spans", "reasoning_tokens", "INTEGER NOT NULL DEFAULT 0")
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_spans_completed ON spans(completed_at DESC)"
+            )
             self._ensure_column("daily_metrics", "cache_miss_tokens", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column("daily_metrics", "reasoning_tokens", "INTEGER NOT NULL DEFAULT 0")
 

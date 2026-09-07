@@ -57,7 +57,6 @@ class ObservabilityService:
         session_id: str | None = None,
         status: str | None = None,
     ) -> list[dict[str, Any]]:
-        self._require_monitor(principal)
         return await asyncio.to_thread(
             self.runtime.repository.list_traces,
             limit=limit,
@@ -70,7 +69,6 @@ class ObservabilityService:
     async def trace(
         self, principal: AuthenticatedPrincipal, trace_id: str
     ) -> dict[str, Any] | None:
-        self._require_monitor(principal)
         detail = await asyncio.to_thread(self.runtime.repository.trace_detail, trace_id)
         if detail is None:
             return None
@@ -198,9 +196,10 @@ class ObservabilityService:
         level: str | None = None,
         trace_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        self._require_monitor(principal)
         if trace_id:
             await self.trace(principal, trace_id)
+        else:
+            self._require_monitor(principal)
         return await asyncio.to_thread(
             self.runtime.repository.recent_events,
             limit=limit,
