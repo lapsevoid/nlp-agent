@@ -129,8 +129,12 @@ describe("WhiteboardPanel", () => {
     expect(helpButtons).toHaveLength(2);
     helpButtons[0].focus();
     fireEvent.click(helpButtons[0]);
-    expect(screen.getByRole("dialog", { name: "白板快捷键" })).toBeInTheDocument();
-    expect(screen.getByRole("dialog", { name: "白板快捷键" })).toHaveFocus();
+    const dialog = screen.getByRole("dialog", { name: "白板快捷键" });
+    const closeButton = screen.getByRole("button", { name: "关闭帮助" });
+    expect(dialog).toBeInTheDocument();
+    expect(closeButton).toHaveFocus();
+    fireEvent.keyDown(window, { key: "Tab", shiftKey: true });
+    expect(closeButton).toHaveFocus();
     expect(screen.getByText("选择工具")).toBeInTheDocument();
     expect(screen.getByText("撤销")).toBeInTheDocument();
     expect(screen.getByText("重做")).toBeInTheDocument();
@@ -274,17 +278,21 @@ describe("WhiteboardPanel", () => {
 
   it("does not install bundled libraries when clearing the engine library fails", async () => {
     vi.useRealTimers();
-    const updateLibrary = vi.fn().mockRejectedValueOnce(new Error("library unavailable"));
-    const fetchMock = vi.fn();
+    const updateLibrary = vi.fn()
+      .mockRejectedValueOnce(new Error("library unavailable"))
+      .mockResolvedValue([]);
+    const blob = new Blob([JSON.stringify({ type: "excalidrawlib", version: 2, libraryItems: [] })], { type: "application/json" });
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, blob: () => Promise.resolve(blob) });
     vi.stubGlobal("fetch", fetchMock);
 
     render(<WhiteboardPanel userId="student-1" />);
     const props = excalidraw.render.mock.calls.at(-1)?.[0] as { excalidrawAPI?: (api: { updateLibrary: typeof updateLibrary }) => void };
     props.excalidrawAPI?.({ updateLibrary });
 
-    await waitFor(() => expect(screen.getByText("部分教学素材加载失败，请刷新白板后重试。")).toBeInTheDocument());
-    expect(updateLibrary).toHaveBeenCalledTimes(1);
-    expect(fetchMock).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.getByText("白板素材区初始化失败，已尽力恢复，请刷新白板后重试。")).toBeInTheDocument());
+    expect(updateLibrary).toHaveBeenCalledTimes(WHITEBOARD_LIBRARY_ASSETS.length + 1);
+    expect(fetchMock).toHaveBeenCalledTimes(WHITEBOARD_LIBRARY_ASSETS.length);
+    expect(updateLibrary.mock.calls[1]?.[0]).toEqual(expect.objectContaining({ merge: false }));
   });
 
   it("retries bundled library loading after a failed attempt", async () => {

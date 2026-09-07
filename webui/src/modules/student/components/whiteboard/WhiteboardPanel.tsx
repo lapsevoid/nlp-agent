@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { ExcalidrawAdapter, type ExcalidrawSceneChange } from "./ExcalidrawAdapter";
+import { ExcalidrawAdapter, type ExcalidrawSceneChange, type WhiteboardLibraryLoadError } from "./ExcalidrawAdapter";
 import {
   readWhiteboardScene,
   serializeWhiteboardScene,
@@ -37,7 +37,7 @@ function AuthenticatedWhiteboardPanel({ userId, onSceneChange }: WhiteboardPanel
   const latestScene = useRef<StoredWhiteboardScene | null>(initialScene);
   const saveTimer = useRef<number | null>(null);
   const [saveErrorUserId, setSaveErrorUserId] = useState<string | null>(null);
-  const [libraryLoadError, setLibraryLoadError] = useState(false);
+  const [libraryLoadError, setLibraryLoadError] = useState<WhiteboardLibraryLoadError | null>(null);
 
   useEffect(() => {
     latestScene.current = initialScene;
@@ -92,9 +92,13 @@ function AuthenticatedWhiteboardPanel({ userId, onSceneChange }: WhiteboardPanel
       key={userId}
       initialScene={initialScene}
       onChange={handleChange}
-      onLibraryLoadError={() => setLibraryLoadError(true)}
+      onLibraryLoadError={setLibraryLoadError}
     />
-    {libraryLoadError && <div className="whiteboard-library-warning" role="status">部分教学素材加载失败，请刷新白板后重试。</div>}
+    {libraryLoadError && <div className="whiteboard-library-warning" role="status">
+      {libraryLoadError.clearFailed
+        ? "白板素材区初始化失败，已尽力恢复，请刷新白板后重试。"
+        : "部分教学素材加载失败，请刷新白板后重试。"}
+    </div>}
     {userId !== null && saveErrorUserId === userId && <div className="whiteboard-save-warning" role="alert">本地保存失败，请导出白板文件备份。</div>}
   </div>;
 }

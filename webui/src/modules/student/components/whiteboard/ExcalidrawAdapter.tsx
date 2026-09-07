@@ -21,6 +21,11 @@ export interface ExcalidrawSceneChange {
   files: BinaryFiles;
 }
 
+export interface WhiteboardLibraryLoadError {
+  clearFailed: boolean;
+  failedAssetNames: readonly string[];
+}
+
 type LoadedWhiteboardLibrary = {
   asset: typeof WHITEBOARD_LIBRARY_ASSETS[number];
   libraryItems: Awaited<ReturnType<typeof loadLibraryFromBlob>>;
@@ -69,7 +74,7 @@ export function resetBundledLibrariesCache() {
 export function ExcalidrawAdapter({ initialScene, onChange, onLibraryLoadError }: {
   initialScene: StoredWhiteboardScene | null;
   onChange: (scene: ExcalidrawSceneChange) => void;
-  onLibraryLoadError?: (assetNames: readonly string[]) => void;
+  onLibraryLoadError?: (error: WhiteboardLibraryLoadError) => void;
 }) {
   const libraryLoadStarted = useRef(false);
   const excalidrawApi = useRef<ExcalidrawImperativeAPI | null>(null);
@@ -115,6 +120,7 @@ export function ExcalidrawAdapter({ initialScene, onChange, onLibraryLoadError }
 
       // Clear the engine's library before awaiting our local assets so a
       // user's personal/public library cannot flash into this read-only view.
+      let clearFailed = false;
       try {
         await api.updateLibrary({
           libraryItems: [],
@@ -122,30 +128,35 @@ export function ExcalidrawAdapter({ initialScene, onChange, onLibraryLoadError }
           defaultStatus: "published",
         });
       } catch (error) {
+        clearFailed = true;
         console.warn("[whiteboard] failed to clear the library", error);
-        onLibraryLoadError?.([]);
-        return;
       }
 
+      if (!mounted.current) return;
       const { libraries: loadedLibraries, failedAssets } = await loadBundledLibraries();
       if (!mounted.current) return;
 
       const installationFailures = [...failedAssets];
+      let libraryNeedsReplacement = clearFailed;
       for (const { asset, libraryItems } of loadedLibraries) {
         if (!mounted.current) return;
         try {
           await api.updateLibrary({
             libraryItems,
-            merge: true,
+            merge: !libraryNeedsReplacement,
             defaultStatus: "published",
           });
+          libraryNeedsReplacement = false;
         } catch (error) {
           installationFailures.push(asset);
           console.warn(`[whiteboard] failed to install ${asset.name} library`, error);
         }
       }
-      if (installationFailures.length > 0) {
-        onLibraryLoadError?.(installationFailures.map((asset) => asset.name));
+      if (clearFailed || installationFailures.length > 0) {
+        onLibraryLoadError?.({
+          clearFailed,
+          failedAssetNames: installationFailures.map((asset) => asset.name),
+        });
       }
     };
 

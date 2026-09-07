@@ -64,7 +64,10 @@ export function WhiteboardHelpDialog({ open, onClose }: { open: boolean; onClose
     if (!open) return undefined;
 
     restoreFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    dialogRef.current?.focus();
+    const firstFocusable = dialogRef.current?.querySelector<HTMLElement>(
+      'button,[href],input,select,textarea,[tabindex]:not([tabindex="-1"])',
+    );
+    (firstFocusable ?? dialogRef.current)?.focus();
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
