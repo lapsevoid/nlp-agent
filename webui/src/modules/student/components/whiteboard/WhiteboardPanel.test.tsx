@@ -8,7 +8,7 @@ const excalidraw = vi.hoisted(() => ({
 
 vi.mock("@excalidraw/excalidraw", () => ({
   loadLibraryFromBlob: excalidraw.loadLibraryFromBlob,
-  Excalidraw: (props: { initialData?: unknown; onChange?: (elements: unknown, appState: unknown, files: unknown) => void; children?: React.ReactNode }) => {
+  Excalidraw: (props: { initialData?: unknown; onChange?: (elements: unknown, appState: unknown, files: unknown) => void; validateEmbeddable?: (link: string) => boolean | undefined; children?: React.ReactNode }) => {
     excalidraw.render(props);
     return <><button type="button" onClick={() => props.onChange?.([{ id: "line-1", type: "line" }] as never, { theme: "light", viewBackgroundColor: "#fff" } as never, {})}>模拟绘图</button>{props.children}</>;
   },
@@ -62,6 +62,8 @@ describe("WhiteboardPanel", () => {
       langCode: "zh-CN",
       aiEnabled: false,
     }));
+    const props = excalidraw.render.mock.calls.at(-1)?.[0] as { validateEmbeddable?: (link: string) => boolean | undefined };
+    expect(props.validateEmbeddable?.("https://example.com")).toBe(false);
   });
 
   it("keeps the native help entry without rendering Excalidraw links", () => {

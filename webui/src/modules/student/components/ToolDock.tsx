@@ -12,19 +12,14 @@ const tools: Array<{
   id: ToolDockTool;
   label: string;
   buttonLabel: string;
-  shortcut: string;
-  shortcutKey: string;
-  ctrl: boolean;
-  alt: boolean;
-  shift: boolean;
   icon: typeof FileText;
   description: string;
 }> = [
-  { id: "files", label: "文件", buttonLabel: "打开文件工具", shortcut: "Ctrl+Alt+F", shortcutKey: "f", ctrl: true, alt: true, shift: false, icon: FileText, description: "导入并预览 Markdown、TXT 与代码文档。" },
-  { id: "learning", label: "学习记录", buttonLabel: "打开学习记录工具", shortcut: "Ctrl+Alt+S", shortcutKey: "s", ctrl: true, alt: true, shift: false, icon: BookOpenCheck, description: "查看本次对话的学习目标、概念与进度。" },
-  { id: "book", label: "知识教材", buttonLabel: "打开知识教材工具", shortcut: "Ctrl+Alt+B", shortcutKey: "b", ctrl: true, alt: true, shift: false, icon: BookOpenText, description: "阅读教师发布的知识点教材与实操内容。" },
-  { id: "sandbox", label: "代码沙箱", buttonLabel: "打开代码沙箱工具", shortcut: "Ctrl+Alt+E", shortcutKey: "e", ctrl: true, alt: true, shift: false, icon: Code2, description: "为当前登录用户准备独立的代码运行环境。" },
-  { id: "whiteboard", label: "白板", buttonLabel: "打开白板工具", shortcut: "Ctrl+Alt+W", shortcutKey: "w", ctrl: true, alt: true, shift: false, icon: Pencil, description: "使用 Excalidraw 绘制结构化草图与图表。" },
+  { id: "files", label: "文件", buttonLabel: "打开文件工具", icon: FileText, description: "导入并预览 Markdown、TXT 与代码文档。" },
+  { id: "learning", label: "学习记录", buttonLabel: "打开学习记录工具", icon: BookOpenCheck, description: "查看本次对话的学习目标、概念与进度。" },
+  { id: "book", label: "知识教材", buttonLabel: "打开知识教材工具", icon: BookOpenText, description: "阅读教师发布的知识点教材与实操内容。" },
+  { id: "sandbox", label: "代码沙箱", buttonLabel: "打开代码沙箱工具", icon: Code2, description: "为当前登录用户准备独立的代码运行环境。" },
+  { id: "whiteboard", label: "白板", buttonLabel: "打开白板工具", icon: Pencil, description: "使用 Excalidraw 绘制结构化草图与图表。" },
 ];
 
 type SandboxEditorTheme = "light" | "dark" | "high-contrast";
@@ -437,6 +432,10 @@ function getMaxDockWidth() {
   );
 }
 
+function ToolDockDecoration() {
+  return <span className="tool-dock-decoration" data-testid="tool-dock-decoration" aria-hidden="true"><i /><i /><i /></span>;
+}
+
 function ToolPicker({ onOpenTool }: { onOpenTool: (tool: ToolDockTool) => void }) {
   return <nav className="tool-dock-picker" role="menu" aria-label="工具列表">
     {tools.map((item) => {
@@ -444,7 +443,7 @@ function ToolPicker({ onOpenTool }: { onOpenTool: (tool: ToolDockTool) => void }
       return <button key={item.id} type="button" role="menuitem" aria-label={item.buttonLabel} onClick={() => onOpenTool(item.id)}>
         <span><Icon size={17} /></span>
         <strong>{item.label}</strong>
-        <kbd aria-hidden="true">{item.shortcut}</kbd>
+        <ToolDockDecoration />
       </button>;
     })}
   </nav>;
@@ -557,21 +556,6 @@ export function ToolDock({ open, expanded, openTools, activeTool, toolMenuOpen, 
     onOpenTool(tool);
   };
 
-  useEffect(() => {
-    const handleShortcut = (event: globalThis.KeyboardEvent) => {
-      const target = event.target as HTMLElement | null;
-      if (target && (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName))) return;
-      const key = event.key.toLowerCase();
-      const matched = tools.find((tool) => tool.shortcutKey === key && tool.ctrl === event.ctrlKey && tool.alt === event.altKey && tool.shift === event.shiftKey);
-      if (!matched) return;
-      event.preventDefault();
-      onToolMenuOpenChange(false);
-      onOpenTool(matched.id);
-    };
-    window.addEventListener("keydown", handleShortcut);
-    return () => window.removeEventListener("keydown", handleShortcut);
-  }, [onOpenTool, onToolMenuOpenChange]);
-
   const clearTabDrag = () => {
     draggedTool.current = null;
     lastDragOver.current = null;
@@ -660,7 +644,7 @@ export function ToolDock({ open, expanded, openTools, activeTool, toolMenuOpen, 
           return <button key={item.id} type="button" aria-label={item.buttonLabel} onClick={() => openTool(item.id)}>
             <span><Icon size={18} /></span>
             <strong>{item.label}</strong>
-            <kbd aria-hidden="true">{item.shortcut}</kbd>
+            <ToolDockDecoration />
           </button>;
         })}
       </nav> : <div ref={panelStripRef} className="tool-dock-panels" style={{ "--tool-dock-panel-count": Math.max(1, openTools.length), gridTemplateColumns: panelGridTemplate } as CSSProperties}>

@@ -42,6 +42,19 @@
   display: none;
 }
 
+/* Excalidraw 0.18.1 exposes the embed and Mermaid entries with the same test
+ * id. The embed action is the item immediately before Laser; Mermaid remains
+ * available as the supported diagram import path. */
+.whiteboard-panel .App-toolbar__extra-tools-dropdown > button[data-testid="toolbar-embeddable"]:has(+ button[data-testid="toolbar-laser"]) {
+  display: none;
+}
+
+/* The native context menu also offers “add to library”. Keep the bundled
+ * catalogue read-only even when a user right-clicks a selected element. */
+.context-menu > li[data-testid="addToLibrary"] {
+  display: none;
+}
+
 .whiteboard-loading {
   display: grid;
   width: 100%;

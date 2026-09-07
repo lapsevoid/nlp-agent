@@ -1510,22 +1510,37 @@ button { color: inherit; }
 .document-code-view { overflow: auto; }
 .document-code-view pre { margin: 0 !important; }
 
-.tool-dock-picker kbd {
-  padding: 2px 6px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--muted-bg) 70%, transparent);
-  color: var(--muted);
-  font: 10px ui-monospace, SFMono-Regular, Consolas, monospace;
+.tool-dock-decoration {
+  position: relative;
+  display: inline-block;
+  width: 27px;
+  height: 18px;
+  justify-self: end;
+  opacity: .82;
 }
-.tool-dock-home kbd {
-  padding: 3px 7px;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background: color-mix(in srgb, var(--muted-bg) 70%, transparent);
-  color: var(--muted);
-  font: 10px ui-monospace, SFMono-Regular, Consolas, monospace;
+.tool-dock-decoration::before {
+  position: absolute;
+  top: 8px;
+  left: 4px;
+  width: 18px;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  content: "";
+  transform: rotate(-13deg);
 }
+.tool-dock-decoration i {
+  position: absolute;
+  display: block;
+  width: 5px;
+  height: 5px;
+  border: 1px solid var(--bg);
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+.tool-dock-decoration i:nth-child(1) { top: 8px; left: 1px; }
+.tool-dock-decoration i:nth-child(2) { top: 2px; left: 11px; background: var(--muted); }
+.tool-dock-decoration i:nth-child(3) { top: 10px; left: 21px; }
 
 .learning-panel header small { color: var(--muted); font-size: 11px; margin-left: 2px; }
 .learning-topic-desc { margin-top: 8px !important; padding-top: 8px; border-top: 1px solid var(--border); }
