@@ -37,6 +37,7 @@ describe("WhiteboardPanel", () => {
     expect(excalidraw.render).toHaveBeenCalledWith(expect.objectContaining({
       initialData: expect.objectContaining({ elements: [{ id: "saved-1", type: "rectangle" }] }),
       langCode: "zh-CN",
+      aiEnabled: false,
     }));
   });
 
@@ -49,5 +50,18 @@ describe("WhiteboardPanel", () => {
     const stored = JSON.parse(localStorage.getItem(storageKeyForUser("student-1")) ?? "null") as { elements: Array<{ id: string }> };
     expect(stored.elements).toEqual([{ id: "line-1", type: "line" }]);
     expect(localStorage.getItem(storageKeyForUser("student-2"))).toBeNull();
+  });
+
+  it("forwards structured scene changes to page-level actions", () => {
+    const onSceneChange = vi.fn();
+
+    render(<WhiteboardPanel userId="student-1" onSceneChange={onSceneChange} />);
+    fireEvent.click(screen.getByRole("button", { name: "模拟绘图" }));
+
+    expect(onSceneChange).toHaveBeenCalledWith(expect.objectContaining({
+      schemaVersion: 1,
+      elements: [{ id: "line-1", type: "line" }],
+      files: {},
+    }));
   });
 });

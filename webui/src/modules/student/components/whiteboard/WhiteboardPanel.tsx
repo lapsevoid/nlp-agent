@@ -10,11 +10,17 @@ import {
 
 const LOCAL_SAVE_DEBOUNCE_MS = 250;
 
+export interface WhiteboardPanelProps {
+  userId: string | null;
+  /** Exposes the structured scene to page-level business actions. */
+  onSceneChange?: (scene: StoredWhiteboardScene) => void;
+}
+
 /**
  * The whiteboard deliberately owns no business state. It only adapts the
  * embedded Excalidraw scene to per-user browser storage.
  */
-export function WhiteboardPanel({ userId }: { userId: string | null }) {
+export function WhiteboardPanel({ userId, onSceneChange }: WhiteboardPanelProps) {
   const [initialScene] = useState<StoredWhiteboardScene | null>(() => userId ? readWhiteboardScene(userId) : null);
   const latestScene = useRef<StoredWhiteboardScene | null>(initialScene);
   const saveTimer = useRef<number | null>(null);
@@ -31,14 +37,16 @@ export function WhiteboardPanel({ userId }: { userId: string | null }) {
   const handleChange = useCallback((
     scene: ExcalidrawSceneChange,
   ) => {
-    latestScene.current = serializeWhiteboardScene(scene.elements, scene.appState, scene.files);
+    const serializedScene = serializeWhiteboardScene(scene.elements, scene.appState, scene.files);
+    latestScene.current = serializedScene;
+    onSceneChange?.(serializedScene);
     if (!userId) return;
     if (saveTimer.current !== null) window.clearTimeout(saveTimer.current);
     saveTimer.current = window.setTimeout(() => {
       saveTimer.current = null;
       persistLatestScene();
     }, LOCAL_SAVE_DEBOUNCE_MS);
-  }, [persistLatestScene, userId]);
+  }, [onSceneChange, persistLatestScene, userId]);
 
   return <ExcalidrawAdapter initialScene={initialScene} onChange={handleChange} />;
 }

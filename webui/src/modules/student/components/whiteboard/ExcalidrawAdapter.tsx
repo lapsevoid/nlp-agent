@@ -27,6 +27,7 @@ export function ExcalidrawAdapter({ initialScene, onChange }: {
       initialData={initialData}
       langCode="zh-CN"
       onChange={(elements, appState, files) => onChange({ elements, appState, files })}
+      aiEnabled={false}
       UIOptions={{ welcomeScreen: false }}
       validateEmbeddable={() => false}
     />
