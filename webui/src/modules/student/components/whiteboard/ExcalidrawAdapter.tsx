@@ -20,6 +20,32 @@ export interface ExcalidrawSceneChange {
   files: BinaryFiles;
 }
 
+type LoadedWhiteboardLibrary = {
+  asset: typeof WHITEBOARD_LIBRARY_ASSETS[number];
+  libraryItems: Awaited<ReturnType<typeof loadLibraryFromBlob>>;
+};
+
+let bundledLibrariesPromise: Promise<LoadedWhiteboardLibrary[]> | null = null;
+
+function loadBundledLibraries() {
+  if (!bundledLibrariesPromise) {
+    bundledLibrariesPromise = Promise.all(WHITEBOARD_LIBRARY_ASSETS.map(async (asset) => {
+      try {
+        const response = await fetch(whiteboardLibraryUrl(asset.fileName));
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return {
+          asset,
+          libraryItems: await loadLibraryFromBlob(await response.blob(), "published"),
+        };
+      } catch (error) {
+        console.warn(`[whiteboard] failed to load ${asset.name} library`, error);
+        return null;
+      }
+    })).then((libraries): LoadedWhiteboardLibrary[] => libraries.filter((library): library is LoadedWhiteboardLibrary => library !== null));
+  }
+  return bundledLibrariesPromise;
+}
+
 export function ExcalidrawAdapter({ initialScene, onChange }: {
   initialScene: StoredWhiteboardScene | null;
   onChange: (scene: ExcalidrawSceneChange) => void;
@@ -34,20 +60,8 @@ export function ExcalidrawAdapter({ initialScene, onChange }: {
     if (libraryLoadStarted.current) return;
     libraryLoadStarted.current = true;
 
-    const loadBundledLibraries = async () => {
-      const loadedLibraries = (await Promise.all(WHITEBOARD_LIBRARY_ASSETS.map(async (asset) => {
-        try {
-          const response = await fetch(whiteboardLibraryUrl(asset.fileName));
-          if (!response.ok) throw new Error(`HTTP ${response.status}`);
-          return {
-            asset,
-            libraryItems: await loadLibraryFromBlob(await response.blob(), "published"),
-          };
-        } catch (error) {
-          console.warn(`[whiteboard] failed to load ${asset.name} library`, error);
-          return null;
-        }
-      }))).filter((library): library is NonNullable<typeof library> => library !== null);
+    const installBundledLibraries = async () => {
+      const loadedLibraries = await loadBundledLibraries();
 
       // Replace the current in-memory library before adding the bundled items.
       // This prevents libraries added in another board instance from leaking into
@@ -80,7 +94,7 @@ export function ExcalidrawAdapter({ initialScene, onChange }: {
       }
     };
 
-    void loadBundledLibraries();
+    void installBundledLibraries();
   }, []);
 
   return <section className="whiteboard-panel" aria-label="白板绘图">

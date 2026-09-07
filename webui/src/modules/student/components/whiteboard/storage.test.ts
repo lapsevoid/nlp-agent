@@ -41,15 +41,26 @@ describe("whiteboard local scene storage", () => {
     } as unknown as Storage;
     const scene = serializeWhiteboardScene([{ id: "text-1", type: "text" }] as never[], {} as never, {});
 
-    writeWhiteboardScene("student-1", scene, storage);
+    expect(writeWhiteboardScene("student-1", scene, storage)).toBe(true);
     expect(readWhiteboardScene("student-1", storage)).toEqual(scene);
     expect(readWhiteboardScene("student-2", storage)).toBeNull();
 
     local.set(storageKeyForUser("student-1"), "not-json");
     expect(readWhiteboardScene("student-1", storage)).toBeNull();
 
-    writeWhiteboardScene("student-1", scene, storage);
+    expect(writeWhiteboardScene("student-1", scene, storage)).toBe(true);
     clearWhiteboardScene("student-1", storage);
     expect(readWhiteboardScene("student-1", storage)).toBeNull();
+  });
+
+  it("reports when the browser rejects a scene write", () => {
+    const storage = {
+      getItem: () => null,
+      setItem: () => { throw new Error("quota exceeded"); },
+      removeItem: () => undefined,
+    } as unknown as Storage;
+    const scene = serializeWhiteboardScene([], {} as never, {});
+
+    expect(writeWhiteboardScene("student-1", scene, storage)).toBe(false);
   });
 });

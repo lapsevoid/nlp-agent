@@ -101,14 +101,17 @@ export function readWhiteboardScene(userId: string, storage?: StorageLike): Stor
   }
 }
 
-export function writeWhiteboardScene(userId: string, scene: StoredWhiteboardScene, storage?: StorageLike): void {
-  if (!userId) return;
+export function writeWhiteboardScene(userId: string, scene: StoredWhiteboardScene, storage?: StorageLike): boolean {
+  if (!userId) return false;
   const target = resolveStorage(storage);
-  if (!target) return;
+  if (!target) return false;
   try {
     target.setItem(storageKeyForUser(userId), JSON.stringify(scene));
+    return true;
   } catch {
-    // Local storage is optional and may be unavailable or full.
+    // Local storage is optional and may be unavailable or full. Report the
+    // failure so the whiteboard can tell the user that a backup is needed.
+    return false;
   }
 }
 
