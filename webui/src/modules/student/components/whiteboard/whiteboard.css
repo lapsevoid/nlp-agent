@@ -15,8 +15,9 @@
   flex: 1 1 auto;
 }
 
-/* HelpDialog is rendered in Excalidraw's modal portal, so these host-level
- * rules intentionally target its public CSS classes instead of its DOM text. */
+/* HelpDialog is rendered in Excalidraw's body-level portal. These host-level
+ * rules follow the current component class names instead of patching package
+ * source or depending on visible dialog text. */
 .excalidraw-modal-container .HelpDialog__header {
   display: none;
 }
