@@ -34,6 +34,20 @@ export interface StoredWhiteboardScene {
 
 type StorageLike = Pick<Storage, "getItem" | "setItem" | "removeItem">;
 
+/**
+ * Embeds are intentionally disabled in this product surface. Keep the same
+ * invariant for restored scenes and for live scene changes so a stale local
+ * entry cannot reintroduce an unsupported element or reach page-level agents.
+ */
+export function withoutEmbeddableElements(elements: readonly ExcalidrawElement[]): ExcalidrawElement[] {
+  return elements.filter((element) => element.type !== "embeddable");
+}
+
+export function sanitizeWhiteboardScene(scene: StoredWhiteboardScene): StoredWhiteboardScene {
+  const elements = withoutEmbeddableElements(scene.elements);
+  return elements.length === scene.elements.length ? scene : { ...scene, elements };
+}
+
 export function storageKeyForUser(userId: string): string {
   return `${WHITEBOARD_STORAGE_PREFIX}${encodeURIComponent(userId)}`;
 }
@@ -95,7 +109,7 @@ export function readWhiteboardScene(userId: string, storage?: StorageLike): Stor
     const raw = target.getItem(storageKeyForUser(userId));
     if (!raw) return null;
     const parsed: unknown = JSON.parse(raw);
-    return isStoredScene(parsed) ? parsed : null;
+    return isStoredScene(parsed) ? sanitizeWhiteboardScene(parsed) : null;
   } catch {
     return null;
   }

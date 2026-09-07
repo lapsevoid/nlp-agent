@@ -1,5 +1,5 @@
 import { HelpCircle, X } from "lucide-react";
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 
 import { MainMenu } from "@excalidraw/excalidraw";
 
@@ -31,7 +31,9 @@ const SHORTCUT_GROUPS: ShortcutGroup[] = [
     title: "编辑器",
     items: [
       { label: "移动画布", keys: "Space + 拖动 / 滚轮" },
-      { label: "缩放画布", keys: "+ / - 或滚轮" },
+      { label: "放大画布", keys: "Ctrl/Cmd + +" },
+      { label: "缩小画布", keys: "Ctrl/Cmd + -" },
+      { label: "重置缩放", keys: "Ctrl/Cmd + 0" },
       { label: "撤销", keys: "Ctrl/Cmd + Z" },
       { label: "重做", keys: "Ctrl/Cmd + Shift + Z" },
       { label: "删除选中元素", keys: "Delete / Backspace" },
@@ -48,14 +50,54 @@ export function WhiteboardHelpMenuItem({ onOpen }: { onOpen: () => void }) {
   </MainMenu.Item>;
 }
 
+export function WhiteboardHelpTrigger({ onOpen }: { onOpen: () => void }) {
+  return <button type="button" className="whiteboard-help-trigger" aria-label="帮助" title="帮助" onClick={onOpen}>
+    <HelpCircle size={18} aria-hidden="true" />
+  </button>;
+}
+
 export function WhiteboardHelpDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const dialogRef = useRef<HTMLElement>(null);
+  const restoreFocusRef = useRef<HTMLElement | null>(null);
+
   useEffect(() => {
     if (!open) return undefined;
+
+    restoreFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    dialogRef.current?.focus();
+
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onClose();
+        return;
+      }
+      if (event.key !== "Tab") return;
+
+      const focusable = Array.from(dialogRef.current?.querySelectorAll<HTMLElement>(
+        'button,[href],input,select,textarea,[tabindex]:not([tabindex="-1"])',
+      ) ?? []);
+      if (focusable.length === 0) {
+        event.preventDefault();
+        return;
+      }
+
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
     };
     window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      restoreFocusRef.current?.focus();
+      restoreFocusRef.current = null;
+    };
   }, [onClose, open]);
 
   if (!open) return null;
@@ -63,7 +105,7 @@ export function WhiteboardHelpDialog({ open, onClose }: { open: boolean; onClose
   return <div className="whiteboard-help-overlay" role="presentation" onMouseDown={(event) => {
     if (event.target === event.currentTarget) onClose();
   }}>
-    <section className="whiteboard-help-dialog" role="dialog" aria-modal="true" aria-labelledby="whiteboard-help-title">
+    <section ref={dialogRef} className="whiteboard-help-dialog" role="dialog" tabIndex={-1} aria-modal="true" aria-labelledby="whiteboard-help-title">
       <header className="whiteboard-help-header">
         <h2 id="whiteboard-help-title">白板快捷键</h2>
         <button type="button" className="whiteboard-help-close" aria-label="关闭帮助" onClick={onClose}>

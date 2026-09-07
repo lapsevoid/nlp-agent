@@ -59,6 +59,35 @@
   flex: 1 1 auto;
 }
 
+/* The footer keeps Excalidraw's layout, but its native HelpButton opens the
+ * full upstream help dialog. The adapter supplies the filtered in-product
+ * dialog through the same footer slot instead. */
+.whiteboard-panel .help-icon {
+  display: none;
+}
+
+.whiteboard-help-trigger {
+  display: inline-grid;
+  width: 2rem;
+  height: 2rem;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--icon-fill-color, currentColor);
+  cursor: pointer;
+}
+
+.whiteboard-help-trigger:hover {
+  background: var(--button-hover-bg, rgb(15 23 42 / 8%));
+}
+
+.whiteboard-help-trigger:focus-visible {
+  outline: 2px solid var(--focus-highlight-color, currentColor);
+  outline-offset: 2px;
+}
+
 /* HelpDialog is rendered in Excalidraw's body-level portal. These host-level
  * rules follow the current component class names instead of patching package
  * source or depending on visible dialog text. */

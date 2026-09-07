@@ -4,6 +4,7 @@ import { ExcalidrawAdapter, type ExcalidrawSceneChange } from "./ExcalidrawAdapt
 import {
   readWhiteboardScene,
   serializeWhiteboardScene,
+  sanitizeWhiteboardScene,
   writeWhiteboardScene,
   type StoredWhiteboardScene,
 } from "./storage";
@@ -25,11 +26,14 @@ export function WhiteboardPanel({ userId, onSceneChange }: WhiteboardPanelProps)
     return <div className="whiteboard-shell whiteboard-auth-required" role="status">请登录后使用白板。</div>;
   }
 
-  return <AuthenticatedWhiteboardPanel userId={userId} onSceneChange={onSceneChange} />;
+  return <AuthenticatedWhiteboardPanel key={userId} userId={userId} onSceneChange={onSceneChange} />;
 }
 
 function AuthenticatedWhiteboardPanel({ userId, onSceneChange }: WhiteboardPanelProps & { userId: string }) {
-  const initialScene = useMemo<StoredWhiteboardScene | null>(() => userId ? readWhiteboardScene(userId) : null, [userId]);
+  const initialScene = useMemo<StoredWhiteboardScene | null>(() => {
+    const scene = userId ? readWhiteboardScene(userId) : null;
+    return scene ? sanitizeWhiteboardScene(scene) : null;
+  }, [userId]);
   const latestScene = useRef<StoredWhiteboardScene | null>(initialScene);
   const saveTimer = useRef<number | null>(null);
   const [saveErrorUserId, setSaveErrorUserId] = useState<string | null>(null);

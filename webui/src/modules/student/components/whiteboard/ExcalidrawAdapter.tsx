@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { CaptureUpdateAction, Excalidraw, loadLibraryFromBlob, MainMenu } from "@excalidraw/excalidraw";
+import { CaptureUpdateAction, Excalidraw, Footer, loadLibraryFromBlob, MainMenu } from "@excalidraw/excalidraw";
 import type { ExcalidrawElement } from "@excalidraw/excalidraw/element/types";
 import type {
   AppState,
@@ -11,8 +11,8 @@ import type {
 import "@excalidraw/excalidraw/index.css";
 
 import { WHITEBOARD_LIBRARY_ASSETS, whiteboardLibraryUrl } from "./libraryAssets";
-import type { StoredWhiteboardScene } from "./storage";
-import { WhiteboardHelpDialog, WhiteboardHelpMenuItem } from "./WhiteboardHelp";
+import { withoutEmbeddableElements, type StoredWhiteboardScene } from "./storage";
+import { WhiteboardHelpDialog, WhiteboardHelpMenuItem, WhiteboardHelpTrigger } from "./WhiteboardHelp";
 import "./whiteboard.css";
 
 export interface ExcalidrawSceneChange {
@@ -74,16 +74,36 @@ export function ExcalidrawAdapter({ initialScene, onChange, onLibraryLoadError }
   const libraryLoadStarted = useRef(false);
   const excalidrawApi = useRef<ExcalidrawImperativeAPI | null>(null);
   const mounted = useRef(true);
+  const panelRef = useRef<HTMLElement>(null);
   const [helpOpen, setHelpOpen] = useState(false);
+  const openHelp = useCallback(() => setHelpOpen(true), []);
+  const closeHelp = useCallback(() => setHelpOpen(false), []);
   const initialData: ExcalidrawInitialDataState | undefined = initialScene ? {
-    elements: initialScene.elements,
+    elements: withoutEmbeddableElements(initialScene.elements),
     appState: initialScene.appState,
     files: initialScene.files,
   } : undefined;
-  useEffect(() => () => {
-    mounted.current = false;
-    excalidrawApi.current = null;
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      excalidrawApi.current = null;
+    };
   }, []);
+
+  useEffect(() => {
+    const handleHelpShortcut = (event: KeyboardEvent) => {
+      if (event.key !== "?" || event.ctrlKey || event.metaKey || event.altKey) return;
+      if (!(event.target instanceof Node) || !panelRef.current?.contains(event.target)) return;
+      if (event.target instanceof HTMLElement && event.target.closest("input, textarea, [contenteditable=\"true\"]")) return;
+      event.preventDefault();
+      event.stopPropagation();
+      openHelp();
+    };
+
+    window.addEventListener("keydown", handleHelpShortcut, true);
+    return () => window.removeEventListener("keydown", handleHelpShortcut, true);
+  }, [openHelp]);
 
   const handleExcalidrawAPI = useCallback((api: ExcalidrawImperativeAPI) => {
     excalidrawApi.current = api;
@@ -95,7 +115,6 @@ export function ExcalidrawAdapter({ initialScene, onChange, onLibraryLoadError }
 
       // Clear the engine's library before awaiting our local assets so a
       // user's personal/public library cannot flash into this read-only view.
-      let libraryUpdateFailed = false;
       try {
         await api.updateLibrary({
           libraryItems: [],
@@ -103,8 +122,9 @@ export function ExcalidrawAdapter({ initialScene, onChange, onLibraryLoadError }
           defaultStatus: "published",
         });
       } catch (error) {
-        libraryUpdateFailed = true;
         console.warn("[whiteboard] failed to clear the library", error);
+        onLibraryLoadError?.([]);
+        return;
       }
 
       const { libraries: loadedLibraries, failedAssets } = await loadBundledLibraries();
@@ -124,7 +144,7 @@ export function ExcalidrawAdapter({ initialScene, onChange, onLibraryLoadError }
           console.warn(`[whiteboard] failed to install ${asset.name} library`, error);
         }
       }
-      if (libraryUpdateFailed || installationFailures.length > 0) {
+      if (installationFailures.length > 0) {
         onLibraryLoadError?.(installationFailures.map((asset) => asset.name));
       }
     };
@@ -143,7 +163,7 @@ export function ExcalidrawAdapter({ initialScene, onChange, onLibraryLoadError }
     onChange({ elements: safeElements, appState, files });
   }, [onChange]);
 
-  return <section className="whiteboard-panel" aria-label="白板绘图">
+  return <section ref={panelRef} className="whiteboard-panel" aria-label="白板绘图">
     <Excalidraw
       initialData={initialData}
       langCode="zh-CN"
@@ -158,13 +178,16 @@ export function ExcalidrawAdapter({ initialScene, onChange, onLibraryLoadError }
         <MainMenu.DefaultItems.Export />
         <MainMenu.DefaultItems.SaveAsImage />
         <MainMenu.DefaultItems.SearchMenu />
-        <WhiteboardHelpMenuItem onOpen={() => setHelpOpen(true)} />
+        <WhiteboardHelpMenuItem onOpen={openHelp} />
         <MainMenu.DefaultItems.ClearCanvas />
         <MainMenu.Separator />
         <MainMenu.DefaultItems.ToggleTheme />
         <MainMenu.DefaultItems.ChangeCanvasBackground />
       </MainMenu>
+      <Footer>
+        <WhiteboardHelpTrigger onOpen={openHelp} />
+      </Footer>
     </Excalidraw>
-    <WhiteboardHelpDialog open={helpOpen} onClose={() => setHelpOpen(false)} />
+    <WhiteboardHelpDialog open={helpOpen} onClose={closeHelp} />
   </section>;
 }

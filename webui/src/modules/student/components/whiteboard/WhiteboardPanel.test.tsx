@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const excalidraw = vi.hoisted(() => ({
@@ -31,6 +32,7 @@ vi.mock("@excalidraw/excalidraw", () => ({
     },
     Separator: () => null,
   }),
+  Footer: ({ children }: { children?: React.ReactNode }) => <footer data-testid="whiteboard-footer">{children}</footer>,
 }));
 
 import { WhiteboardPanel } from "./WhiteboardPanel";
@@ -73,6 +75,30 @@ describe("WhiteboardPanel", () => {
     expect(props.validateEmbeddable?.("https://example.com")).toBe(false);
   });
 
+  it("filters embeddable elements from a restored local scene", () => {
+    const onSceneChange = vi.fn();
+    localStorage.setItem(storageKeyForUser("student-1"), JSON.stringify({
+      schemaVersion: 1,
+      elements: [
+        { id: "embed-1", type: "embeddable" },
+        { id: "saved-1", type: "rectangle" },
+      ],
+      appState: { theme: "dark" },
+      files: {},
+    }));
+
+    render(<WhiteboardPanel userId="student-1" onSceneChange={onSceneChange} />);
+
+    expect(excalidraw.render.mock.calls.at(-1)?.[0]).toEqual(expect.objectContaining({
+      initialData: expect.objectContaining({
+        elements: [{ id: "saved-1", type: "rectangle" }],
+      }),
+    }));
+    expect(onSceneChange).toHaveBeenCalledWith(expect.objectContaining({
+      elements: [{ id: "saved-1", type: "rectangle" }],
+    }));
+  });
+
   it("reloads the scene when the signed-in user changes", () => {
     localStorage.setItem(storageKeyForUser("student-1"), JSON.stringify({
       schemaVersion: 1,
@@ -99,14 +125,32 @@ describe("WhiteboardPanel", () => {
     render(<WhiteboardPanel userId="student-1" />);
 
     expect(screen.getByTestId("whiteboard-main-menu")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "帮助" }));
+    const helpButtons = screen.getAllByRole("button", { name: "帮助" });
+    expect(helpButtons).toHaveLength(2);
+    helpButtons[0].focus();
+    fireEvent.click(helpButtons[0]);
     expect(screen.getByRole("dialog", { name: "白板快捷键" })).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "白板快捷键" })).toHaveFocus();
     expect(screen.getByText("选择工具")).toBeInTheDocument();
     expect(screen.getByText("撤销")).toBeInTheDocument();
     expect(screen.getByText("重做")).toBeInTheDocument();
+    expect(screen.getByText("Ctrl/Cmd + +")).toBeInTheDocument();
+    expect(screen.queryByText("+ / - 或滚轮")).not.toBeInTheDocument();
     expect(screen.queryByText("Crop image")).not.toBeInTheDocument();
     expect(screen.queryByText("Create a flowchart from a generic element")).not.toBeInTheDocument();
     expect(screen.queryByTestId("whiteboard-excalidraw-links")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "关闭帮助" }));
+    expect(helpButtons[0]).toHaveFocus();
+  });
+
+  it("routes the help shortcut to the filtered in-product dialog", () => {
+    render(<WhiteboardPanel userId="student-1" />);
+
+    fireEvent.keyDown(screen.getByRole("region", { name: "白板绘图" }), { key: "?", shiftKey: true });
+
+    expect(screen.getByRole("dialog", { name: "白板快捷键" })).toBeInTheDocument();
+    expect(screen.queryByText("Crop image")).not.toBeInTheDocument();
   });
 
   it("hides only the embed action in Excalidraw's extra-tools menu", () => {
@@ -215,6 +259,34 @@ describe("WhiteboardPanel", () => {
     expect(excalidraw.loadLibraryFromBlob).toHaveBeenCalledTimes(WHITEBOARD_LIBRARY_ASSETS.length);
   });
 
+  it("keeps library installation active under StrictMode effect replay", async () => {
+    vi.useRealTimers();
+    const updateLibrary = vi.fn().mockResolvedValue([]);
+    const blob = new Blob([JSON.stringify({ type: "excalidrawlib", version: 2, libraryItems: [] })], { type: "application/json" });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, blob: () => Promise.resolve(blob) }));
+
+    render(<StrictMode><WhiteboardPanel userId="student-1" /></StrictMode>);
+    const props = excalidraw.render.mock.calls.at(-1)?.[0] as { excalidrawAPI?: (api: { updateLibrary: typeof updateLibrary }) => void };
+    props.excalidrawAPI?.({ updateLibrary });
+
+    await waitFor(() => expect(updateLibrary).toHaveBeenCalled());
+  });
+
+  it("does not install bundled libraries when clearing the engine library fails", async () => {
+    vi.useRealTimers();
+    const updateLibrary = vi.fn().mockRejectedValueOnce(new Error("library unavailable"));
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<WhiteboardPanel userId="student-1" />);
+    const props = excalidraw.render.mock.calls.at(-1)?.[0] as { excalidrawAPI?: (api: { updateLibrary: typeof updateLibrary }) => void };
+    props.excalidrawAPI?.({ updateLibrary });
+
+    await waitFor(() => expect(screen.getByText("部分教学素材加载失败，请刷新白板后重试。")).toBeInTheDocument());
+    expect(updateLibrary).toHaveBeenCalledTimes(1);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("retries bundled library loading after a failed attempt", async () => {
     vi.useRealTimers();
     const updateLibrary = vi.fn().mockResolvedValue([]);
@@ -236,6 +308,21 @@ describe("WhiteboardPanel", () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(WHITEBOARD_LIBRARY_ASSETS.length * 2));
     expect(secondUpdateLibrary).toHaveBeenCalled();
     expect(screen.getByText("部分教学素材加载失败，请刷新白板后重试。")).toBeInTheDocument();
+  });
+
+  it("clears a previous user's library warning when switching accounts", async () => {
+    vi.useRealTimers();
+    const fetchMock = vi.fn().mockRejectedValue(new Error("offline"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const view = render(<WhiteboardPanel userId="student-1" />);
+    const firstProps = excalidraw.render.mock.calls.at(-1)?.[0] as { excalidrawAPI?: (api: { updateLibrary: ReturnType<typeof vi.fn> }) => void };
+    firstProps.excalidrawAPI?.({ updateLibrary: vi.fn().mockResolvedValue([]) });
+    await waitFor(() => expect(screen.getByText("部分教学素材加载失败，请刷新白板后重试。")).toBeInTheDocument());
+
+    view.rerender(<WhiteboardPanel userId="student-2" />);
+
+    expect(screen.queryByText("部分教学素材加载失败，请刷新白板后重试。")).not.toBeInTheDocument();
   });
 
   it("does not install libraries after the adapter unmounts", async () => {
