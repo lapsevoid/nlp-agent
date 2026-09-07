@@ -129,7 +129,6 @@ jobs:
       contents: read
       packages: read
     runs-on: [self-hosted, linux, test]
-    timeout-minutes: 20
     environment: test
     steps:
       - uses: actions/checkout@v4
