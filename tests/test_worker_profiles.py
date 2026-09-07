@@ -266,7 +266,7 @@ def test_pinned_coordinator_and_worker_prompt_versions_exist():
         (root / "configs" / "agent_config.yaml").read_text(encoding="utf-8")
     )
     versions = raw["prompts"]["versions"]
-    assert versions["coordinator"] == "1.4"
+    assert versions["coordinator"] == "1.5"
     assert versions["worker"] == "1.3"
     registry = PromptRegistry(versions=versions)
     coordinator_spec, coordinator_template = registry.load("coordinator")
@@ -277,9 +277,12 @@ def test_pinned_coordinator_and_worker_prompt_versions_exist():
     assert "{{today}}" in template
 
 
-def test_coordinator_prompt_v1_4_teaches_academic_search_routing():
+def test_coordinator_prompt_v1_5_teaches_academic_search_routing():
     root = Path(__file__).resolve().parents[1]
-    prompt = (root / "core" / "prompt_runtime" / "templates" / "coordinator.v1.4.md").read_text(encoding="utf-8")
+    prompt = (root / "core" / "prompt_runtime" / "templates" / "coordinator.v1.5.md").read_text(encoding="utf-8")
+    assert "无法核验学术出处" in prompt
+    assert "不得凭记忆补写" in prompt
+    assert "只能引用成功来源实际返回" in prompt
 
     assert "学术检索路由" in prompt
     assert "必须先调用 academic_search" in prompt

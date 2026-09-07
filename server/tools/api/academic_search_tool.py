@@ -19,7 +19,11 @@ async def academic_search(
     year_to: int | None = None,
     sort: Literal["relevance", "recent"] = "relevance",
 ) -> str:
-    """检索国际学术论文元数据和官方出处，返回可核验的结构化结果。"""
+    """检索国际学术论文元数据和官方出处，返回可核验的结构化结果。
+
+    source_status=skipped 表示按配置跳过，不得凭记忆补链接。
+    没有可核验结果时须说明无法核验学术出处；部分失败仅引用成功来源结果。
+    """
     service = get_academic_search_service()
     request = AcademicSearchInput(
         query=query,

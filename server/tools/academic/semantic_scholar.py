@@ -366,7 +366,7 @@ class SemanticScholarProvider(AcademicProvider):
             )
             is_preprint = bool(
                 arxiv_id or (doi and is_arxiv_doi(doi)) or venue_is_preprint
-            )
+            ) and not (doi and not is_arxiv_doi(doi))
 
             if acl_id:
                 publication_status = "peer_reviewed"

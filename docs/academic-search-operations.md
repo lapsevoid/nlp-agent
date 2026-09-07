@@ -2,6 +2,12 @@
 
 ## 运行模式
 
+Coordinator 当前使用 1.5 提示词：无可核验结果时明确说明无法核验，
+禁止凭记忆补写论文出处；部分失败仍允许引用成功来源。
+这属于模型行为约束，不是代码级输出拦截。
+查询及元数据缓存均按 Provider 配置和启用来源隔离，旧缓存等待 TTL 到期，
+无需清空 Redis。修改配置后应重启后端，使 Provider 实例与配置一致。
+
 `tools.academic.reliability` 控制 P2 可靠性能力。配置了
 `NLP_AGENT_REDIS_URL` 时，所有 Web/Worker 实例共享：
 

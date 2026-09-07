@@ -360,7 +360,7 @@ memory:
 # is introduced; undeclared or missing template variables fail before an LLM call.
 prompts:
   versions:
-    coordinator: "1.4"
+    coordinator: "1.5"
     worker: "1.3"
     learning.policy: "1.2"
 

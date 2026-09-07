@@ -132,10 +132,26 @@ class AcademicSearchService:
             for provider in self.providers
         }
 
+    def _active_providers(self) -> list[AcademicProvider]:
+        return [
+            p for p in self.providers
+            if getattr(self.config, p.name, None) is None
+            or getattr(self.config, p.name).enabled
+        ]
+
+    def _provider_fingerprint(self) -> str:
+        # Version both caches together; include configuration but never API keys.
+        return cache_key(
+            "academic-v2",
+            ",".join(sorted(p.name for p in self._active_providers())),
+            self.config.model_dump_json(),
+        )
+
     def _get_cache_key(self, request: AcademicSearchInput, query_used: str) -> str:
         sources_str = ",".join(sorted(request.sources))
         return cache_key(
             "academic_search",
+            self._provider_fingerprint(),
             normalize_title(query_used),
             sources_str,
             str(request.year_from or ""),
@@ -186,6 +202,17 @@ class AcademicSearchService:
         if cached_raw:
             try:
                 cached_response = AcademicSearchResponse.model_validate_json(cached_raw)
+                available = {p.name for p in self._active_providers()}
+                allowed = available & set(request.sources) if request.sources else available
+                if (
+                    set(request.sources) - available
+                    or any(s.source not in allowed for s in cached_response.source_status)
+                    or any(
+                        r.source not in allowed
+                        for paper in cached_response.papers for r in paper.source_records
+                    )
+                ):
+                    raise ValueError("cached sources are no longer available")
                 logger.info(
                     "academic.search.cache_hit",
                     cache_backend=cache_backend,
@@ -211,9 +238,9 @@ class AcademicSearchService:
         # Filter providers by requested sources if specified
         requested_sources = set(request.sources)
         if requested_sources:
-            available_sources = {p.name for p in self.providers}
+            available_sources = {p.name for p in self._active_providers()}
             target_providers = [
-                p for p in self.providers if p.name in requested_sources
+                p for p in self._active_providers() if p.name in requested_sources
             ]
             unsupported_sources = sorted(requested_sources - available_sources)
             for s in unsupported_sources:
@@ -227,7 +254,7 @@ class AcademicSearchService:
                 )
                 warnings.append(f"source {s} is not available in current configuration")
         else:
-            target_providers = self.providers
+            target_providers = self._active_providers()
 
         # Concurrently execute targeted providers
         async def _query_provider(
@@ -357,7 +384,9 @@ class AcademicSearchService:
                     )
                     warnings.append(f"source {provider.name} failed unexpectedly")
 
-        raw_papers, metadata_warnings = await self._hydrate_cached_metadata(raw_papers)
+        raw_papers, metadata_warnings = await self._hydrate_cached_metadata(
+            raw_papers, allowed_sources={p.name for p in target_providers}
+        )
         warnings.extend(metadata_warnings)
 
         # Deduplicate and merge papers across sources
@@ -505,8 +534,7 @@ class AcademicSearchService:
                     error_type=type(error).__name__,
                 )
 
-    @staticmethod
-    def _paper_metadata_keys(paper: AcademicPaper) -> tuple[str, ...]:
+    def _paper_metadata_keys(self, paper: AcademicPaper) -> tuple[str, ...]:
         identifiers = paper.identifiers
         raw_keys = [
             f"doi:{identifiers.doi}" if identifiers.doi else None,
@@ -520,15 +548,21 @@ class AcademicSearchService:
             f"corpus:{identifiers.corpus_id}" if identifiers.corpus_id else None,
             f"record:{paper.record_id}",
         ]
-        return tuple(cache_key("paper", value) for value in raw_keys if value)
+        return tuple(
+            cache_key("paper", self._provider_fingerprint(), value)
+            for value in raw_keys if value
+        )
 
     async def _hydrate_cached_metadata(
-        self, papers: list[AcademicPaper]
+        self, papers: list[AcademicPaper], *, allowed_sources: set[str] | None = None
     ) -> tuple[list[AcademicPaper], list[str]]:
         if self.shared_store is None or not papers:
             return papers, []
         hydrated: list[AcademicPaper] = []
         warnings: list[str] = []
+        allowed = allowed_sources if allowed_sources is not None else {
+            p.name for p in self._active_providers()
+        }
         try:
             for paper in papers:
                 cached_paper: AcademicPaper | None = None
@@ -536,6 +570,9 @@ class AcademicSearchService:
                     cached_raw = await self.shared_store.get_metadata(key)
                     if cached_raw:
                         cached_paper = AcademicPaper.model_validate_json(cached_raw)
+                        if any(r.source not in allowed for r in cached_paper.source_records):
+                            cached_paper = None
+                            continue
                         break
                 if cached_paper is None:
                     hydrated.append(paper)

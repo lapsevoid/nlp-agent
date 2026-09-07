@@ -295,6 +295,13 @@ def merge_papers(
         merged_first_submitted_at = (
             min(first_submitted_dates) if first_submitted_dates else None
         )
+    elif merged_doi and not is_arxiv_doi(merged_doi):
+        # A formal DOI preserves publication metadata, but does not prove review.
+        merged_status = "unknown"
+        merged_published_at = primary.published_at or secondary.published_at
+        merged_first_submitted_at = (
+            min(first_submitted_dates) if first_submitted_dates else None
+        )
     elif (
         primary.publication_status == "preprint"
         or secondary.publication_status == "preprint"
