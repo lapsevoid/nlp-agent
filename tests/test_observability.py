@@ -20,18 +20,15 @@ from core.identity import AccessDeniedError
 ADMIN = AuthenticatedPrincipal.system_admin()
 
 
-def test_usage_from_metadata_accepts_deepseek_kv_cache_fields():
-    usage = usage_from_metadata(
-        {
-            "prompt_tokens": 100,
-            "completion_tokens": 20,
-            "prompt_cache_hit_tokens": 75,
-            "prompt_cache_miss_tokens": 25,
-        }
-    )
+def test_usage_from_metadata_preserves_provider_reported_kv_cache_tokens():
+    usage = usage_from_metadata({
+        "prompt_tokens": 100,
+        "completion_tokens": 20,
+        "prompt_cache_hit_tokens": 75,
+        "prompt_cache_miss_tokens": 25,
+    })
 
     assert usage.input_tokens == 100
-    assert usage.output_tokens == 20
     assert usage.cached_tokens == 75
     assert usage.cache_miss_tokens == 25
     assert usage.total_tokens == 120

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
-from typing import Any, Literal
+from typing import Any, Literal, Mapping
 
 from sqlalchemy import BigInteger, Engine, case, cast, create_engine, func, literal, literal_column, select
 
@@ -25,6 +25,15 @@ TOKEN_FIELDS = (
 UsageGranularity = Literal["day", "week", "five_minute"]
 SystemUsageDimension = Literal["users", "workspaces", "providers", "purposes", "models"]
 SYSTEM_DIMENSION_PREVIEW_LIMIT = 50
+
+
+def _cache_hit_rate(tokens: Mapping[str, Any]) -> float | None:
+    """Return the Provider-measured share of input tokens read from KV cache."""
+    input_tokens = max(0, int(tokens.get("input_tokens") or 0))
+    if input_tokens == 0:
+        return None
+    cached_input_tokens = max(0, int(tokens.get("cached_input_tokens") or 0))
+    return min(cached_input_tokens, input_tokens) / input_tokens
 
 
 def _utc_now() -> datetime:
@@ -264,6 +273,7 @@ class UsageReadService:
                 }
             )
 
+        tokens = {field: int(totals[field] or 0) for field in TOKEN_FIELDS}
         output = {
             "scope": "system",
             "user_id": None,
@@ -279,7 +289,8 @@ class UsageReadService:
             "credit_status": "complete" if unpriced_events == 0 else "partial",
             "credits_micro": priced_credits_micro if unpriced_events == 0 else None,
             "priced_credits_micro": priced_credits_micro,
-            "tokens": {field: int(totals[field] or 0) for field in TOKEN_FIELDS},
+            "tokens": tokens,
+            "cache_hit_rate": _cache_hit_rate(tokens),
             "breakdown": output_breakdown,
         }
         for name, (key, secondary_key) in dimensions.items():
@@ -577,6 +588,7 @@ class UsageReadService:
             "credits_micro": priced_credits_micro if unpriced_events == 0 else None,
             "priced_credits_micro": priced_credits_micro,
             "tokens": token_totals,
+            "cache_hit_rate": _cache_hit_rate(token_totals),
             "breakdown": breakdown,
         }
 
@@ -737,6 +749,7 @@ class UsageReadService:
             ),
             "priced_credits_micro": priced_credits_micro,
             "tokens": tokens,
+            "cache_hit_rate": _cache_hit_rate(tokens),
             "breakdown": [
                 breakdown[key] for key in sorted(breakdown)
             ],

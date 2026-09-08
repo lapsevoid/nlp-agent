@@ -183,6 +183,40 @@ async def test_non_streaming_success_reports_once():
 
 
 @pytest.mark.asyncio
+async def test_provider_reporter_preserves_measured_kv_cache_hits():
+    reporter = InMemoryModelUsageReporter()
+    raw_usage = {
+        "prompt_tokens": 1000,
+        "completion_tokens": 20,
+        "prompt_cache_hit_tokens": 750,
+        "prompt_cache_miss_tokens": 250,
+    }
+    fake = FakeRawModel([
+        AIMessage(
+            content="cached response",
+            additional_kwargs={"provider_usage_raw": raw_usage},
+        )
+    ])
+    resilient = ResilientChatModel(
+        [_candidate("cache-cand", fake, provider="deepseek")],
+        reporter_slot=ModelUsageReporterSlot(reporter),
+        normalize_response=False,
+    )
+
+    with bind_usage_attribution(_sample_attribution()):
+        await resilient.ainvoke([HumanMessage(content="same stable prefix")])
+
+    assert len(reporter.events) == 1
+    invocation, usage, outcome = reporter.events[0]
+    assert invocation.identity.provider == "deepseek"
+    assert usage.source == "provider"
+    assert usage.input_tokens == 1000
+    assert usage.cached_input_tokens == 750
+    assert usage.cached_input_tokens / usage.input_tokens == pytest.approx(0.75)
+    assert outcome.status == "succeeded"
+
+
+@pytest.mark.asyncio
 async def test_provider_feature_usage_overrides_image_fallback_and_counts_search():
     reporter = InMemoryModelUsageReporter()
     slot = ModelUsageReporterSlot(reporter)

@@ -37,7 +37,7 @@ Functions:
     spawn_worker(agent_name, directive, config, model) -> str
         LangChain `@tool`。根据 agent_name 查询技能黄页获取 SOP Prompt
         与工具白名单，解析模型（env → tool param → yaml defaults → inherit），
-        组装可缓存的固定 System 前缀、动态运行时上下文和 Human 指令，写入磁盘持久化，
+        组装初始消息（System + Human），写入磁盘持久化，
         通过 `asyncio.create_task` 启动后台沙箱，瞬间返回 "started" 通知。
 
     send_message(to_agent_id, message, config) -> str
@@ -122,18 +122,30 @@ NON_PERSISTED_TOOL_RESULT_PLACEHOLDER = (
 _WORKER_TIME_REFERENCE = "由后续运行时上下文消息提供"
 
 
+def _build_worker_stable_prefix() -> SystemMessage:
+    """Build the versioned Worker prefix without accepting runtime inputs.
+
+    Keeping this boundary argument-free makes it difficult for future per-run
+    fields (time, profile SOP, directive, identifiers) to enter the cacheable
+    prefix accidentally. A prompt version/configuration change is allowed to
+    invalidate the prefix intentionally.
+    """
+    return SystemMessage(
+        content=global_prompt_runtime.render(
+            "worker",
+            today=_WORKER_TIME_REFERENCE,
+        )
+    )
+
+
 def _build_worker_initial_messages(
     sop_prompt: str,
     directive: str,
     *,
     current_time: str | None = None,
 ) -> list[SystemMessage | HumanMessage]:
-    """Keep stable Worker instructions ahead of per-run context for KV caching."""
+    """Keep the argument-free Worker prefix ahead of every per-run field."""
     resolved_time = current_time or datetime.now().strftime("%Y-%m-%d %H:%M:%S %A")
-    worker_protocol = global_prompt_runtime.render(
-        "worker",
-        today=_WORKER_TIME_REFERENCE,
-    )
     skill_section = (
         "[专家领域与标准操作流程 (SOP)]\n"
         f"{sop_prompt}\n"
@@ -145,7 +157,7 @@ def _build_worker_initial_messages(
         "[/运行时上下文]"
     )
     return [
-        SystemMessage(content=worker_protocol),
+        _build_worker_stable_prefix(),
         SystemMessage(content=skill_section),
         SystemMessage(content=runtime_context),
         HumanMessage(content=f"【任务指令】：\n{directive}"),
@@ -946,6 +958,9 @@ async def spawn_worker(
         "directive": directive,
         "model": resolved_model,
         "profile": profile.name,
+        "kvCachePrefixSha256": hashlib.sha256(
+            str(initial_messages[0].content).encode("utf-8")
+        ).hexdigest(),
         "skills": list(profile.skills),
         "toolGrant": toolset.snapshot.model_dump(mode="json"),
         "join": join,

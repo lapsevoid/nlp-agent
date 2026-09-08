@@ -189,6 +189,23 @@ describe("MonitorApp navigation", () => {
     expect(screen.queryByRole("heading", { name: "系统总览", level: 1 })).not.toBeInTheDocument();
   });
 
+  it("shows the Provider-measured KV cache hit rate in the usage summary", async () => {
+    history.replaceState({}, "", "/monitor/usage");
+    monitorApi.systemUsage.mockResolvedValueOnce({
+      scope: "system", period_days: 30, from: "2026-08-09T00:00:00Z", to: "2026-09-08T00:00:00Z", granularity: "day",
+      events: 2, priced_events: 2, unpriced_events: 0, credits_complete: true, credit_status: "complete", credits_micro: 100, priced_credits_micro: 100,
+      tokens: { input_tokens: 200, cached_input_tokens: 80, cache_write_input_tokens: 0, output_tokens: 4, reasoning_output_tokens: 0, total_tokens: 204 },
+      cache_hit_rate: 0.4,
+      breakdown: [], users: [], workspaces: [], providers: [], purposes: [], models: [],
+    });
+
+    render(<MonitorApp />);
+
+    expect(await screen.findByText("KV Cache 命中率")).toBeVisible();
+    expect(screen.getByText("40.0%")).toBeVisible();
+    expect(screen.getByText("80 / 200 输入 Token")).toBeVisible();
+  });
+
   it("loads dependency health only on the component route and links an anomaly to traces", async () => {
     history.replaceState({}, "", "/monitor/components");
     monitorApi.dependencies.mockResolvedValueOnce({

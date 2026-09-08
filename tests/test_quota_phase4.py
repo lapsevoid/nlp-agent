@@ -797,6 +797,38 @@ def test_system_snapshot_aggregates_detailed_usage_for_every_user():
     assert snapshot["models"][1]["provider_model"] == "model-b"
 
 
+def test_system_snapshot_reports_provider_measured_kv_cache_hit_rate():
+    engine = _engine()
+    first = _usage_event(
+        operation_id="op-cache-warmup",
+        occurred_at=NOW - timedelta(hours=1),
+    )
+    first.update(
+        input_tokens=100,
+        cached_input_tokens=0,
+        output_tokens=2,
+        total_tokens=102,
+    )
+    second = _usage_event(
+        operation_id="op-cache-hit",
+        occurred_at=NOW - timedelta(minutes=30),
+    )
+    second.update(
+        input_tokens=100,
+        cached_input_tokens=80,
+        output_tokens=2,
+        total_tokens=102,
+    )
+    with engine.begin() as connection:
+        connection.execute(insert(UsageEventModel), [first, second])
+
+    snapshot = UsageReadService(engine).system_snapshot(days=7, now=NOW)
+
+    assert snapshot["tokens"]["input_tokens"] == 200
+    assert snapshot["tokens"]["cached_input_tokens"] == 80
+    assert snapshot["cache_hit_rate"] == pytest.approx(0.4)
+
+
 def test_system_usage_exposes_bounded_user_pages_and_five_minute_trend():
     engine = _engine()
     with engine.begin() as connection:
