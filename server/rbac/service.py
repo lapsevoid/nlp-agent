@@ -35,6 +35,10 @@ class UnknownRoleError(ValueError):
     pass
 
 
+class ClassroomNotFoundError(LookupError):
+    """Raised when an active classroom cannot be found by ID."""
+
+
 class RbacService:
     async def create_role(self, session: AsyncSession, *, code: str, name: str, description: str, actor_user_id: str) -> RoleModel:
         if await session.scalar(select(RoleModel.id).where(RoleModel.code == code)):
@@ -231,6 +235,10 @@ class RbacService:
             raise ValueError("workspace already has a classroom")
         classroom = ClassroomModel(id=str(uuid.uuid4()), workspace_id=workspace_id, name=name, status="active")
         session.add(classroom)
+        # The membership row has a foreign key to the newly-created classroom.
+        # Flush the parent explicitly before adding that child while retaining
+        # the surrounding request transaction for atomicity.
+        await session.flush([classroom])
         # The creator is the first classroom teacher; this is the explicit
         # classroom-scope root rather than an implicit workspace shortcut.
         session.add(ClassroomMemberModel(classroom_id=classroom.id, user_id=actor_user_id, member_role="teacher", status="active"))
@@ -240,7 +248,7 @@ class RbacService:
     async def classroom(self, session: AsyncSession, classroom_id: str) -> ClassroomModel:
         row = await session.scalar(select(ClassroomModel).where(ClassroomModel.id == classroom_id, ClassroomModel.status == "active"))
         if row is None:
-            raise KeyError(classroom_id)
+            raise ClassroomNotFoundError(classroom_id)
         return row
 
     async def classrooms_for_user(self, session: AsyncSession, user_id: str) -> list[ClassroomModel]:
