@@ -64,6 +64,7 @@ import hashlib
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
+from datetime import datetime
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 from core.task_manager import global_task_manager
@@ -118,6 +119,51 @@ logger = get_logger("shiliu.tools.worker")
 NON_PERSISTED_TOOL_RESULT_PLACEHOLDER = (
     "[tool result omitted from persistent transcript by tool policy]"
 )
+_WORKER_TIME_REFERENCE = "由后续运行时上下文消息提供"
+
+
+def _build_worker_stable_prefix() -> SystemMessage:
+    """Build the versioned Worker prefix without accepting runtime inputs.
+
+    Keeping this boundary argument-free makes it difficult for future per-run
+    fields (time, profile SOP, directive, identifiers) to enter the cacheable
+    prefix accidentally. A prompt version/configuration change is allowed to
+    invalidate the prefix intentionally.
+    """
+    return SystemMessage(
+        content=global_prompt_runtime.render(
+            "worker",
+            today=_WORKER_TIME_REFERENCE,
+        )
+    )
+
+
+def _build_worker_initial_messages(
+    sop_prompt: str,
+    directive: str,
+    *,
+    current_time: str | None = None,
+) -> list[SystemMessage | HumanMessage]:
+    """Keep the argument-free Worker prefix ahead of every per-run field."""
+    resolved_time = current_time or datetime.now().strftime("%Y-%m-%d %H:%M:%S %A")
+    skill_section = (
+        "[专家领域与标准操作流程 (SOP)]\n"
+        f"{sop_prompt}\n"
+        "[/专家领域与标准操作流程 (SOP)]"
+    )
+    runtime_context = (
+        "[运行时上下文]\n"
+        f"当前真实时间：{resolved_time}\n"
+        "[/运行时上下文]"
+    )
+    return [
+        _build_worker_stable_prefix(),
+        SystemMessage(content=skill_section),
+        SystemMessage(content=runtime_context),
+        HumanMessage(content=f"【任务指令】：\n{directive}"),
+    ]
+
+
 _TOOL_RUNTIME_OVERHEAD_S = 30.0
 _JOIN_COMPLETION_GRACE_S = 5.0
 
@@ -905,23 +951,16 @@ async def spawn_worker(
         ).model_dump_json(exclude_none=True)
     sop_prompt = profile.system_prompt
 
-    import datetime
-    current_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S %A')
-    skill_section = f"[专家领域与标准操作流程 (SOP)]\n{sop_prompt}\n[/专家领域与标准操作流程 (SOP)]"
-    system_instruction = global_prompt_runtime.composer.compose(
-        [("worker", {"today": current_time}), skill_section]
-    )
-
-    initial_messages = [
-        SystemMessage(content=system_instruction),
-        HumanMessage(content=f"【任务指令】：\n{directive}")
-    ]
+    initial_messages = _build_worker_initial_messages(sop_prompt, directive)
 
     write_agent_metadata(session_id, worker_id, {
         "agentType": agent_name,
         "directive": directive,
         "model": resolved_model,
         "profile": profile.name,
+        "kvCachePrefixSha256": hashlib.sha256(
+            str(initial_messages[0].content).encode("utf-8")
+        ).hexdigest(),
         "skills": list(profile.skills),
         "toolGrant": toolset.snapshot.model_dump(mode="json"),
         "join": join,

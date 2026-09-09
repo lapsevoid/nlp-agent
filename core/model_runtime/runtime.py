@@ -161,6 +161,8 @@ def _merge_delta_usage(
     return CanonicalTokenUsage(
         input_tokens=current.input_tokens + incoming.input_tokens,
         cached_input_tokens=current.cached_input_tokens + incoming.cached_input_tokens,
+        cache_miss_input_tokens=current.cache_miss_input_tokens
+        + incoming.cache_miss_input_tokens,
         cache_write_input_tokens=current.cache_write_input_tokens
         + incoming.cache_write_input_tokens,
         output_tokens=current.output_tokens + incoming.output_tokens,

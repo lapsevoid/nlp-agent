@@ -13,7 +13,7 @@ from alembic.script import ScriptDirectory
 def test_migration_graph_has_one_head_after_all_feature_branches_are_merged() -> None:
     scripts = ScriptDirectory.from_config(Config("alembic.ini"))
 
-    assert scripts.get_heads() == ["20260907_51_merge_database_heads"]
+    assert scripts.get_heads() == ["20260909_52_cache_miss_tokens"]
     assert scripts.get_revision("20260905_49_phone_schema_repair").down_revision == (
         "20260904_48_developer_merge"
     )
