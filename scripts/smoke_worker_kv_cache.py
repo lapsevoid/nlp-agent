@@ -6,19 +6,44 @@ import argparse
 import asyncio
 import hashlib
 import json
+from collections.abc import Mapping
 from typing import Any
 from uuid import uuid4
 
-from core.model_runtime.factory import ModelFactory
-from core.model_runtime.reporters import (
-    InMemoryModelUsageReporter,
-    ModelUsageReporterSlot,
-)
-from core.model_runtime.usage import UsageAttributionContext, bind_usage_attribution
-from server.tools.worker_tool import _build_worker_initial_messages
+from utils.tokens import rough_estimation_for_messages
 
 
-def _attribution() -> UsageAttributionContext:
+def _verify_cache_sequence(
+    warmup: Mapping[str, Any],
+    prefix_discovery: Mapping[str, Any],
+    verification: Mapping[str, Any],
+    *,
+    stable_prefix_tokens: int,
+) -> None:
+    """Require both reuse calls to cache the expected common prefix."""
+    if stable_prefix_tokens <= 0:
+        raise AssertionError("stable prefix estimate must be positive")
+    identities = {
+        (str(usage.get("provider")), str(usage.get("model")))
+        for usage in (warmup, prefix_discovery, verification)
+    }
+    if len(identities) != 1:
+        raise AssertionError("cache sequence changed Provider or model")
+    for label, usage in (
+        ("prefix discovery", prefix_discovery),
+        ("verification", verification),
+    ):
+        cached_tokens = int(usage.get("cached_input_tokens") or 0)
+        if cached_tokens < stable_prefix_tokens:
+            raise AssertionError(
+                f"{label} cached only {cached_tokens} tokens; "
+                f"expected at least {stable_prefix_tokens} common-prefix tokens"
+            )
+
+
+def _attribution() -> Any:
+    from core.model_runtime.usage import UsageAttributionContext
+
     suffix = uuid4().hex
     return UsageAttributionContext(
         request_id=f"kv-cache-smoke-{suffix}",
@@ -31,7 +56,7 @@ def _attribution() -> UsageAttributionContext:
 
 
 def _measured_usage(
-    reporter: InMemoryModelUsageReporter,
+    reporter: Any,
     *,
     event_index: int,
 ) -> dict[str, Any]:
@@ -58,6 +83,14 @@ def _measured_usage(
 
 
 async def _run(wait_s: float) -> dict[str, Any]:
+    from core.model_runtime.factory import ModelFactory
+    from core.model_runtime.reporters import (
+        InMemoryModelUsageReporter,
+        ModelUsageReporterSlot,
+    )
+    from core.model_runtime.usage import bind_usage_attribution
+    from server.tools.worker_tool import _build_worker_initial_messages
+
     reporter = InMemoryModelUsageReporter()
     factory = ModelFactory.from_settings()
     factory.reporter_slot = ModelUsageReporterSlot(reporter, required=True)
@@ -106,14 +139,18 @@ async def _run(wait_s: float) -> dict[str, Any]:
     with bind_usage_attribution(_attribution()):
         await worker.ainvoke(third_messages)
     third_usage = _measured_usage(reporter, event_index=third_index)
-    if third_usage["cached_input_tokens"] <= 0:
-        raise AssertionError(
-            "verification Provider response reported zero cached_input_tokens"
-        )
+    stable_prefix_tokens = max(1, rough_estimation_for_messages([first_messages[0]]))
+    _verify_cache_sequence(
+        first_usage,
+        second_usage,
+        third_usage,
+        stable_prefix_tokens=stable_prefix_tokens,
+    )
 
     return {
         "prefix_sha256": hashlib.sha256(first_prefix.encode("utf-8")).hexdigest(),
         "prefix_characters": len(first_prefix),
+        "stable_prefix_minimum_tokens": stable_prefix_tokens,
         "warmup": first_usage,
         "prefix_discovery": second_usage,
         "verification": third_usage,
