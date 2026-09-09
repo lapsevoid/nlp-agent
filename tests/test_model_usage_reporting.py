@@ -506,6 +506,8 @@ async def test_stream_delta_usage_is_aggregated_and_finalized_once():
                 "token_usage": {
                     "prompt_tokens": 4,
                     "completion_tokens": 3,
+                    "prompt_cache_hit_tokens": 3,
+                    "prompt_cache_miss_tokens": 1,
                     "usage_semantics": "delta",
                 }
             },
@@ -516,6 +518,8 @@ async def test_stream_delta_usage_is_aggregated_and_finalized_once():
                 "token_usage": {
                     "prompt_tokens": 5,
                     "completion_tokens": 2,
+                    "prompt_cache_hit_tokens": 2,
+                    "prompt_cache_miss_tokens": 3,
                     "usage_semantics": "delta",
                 }
             },
@@ -533,6 +537,8 @@ async def test_stream_delta_usage_is_aggregated_and_finalized_once():
     assert len(reporter.events) == 1
     _, usage, outcome = reporter.events[0]
     assert usage.input_tokens == 9
+    assert usage.cached_input_tokens == 5
+    assert usage.cache_miss_input_tokens == 4
     assert usage.output_tokens == 5
     assert usage.total_tokens == 14
     assert usage.semantics == "final"

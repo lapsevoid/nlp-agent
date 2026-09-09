@@ -137,8 +137,9 @@ model.stream_interrupted
 
 - **`ModelIdentity`**: 描述模型调用的静态身份，包含 `provider`, `provider_model`, `model_profile`, `preset`, `route`, `pricing_key`, `context_window_tokens`, `max_output_tokens`。
 - **`UsageAttributionContext`**: 溯源归属上下文，包含 `request_id`, `user_id`, `workspace_id`, `conversation_id`, `turn_id`, `reservation_id`, `worker_id`, `parent_operation_id`, `purpose` (`coordinator | worker | compact | memory | vision | evaluation | other`)。
-- **`CanonicalTokenUsage`**: 标准化 Token 用量，包含 `input_tokens`, `cached_input_tokens`, `cache_write_input_tokens`, `output_tokens`, `reasoning_output_tokens`, `total_tokens`, `source` (`provider | estimated | none`), `provider_response_id`。严格保证：
+- **`CanonicalTokenUsage`**: 标准化 Token 用量，包含 `input_tokens`, `cached_input_tokens`, `cache_miss_input_tokens`（Provider 观测、非独立计费项）, `cache_write_input_tokens`, `output_tokens`, `reasoning_output_tokens`, `total_tokens`, `source` (`provider | estimated | none`), `provider_response_id`。严格保证：
   - `cached_input_tokens + cache_write_input_tokens <= input_tokens`
+  - `cached_input_tokens + cache_miss_input_tokens <= input_tokens`
   - `reasoning_output_tokens <= output_tokens`
   - `total_tokens = input_tokens + output_tokens`
 - **`BillableFeatureUsage`**: 与 Token 契约并列的功能用量，包含 `visual_input_tokens`, `image_units`, `search_calls`, `link_pages`；视觉 Token 与图片单位互斥。

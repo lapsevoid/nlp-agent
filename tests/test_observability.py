@@ -24,6 +24,7 @@ def test_usage_from_metadata_preserves_provider_reported_kv_cache_tokens():
     usage = usage_from_metadata({
         "prompt_tokens": 100,
         "completion_tokens": 20,
+        "cached_tokens": 0,
         "prompt_cache_hit_tokens": 75,
         "prompt_cache_miss_tokens": 25,
     })
