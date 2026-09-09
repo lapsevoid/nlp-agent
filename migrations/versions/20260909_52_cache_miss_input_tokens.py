@@ -5,7 +5,8 @@ from alembic import op
 from sqlalchemy.dialects import mysql
 
 
-revision = "20260909_52_cache_miss_input_tokens"
+# Alembic stores revision IDs in a VARCHAR(32) column.
+revision = "20260909_52_cache_miss_tokens"
 down_revision = "20260907_51_merge_database_heads"
 branch_labels = None
 depends_on = None
