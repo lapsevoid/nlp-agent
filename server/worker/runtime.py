@@ -130,6 +130,12 @@ async def run_worker() -> None:
         turn = await asyncio.to_thread(repository.get_turn, task.turn_id)
         if turn is None:
             raise LookupError(f"turn state is unavailable: {task.turn_id}")
+        if turn.status in {
+            TurnStatus.COMPLETED,
+            TurnStatus.FAILED,
+            TurnStatus.INTERRUPTED,
+        }:
+            return
         if turn.status != TurnStatus.CANCELLED:
             await asyncio.to_thread(
                 repository.update_turn, task.turn_id, TurnStatus.CANCELLED
@@ -172,10 +178,11 @@ async def run_worker() -> None:
             # re-arm it here on the retry path instead of losing the title.
             schedule_summary(database_runtime.session_factory, task.context.session_id)
         elif turn.status == TurnStatus.CANCELLED:
-            terminal_events = ((
-                GatewayEventType.TURN_CANCELLED,
-                {"status": TurnStatus.CANCELLED.value},
-            ),)
+            # Cancellation needs the finalizer below to publish the durable
+            # event and release quota before Redis ACKs the delivery. Returning
+            # False sends the delivery through the claim/finalization path,
+            # including after a worker crash between the DB write and ACK.
+            return False
         elif turn.status in {TurnStatus.FAILED, TurnStatus.INTERRUPTED}:
             terminal_events = ((
                 GatewayEventType.TURN_FAILED,

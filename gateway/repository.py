@@ -315,12 +315,32 @@ class GatewayRepository:
             fields["exercise_state_json"] = exercise_state.model_dump_json()
         assignments = ",".join(f"{key}=?" for key in fields)
         with self._lock, self._conn:
-            cursor = self._conn.execute(
+            current = self._conn.execute(
+                "SELECT * FROM gateway_turns WHERE turn_id=?", (turn_id,)
+            ).fetchone()
+            if current is None:
+                raise KeyError(turn_id)
+            terminal_statuses = {
+                TurnStatus.COMPLETED.value,
+                TurnStatus.FAILED.value,
+                TurnStatus.CANCELLED.value,
+                TurnStatus.INTERRUPTED.value,
+            }
+            retrying_dispatch_failure = (
+                current["status"] == TurnStatus.FAILED.value
+                and current["error_kind"] == "dispatch_failed"
+                and status == TurnStatus.ACCEPTED
+            )
+            if (
+                current["status"] in terminal_statuses
+                and current["status"] != status.value
+                and not retrying_dispatch_failure
+            ):
+                return self._turn(current)
+            self._conn.execute(
                 f"UPDATE gateway_turns SET {assignments} WHERE turn_id=?",
                 (*fields.values(), turn_id),
             )
-            if cursor.rowcount != 1:
-                raise KeyError(turn_id)
             row = self._conn.execute(
                 "SELECT * FROM gateway_turns WHERE turn_id=?", (turn_id,)
             ).fetchone()

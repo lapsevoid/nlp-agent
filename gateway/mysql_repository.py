@@ -181,9 +181,28 @@ class MySQLGatewayRepository:
 
     def update_turn(self, turn_id: str, status: TurnStatus, *, final_text=None, error_kind=None, error_message=None, exercise_state=None, dispatch_payload: str | None = None) -> TurnRecord:
         terminal = status in {TurnStatus.COMPLETED, TurnStatus.FAILED, TurnStatus.CANCELLED, TurnStatus.INTERRUPTED}
+        preserve_terminal = False
         with self._runtime_begin() as c:
-            c.execute(text("UPDATE nlp_turns SET status=:status,result_text=:result,error_kind=:kind,error_message=:message,started_at=CASE WHEN :running='running' THEN UTC_TIMESTAMP(6) ELSE started_at END,completed_at=CASE WHEN :terminal=1 THEN UTC_TIMESTAMP(6) ELSE completed_at END WHERE id=:id"), {"status": status.value, "result": final_text, "kind": error_kind, "message": (error_message or "")[:1000] or None, "running": status.value, "terminal": int(terminal), "id": turn_id})
-            if dispatch_payload is not None:
+            current = c.execute(
+                text("SELECT status,error_kind FROM nlp_turns WHERE id=:id FOR UPDATE"),
+                {"id": turn_id},
+            ).mappings().first()
+            if current is None:
+                raise KeyError(turn_id)
+            retrying_dispatch_failure = (
+                current["status"] == TurnStatus.FAILED.value
+                and current["error_kind"] == "dispatch_failed"
+                and status == TurnStatus.ACCEPTED
+            )
+            if (
+                current["status"] in {"completed", "failed", "cancelled", "interrupted"}
+                and current["status"] != status.value
+                and not retrying_dispatch_failure
+            ):
+                preserve_terminal = True
+            if not preserve_terminal:
+                c.execute(text("UPDATE nlp_turns SET status=:status,result_text=:result,error_kind=:kind,error_message=:message,started_at=CASE WHEN :running='running' THEN UTC_TIMESTAMP(6) ELSE started_at END,completed_at=CASE WHEN :terminal=1 THEN UTC_TIMESTAMP(6) ELSE completed_at END WHERE id=:id"), {"status": status.value, "result": final_text, "kind": error_kind, "message": (error_message or "")[:1000] or None, "running": status.value, "terminal": int(terminal), "id": turn_id})
+            if not preserve_terminal and dispatch_payload is not None:
                 c.execute(text("INSERT INTO nlp_outbox_messages(id,topic,payload_json,status) VALUES(UUID(),'turn.dispatch',:payload,'pending')"), {"payload": json.dumps({"turn_id": turn_id, "task": dispatch_payload})})
         row = self._row(turn_id)
         if row is None:

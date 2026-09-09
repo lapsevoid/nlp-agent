@@ -687,6 +687,20 @@ class BackendGateway:
             )
             if updated is not None:
                 turn = updated
+        else:
+            turn = await asyncio.to_thread(
+                self.repository.update_turn,
+                turn_id,
+                TurnStatus.CANCELLED,
+            )
+        event = await asyncio.to_thread(
+            self.repository.ensure_event,
+            turn_id=turn_id,
+            session_id=context.session_id,
+            event_type=GatewayEventType.TURN_CANCELLED,
+            payload={"status": TurnStatus.CANCELLED.value},
+        )
+        self.events.publish(event)
         await self.dispatcher.cancel(turn_id)
         updated = await asyncio.to_thread(self.repository.get_turn, turn_id)
         return updated or turn

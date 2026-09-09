@@ -77,7 +77,9 @@ class InProcessTurnDispatcher:
         task = self._tasks.get(turn_id)
         if task is not None and not task.done():
             task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+            # Cancellation is a logical state transition. The task's finally
+            # blocks may need to unwind model/tool children, so do not make the
+            # caller wait for physical cleanup here.
 
     async def close(self, *, force: bool = False, grace_s: float = 0) -> None:
         tasks = [task for task in self._tasks.values() if not task.done()]

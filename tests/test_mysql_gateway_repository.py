@@ -196,6 +196,27 @@ def test_create_turn_ensures_the_conversation_before_inserting_the_turn() -> Non
     assert duplicate is False
 
 
+def test_update_turn_preserves_cancelled_status_in_mysql_adapter() -> None:
+    repository = object.__new__(MySQLGatewayRepository)
+    transaction = MagicMock()
+    connection = transaction.__enter__.return_value
+    current = MagicMock()
+    current.mappings.return_value.first.return_value = {
+        "status": "cancelled",
+        "error_kind": None,
+    }
+    connection.execute.return_value = current
+    repository._runtime_begin = MagicMock(return_value=transaction)
+    repository._row = MagicMock(return_value={"id": "turn-1", "status": "cancelled"})
+    repository._record = MagicMock(return_value=sentinel.cancelled_record)
+
+    result = repository.update_turn("turn-1", TurnStatus.COMPLETED, final_text="late answer")
+
+    assert result is sentinel.cancelled_record
+    assert connection.execute.call_count == 1
+    assert "UPDATE nlp_turns" not in str(connection.execute.call_args.args[0])
+
+
 def test_create_turn_retries_the_complete_mysql_transaction_after_deadlock() -> None:
     class Transaction:
         def __init__(self, attempt: int, connections: list[MagicMock]) -> None:

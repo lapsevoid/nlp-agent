@@ -5,8 +5,13 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from server.application.turn_reliability import LostTurnClaimError, TurnReliabilityService, utc_now
-from server.infrastructure.mysql.models import TurnModel
+from server.application.turn_reliability import (
+    CancelledTurnClaim,
+    LostTurnClaimError,
+    TurnReliabilityService,
+    utc_now,
+)
+from server.infrastructure.mysql.models import TurnCancellationModel, TurnModel
 
 
 @pytest.mark.asyncio
@@ -23,6 +28,33 @@ async def test_claim_increments_generation_and_heartbeat_requires_the_same_owner
 
     with pytest.raises(LostTurnClaimError):
         await service.heartbeat(session, turn_id="turn-1", generation=0, worker_id="worker-a", lease_s=30)
+
+
+@pytest.mark.asyncio
+async def test_claim_reports_durable_cancellation_as_a_distinct_outcome() -> None:
+    turn = TurnModel(
+        id="turn-1",
+        conversation_id="conversation-1",
+        workspace_id="workspace-1",
+        user_id="user-1",
+        input_text="hi",
+        status="accepted",
+        claim_generation=0,
+    )
+    cancellation = TurnCancellationModel(
+        turn_id="turn-1", requested_by="user-1", reason="user_requested"
+    )
+    session = AsyncMock()
+    session.scalar.side_effect = [turn, cancellation]
+    service = TurnReliabilityService()
+
+    result = await service.claim_turn(
+        session, turn_id="turn-1", worker_id="worker-a", lease_s=30
+    )
+
+    assert isinstance(result, CancelledTurnClaim)
+    assert turn.status == "cancelled"
+    session.flush.assert_awaited_once()
 
 
 @pytest.mark.asyncio

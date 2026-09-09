@@ -93,22 +93,51 @@ class InProcessTurnExecutor:
             with bind_usage_attribution(attribution):
                 final_text = await self._run_engine(task)
                 final_text, exercise_state = await self._finalize_learning(task, final_text)
-                await asyncio.to_thread(
+                updated = await asyncio.to_thread(
                     self._repository.update_turn,
                     task.turn_id,
                     TurnStatus.COMPLETED,
                     final_text=final_text,
                     exercise_state=exercise_state,
                 )
+                updated_status = getattr(updated, "status", TurnStatus.COMPLETED)
+                if updated_status != TurnStatus.COMPLETED:
+                    if updated_status == TurnStatus.CANCELLED:
+                        await asyncio.to_thread(
+                            self._repository.ensure_event,
+                            turn_id=task.turn_id,
+                            session_id=task.context.session_id,
+                            event_type=GatewayEventType.TURN_CANCELLED,
+                            payload={"status": TurnStatus.CANCELLED.value},
+                        )
+                    await self._finish_quota(task)
+                    return
         except asyncio.CancelledError:
             await self._engine.cancel_turn(task.context, task.turn_id)
-            await asyncio.to_thread(self._repository.update_turn, task.turn_id, TurnStatus.CANCELLED)
-            await self._emit(task.turn_id, task.context.session_id, GatewayEventType.TURN_CANCELLED, {"status": TurnStatus.CANCELLED.value})
+            updated = await asyncio.to_thread(self._repository.update_turn, task.turn_id, TurnStatus.CANCELLED)
+            if getattr(updated, "status", TurnStatus.CANCELLED) == TurnStatus.CANCELLED:
+                await asyncio.to_thread(
+                    self._repository.ensure_event,
+                    turn_id=task.turn_id,
+                    session_id=task.context.session_id,
+                    event_type=GatewayEventType.TURN_CANCELLED,
+                    payload={"status": TurnStatus.CANCELLED.value},
+                )
             await self._finish_quota(task)
             raise
         except Exception as error:
-            await asyncio.to_thread(self._repository.update_turn, task.turn_id, TurnStatus.FAILED, error_kind=type(error).__name__, error_message=str(error))
-            await self._emit(task.turn_id, task.context.session_id, GatewayEventType.TURN_FAILED, {"status": TurnStatus.FAILED.value, "error_kind": type(error).__name__, "message": str(error)[:500]})
+            updated = await asyncio.to_thread(self._repository.update_turn, task.turn_id, TurnStatus.FAILED, error_kind=type(error).__name__, error_message=str(error))
+            updated_status = getattr(updated, "status", TurnStatus.FAILED)
+            if updated_status == TurnStatus.FAILED:
+                await self._emit(task.turn_id, task.context.session_id, GatewayEventType.TURN_FAILED, {"status": TurnStatus.FAILED.value, "error_kind": type(error).__name__, "message": str(error)[:500]})
+            elif updated_status == TurnStatus.CANCELLED:
+                await asyncio.to_thread(
+                    self._repository.ensure_event,
+                    turn_id=task.turn_id,
+                    session_id=task.context.session_id,
+                    event_type=GatewayEventType.TURN_CANCELLED,
+                    payload={"status": TurnStatus.CANCELLED.value},
+                )
             await self._finish_quota(task)
             return
         finally:
