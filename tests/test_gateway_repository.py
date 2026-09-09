@@ -84,6 +84,28 @@ def test_ensure_event_repairs_terminal_log_once(tmp_path):
     repository.close()
 
 
+def test_gateway_repository_does_not_resurrect_cancelled_turn(tmp_path):
+    repository = GatewayRepository(tmp_path / "gateway.sqlite3")
+    turn, _ = repository.create_turn(
+        turn_id="turn-1",
+        session_id="session-1",
+        workspace_id="workspace-1",
+        user_id="alice",
+        input_text="hello",
+        idempotency_key=None,
+    )
+
+    repository.update_turn(turn.turn_id, TurnStatus.RUNNING)
+    repository.update_turn(turn.turn_id, TurnStatus.CANCELLED)
+    late_completion = repository.update_turn(
+        turn.turn_id, TurnStatus.COMPLETED, final_text="late answer"
+    )
+
+    assert late_completion.status == TurnStatus.CANCELLED
+    assert late_completion.final_text is None
+    repository.close()
+
+
 def test_event_retention_compacts_terminal_turns_caps_sessions_and_keeps_active(tmp_path):
     repository = GatewayRepository(tmp_path / "gateway.sqlite3")
     terminal_ids = []

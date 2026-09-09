@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import yaml
+
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_PATHS = (
@@ -12,10 +14,11 @@ def test_deployment_workflows_update_and_check_worker() -> None:
     for workflow_path in WORKFLOW_PATHS:
         workflow = workflow_path.read_text(encoding="utf-8")
 
-        assert (
-            "pull nova-migrate nova-web nova-worker nova-monitor "
+        pull_services = (
+            "nova-migrate nova-web nova-worker nova-monitor "
             "nova-sandbox-manager nginx"
-        ) in workflow
+        )
+        assert f"pull {pull_services}" in workflow or f"pull --quiet {pull_services}" in workflow
         assert (
             "up -d --force-recreate --no-build --remove-orphans "
             "nova-migrate nova-web nova-worker nova-monitor nova-sandbox-manager nginx"
@@ -29,7 +32,10 @@ def test_deployment_workflows_update_and_check_worker() -> None:
             "ps --status running --services nova-sandbox-manager | "
             "grep -Fxq \"nova-sandbox-manager\""
         ) in workflow
-        assert 'docker pull "$SANDBOX_CONFIGURED_REF"' in workflow
+        assert (
+            'docker pull "$SANDBOX_CONFIGURED_REF"' in workflow
+            or 'docker pull --quiet "$SANDBOX_CONFIGURED_REF"' in workflow
+        )
 
 
 def test_publish_workflow_builds_and_publishes_the_runtime_image() -> None:
@@ -97,20 +103,31 @@ def test_deploy_workflows_overlay_published_digests_without_mutating_server_env(
         assert "The deployment directory" in workflow
 
 
-def test_test_deploy_workflow_cleans_stopped_containers_and_unused_docker_data() -> None:
-    workflow = (ROOT / ".github" / "workflows" / "publish-test-image.yml").read_text(
-        encoding="utf-8"
+def test_test_deploy_cleans_before_pull_and_has_no_workflow_timeout() -> None:
+    workflow = yaml.safe_load(
+        (ROOT / ".github" / "workflows" / "publish-test-image.yml").read_text(
+            encoding="utf-8"
+        )
     )
-    cleanup = workflow.split("      - name: Cleanup unused Docker resources", 1)[1]
+    steps = workflow["jobs"]["deploy"]["steps"]
+    named_steps = {
+        step.get("name"): (index, step)
+        for index, step in enumerate(steps)
+        if step.get("name")
+    }
+    cleanup_index, cleanup = named_steps["Cleanup unused Docker resources"]
+    deploy_index, deploy = named_steps["Deploy the published GHCR image"]
 
-    assert "if: always()" in cleanup
-    assert (
-        'docker container prune -f --filter '
-        '"label=com.docker.compose.project=$COMPOSE_PROJECT_NAME"'
-    ) in cleanup
-    assert "docker image prune -af" in cleanup
-    assert "docker builder prune -af" in cleanup
-    assert "df -h /" in cleanup
+    # Keep recent image layers so routine deploys can reuse the cache, while
+    # still bounding disk growth on the long-lived self-hosted runner.
+    assert cleanup_index < deploy_index
+    assert cleanup.get("if") != "always()"
+    assert 'docker image prune -af --filter "until=168h"' in cleanup["run"]
+    assert 'docker builder prune -af --filter "until=168h"' in cleanup["run"]
+    assert 'docker pull --quiet "$SANDBOX_CONFIGURED_REF"' in deploy["run"]
+    assert "pull --quiet nova-migrate nova-web nova-worker nova-monitor nova-sandbox-manager nginx" in deploy["run"]
+    assert 'docker image inspect "$SANDBOX_CONFIGURED_REF"' in deploy["run"]
+    assert "timeout-minutes" not in workflow["jobs"]["deploy"]
 
 
 def test_ci_workflow_can_be_dispatched_after_a_skip_ci_metadata_commit() -> None:

@@ -1,6 +1,6 @@
 import { useCallback, type Dispatch, type MutableRefObject, type SetStateAction } from "react";
 
-import { deriveTitle } from "@/platform/storage/learning-preferences";
+import { api } from "@/platform/http/api";
 import { StudentSocket } from "@/platform/realtime/client";
 import type { ChatAttachment, ChatMessage, LearningPreferences, SessionLearningMeta, UserSettings } from "@/shared/types";
 import { createUuid } from "@/shared/utils/uuid";
@@ -10,6 +10,7 @@ interface TurnSenderOptions {
   socketRef: MutableRefObject<StudentSocket | null>;
   pendingRequests: MutableRefObject<Map<string, string>>;
   inFlightTurnIds: MutableRefObject<Set<string>>;
+  cancelledTurnIds: MutableRefObject<Set<string>>;
   preferences: LearningPreferences;
   settings: UserSettings;
   messages: ChatMessage[];
@@ -24,6 +25,7 @@ export function useTurnSender({
   socketRef,
   pendingRequests,
   inFlightTurnIds,
+  cancelledTurnIds,
   preferences,
   settings,
   messages,
@@ -65,11 +67,8 @@ export function useTurnSender({
       createdAt: new Date().toISOString(),
     }]);
     const currentMeta = preferences.sessions[sessionId];
-    if (!currentMeta?.title || currentMeta.title === "新的学习对话") {
-      updateSessionMeta(sessionId, {
-        title: deriveTitle(content || attachments?.[0]?.displayName || "图片分析"),
-        topic: preferences.context.topic_name,
-      });
+    if (!currentMeta?.topic) {
+      updateSessionMeta(sessionId, { topic: preferences.context.topic_name });
     }
     socketRef.current?.setSession(sessionId);
     socketRef.current?.sendChat(
@@ -84,8 +83,27 @@ export function useTurnSender({
 
   const cancel = useCallback(() => {
     const running = [...messages].reverse().find((message) => message.role === "assistant" && ["accepted", "running"].includes(message.status ?? ""));
-    if (running) socketRef.current?.cancel(running.turnId);
-  }, [messages, socketRef]);
+    if (!running) return;
+    if (cancelledTurnIds.current.has(running.turnId)) return;
+    cancelledTurnIds.current.add(running.turnId);
+    setMessages((current) => current.map((message) => message.turnId === running.turnId && message.role === "assistant"
+      ? { ...message, status: "cancelling" }
+      : message));
+    const settleCancelled = () => {
+      inFlightTurnIds.current.delete(running.turnId);
+      setMessages((current) => current.map((message) => message.turnId === running.turnId && message.role === "assistant"
+        ? { ...message, status: "cancelled", completedAt: new Date().toISOString() }
+        : message));
+    };
+    const fallbackToSocket = () => socketRef.current?.cancel(running.turnId);
+    void Promise.race([
+      api.cancelTurn(running.turnId),
+      new Promise<never>((_, reject) => window.setTimeout(() => reject(new Error("cancel request timed out")), 1000)),
+    ]).then((turn) => {
+      if (turn.status === "cancelled") settleCancelled();
+      else fallbackToSocket();
+    }).catch(fallbackToSocket);
+  }, [cancelledTurnIds, inFlightTurnIds, messages, setMessages, socketRef]);
 
   return { send, cancel };
 }

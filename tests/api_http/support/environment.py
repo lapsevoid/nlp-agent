@@ -146,7 +146,10 @@ class ManagedHttpEnvironment:
                 log_name="web.log",
             )
             environment._start_server(
-                module="server.monitor.app:app",
+                # Production intentionally disables the public Monitor
+                # OpenAPI route.  The test-only entrypoint exposes the same
+                # schema on the isolated test process for inventory checks.
+                module="tests.api_http.support.monitor_entrypoint:app",
                 port=monitor_port,
                 log_name="monitor.log",
             )
@@ -702,7 +705,10 @@ def _safe_child_environment(
             "NLP_AGENT_API_HTTP_SKILLS_ROOT": str(uploads_root.parent / ".data" / "skills"),
             "NLP_AGENT_API_HTTP_MCP_STUB": "1",
             "NLP_AGENT_API_HTTP_SMS_PROVIDER": "stub",
-            "NLP_AGENT_API_HTTP_SMS_FAILURE_PREFIX": "131",
+            # The application normalizes domestic numbers to E.164 before
+            # invoking the provider, so the deterministic failure prefix is
+            # expressed in that canonical form too.
+            "NLP_AGENT_API_HTTP_SMS_FAILURE_PREFIX": "+86131",
             "DEEPSEEK_API_KEY": "",
             "QWEN_API_KEY": "",
             "NLP_AGENT_AUTH_USERNAME": "",

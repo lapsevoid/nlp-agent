@@ -12,6 +12,7 @@ from core.model_runtime.reporters import (
     UsageEventConflictError,
 )
 from core.model_runtime.usage import (
+    BillableFeatureUsage,
     CanonicalTokenUsage,
     InvocationOutcome,
     MissingUsageAttributionError,
@@ -19,8 +20,10 @@ from core.model_runtime.usage import (
     ModelInvocation,
     UsageAttributionContext,
     bind_usage_attribution,
+    bind_billable_feature_usage,
     bind_usage_purpose,
     current_usage_attribution,
+    current_billable_feature_usage,
     resolve_usage_attribution,
     system_usage_attribution,
 )
@@ -55,6 +58,7 @@ def test_canonical_token_usage_valid():
     usage = CanonicalTokenUsage(
         input_tokens=100,
         cached_input_tokens=30,
+        cache_miss_input_tokens=70,
         cache_write_input_tokens=20,
         output_tokens=50,
         reasoning_output_tokens=15,
@@ -64,6 +68,7 @@ def test_canonical_token_usage_valid():
     )
     assert usage.input_tokens == 100
     assert usage.cached_input_tokens == 30
+    assert usage.cache_miss_input_tokens == 70
     assert usage.cache_write_input_tokens == 20
     assert usage.output_tokens == 50
     assert usage.reasoning_output_tokens == 15
@@ -89,6 +94,20 @@ def test_canonical_token_usage_provider_all_zero_allowed():
     )
     assert usage.source == "provider"
     assert usage.total_tokens == 0
+
+
+def test_billable_feature_usage_is_separate_and_context_scoped():
+    feature_usage = BillableFeatureUsage(image_units=2, search_calls=1)
+
+    with bind_billable_feature_usage(feature_usage):
+        assert current_billable_feature_usage() == feature_usage
+
+    assert current_billable_feature_usage() == BillableFeatureUsage()
+
+
+def test_billable_feature_usage_rejects_visual_token_and_unit_double_counting():
+    with pytest.raises(ValidationError, match="mutually exclusive"):
+        BillableFeatureUsage(visual_input_tokens=10, image_units=1)
 
 
 def test_canonical_token_usage_rejects_source_none_with_tokens():
@@ -120,6 +139,21 @@ def test_canonical_token_usage_rejects_cached_exceeding_input():
             input_tokens=50,
             cached_input_tokens=40,
             cache_write_input_tokens=20,
+            output_tokens=10,
+            total_tokens=60,
+            source="provider",
+        )
+
+
+def test_canonical_token_usage_rejects_cache_miss_exceeding_input():
+    with pytest.raises(
+        ValidationError,
+        match="cached_input_tokens \\+ cache_miss_input_tokens must not exceed input_tokens",
+    ):
+        CanonicalTokenUsage(
+            input_tokens=50,
+            cached_input_tokens=40,
+            cache_miss_input_tokens=20,
             output_tokens=10,
             total_tokens=60,
             source="provider",

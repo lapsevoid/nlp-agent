@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "@/platform/http/api";
 import { useOptionalAuth } from "@/platform/auth/AuthContext";
 import { StudentSocket } from "@/platform/realtime/client";
+import { clearImportedFiles } from "../../components/importedFiles";
 import type { AuthSession, ChatMessage, RuntimeModelProfile } from "@/shared/types";
 
 import { useWorkspaceBootstrap } from "../internal/bootstrap";
@@ -26,6 +27,7 @@ export function useStudentWorkspace() {
     deleteCategory,
   } = usePreferencesController();
   const { settings, settingsError, initializeSettings, patchSettings, resetSettings } = useSettingsController();
+  const [requestError, setRequestError] = useState("");
   const {
     sessions,
     setSessions,
@@ -41,19 +43,20 @@ export function useStudentWorkspace() {
     createBackendSession,
     startNewChat,
     deleteSession,
-  } = useSessionController({ preferences, persistPreferences, updateSessionMeta });
+    renameSessionTitle,
+  } = useSessionController({ preferences, persistPreferences, updateSessionMeta, onRequestError: setRequestError });
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [modelProfiles, setModelProfiles] = useState<Record<string, RuntimeModelProfile>>({});
   const [authSession, setAuthSession] = useState<AuthSession | null>(null);
   const [bootStatus, setBootStatus] = useState<"loading" | "ready" | "unauthenticated" | "error">("loading");
   const [authRevision, setAuthRevision] = useState(0);
   const [error, setError] = useState("");
-  const [requestError, setRequestError] = useState("");
   const [socketStatus, setSocketStatus] = useState<"connecting" | "connected" | "reconnecting" | "offline">("connecting");
   const [loadingMessages, setLoadingMessages] = useState(false);
   const socketRef = useRef<StudentSocket | null>(null);
   const pendingRequests = useRef(new Map<string, string>());
   const inFlightTurnIds = useRef(new Set<string>());
+  const cancelledTurnIds = useRef(new Set<string>());
   const loadGenerationRef = useRef(0);
 
   const loadTurns = useTurnHistory({
@@ -74,6 +77,7 @@ export function useStudentWorkspace() {
       activeSessionRef,
       pendingRequests,
       inFlightTurnIds,
+      cancelledTurnIds,
       setMessages,
       setActiveSessionId,
       setRequestError,
@@ -82,7 +86,7 @@ export function useStudentWorkspace() {
       loadSessions,
       loadTurns,
     }),
-    [activeSessionRef, inFlightTurnIds, loadSessions, loadTurns, persistPreferences, setActiveSessionId, socketRef, updateSessionMeta],
+    [activeSessionRef, cancelledTurnIds, inFlightTurnIds, loadSessions, loadTurns, persistPreferences, setActiveSessionId, socketRef, updateSessionMeta],
   );
 
   useWorkspaceBootstrap({
@@ -100,17 +104,21 @@ export function useStudentWorkspace() {
 
   useEffect(() => {
     if (bootStatus !== "ready") return;
+
     const socket = new StudentSocket(handleEvent, setSocketStatus);
     socketRef.current = socket;
+    socket.setSession(activeSessionRef.current);
     socket.connect();
+
     return () => {
       socket.close();
       socketRef.current = null;
     };
-  }, [bootStatus, handleEvent]);
+  }, [activeSessionRef, bootStatus, handleEvent]);
 
   useEffect(() => {
     loadGenerationRef.current += 1;
+    cancelledTurnIds.current.clear();
     socketRef.current?.setSession(activeSessionId);
     queueMicrotask(() => {
       if (activeSessionId && freshSessionIdsRef.current.delete(activeSessionId)) {
@@ -128,6 +136,7 @@ export function useStudentWorkspace() {
     socketRef,
     pendingRequests,
     inFlightTurnIds,
+    cancelledTurnIds,
     preferences,
     settings,
     messages,
@@ -137,14 +146,27 @@ export function useStudentWorkspace() {
     setRequestError,
   });
   const activeMeta = activeSessionId ? preferences.sessions[activeSessionId] ?? {} : {};
-  const isRunning = messages.some((message) => message.role === "assistant" && ["accepted", "running"].includes(message.status ?? ""));
+  const isCancelling = messages.some((message) => message.role === "assistant" && message.status === "cancelling");
+  const isRunning = messages.some((message) => message.role === "assistant" && ["accepted", "running", "cancelling"].includes(message.status ?? ""));
 
+const authenticate = useCallback(async (username: string, password: string) => {
+  const result = globalAuth
+    ? await globalAuth.login(username, password)
+    : await api.login(username, password);
+
+  setError("");
+  setRequestError("");
+  return result;
+}, [globalAuth]);
   const retryAuthentication = useCallback(() => {
     setError("");
+    setRequestError("");
     setBootStatus("loading");
     setAuthRevision((current) => current + 1);
   }, []);
+
   const logout = useCallback(async () => {
+    clearImportedFiles(authSession?.user_id ?? null, workspaceId);
     try {
       if (globalAuth) await globalAuth.logout();
       else await api.logout();
@@ -161,7 +183,7 @@ export function useStudentWorkspace() {
       // Redirect to login page
       window.location.href = "/";
     }
-  }, [globalAuth, setActiveSessionId, setSessions]);
+  }, [authSession, globalAuth, setActiveSessionId, setSessions, workspaceId]);
 
   return {
     sessions,
@@ -183,11 +205,13 @@ export function useStudentWorkspace() {
     socketStatus,
     loadingMessages,
     isRunning,
+    isCancelling,
     startNewChat,
     ensureSession: createBackendSession,
     send,
     cancel,
     deleteSession,
+    renameSessionTitle,
     updateSessionMeta,
     setLearningContext,
     addCategory,
@@ -196,6 +220,7 @@ export function useStudentWorkspace() {
     patchSettings,
     resetSettings,
     refresh: loadSessions,
+    authenticate,
     retryAuthentication,
     authSession,
     logout,

@@ -10,6 +10,7 @@ import pytest
 from ..support.auth import set_test_auth_code
 from ..support.database import MySqlProbe
 from ..support.http import json_response, problem_response
+from server.user.phone import normalize_phone_number
 
 
 pytestmark = pytest.mark.api_core
@@ -59,7 +60,7 @@ def _send_sms(
         set_test_auth_code(
             mysql_probe,
             kind="sms",
-            subject=phone,
+            subject=normalize_phone_number(phone),
             code=SMS_CODE,
         )
     return response
@@ -145,7 +146,7 @@ def test_sms_code_lifecycle_and_registration_provision_resources(
     payload = json_response(registered, 201)
     assert isinstance(payload, dict)
     user_id = str(payload["user_id"])
-    assert payload["username"] == "".join(ch for ch in phone if ch.isdigit())
+    assert payload["username"] == normalize_phone_number(phone)[1:]
 
     developer_client = authenticated_client_for(developer_user)
     user = json_response(
@@ -188,7 +189,7 @@ def test_sms_wrong_expired_and_replayed_codes_are_rejected(
     set_test_auth_code(
         mysql_probe,
         kind="sms",
-        subject=expired_phone,
+        subject=normalize_phone_number(expired_phone),
         code=SMS_CODE,
         expired=True,
     )
@@ -212,7 +213,12 @@ def test_duplicate_phone_is_rejected_after_fresh_verification(
     first = _register(http_client, mysql_probe, phone=phone)
     assert first.status_code == 201, first.text
 
-    set_test_auth_code(mysql_probe, kind="sms", subject=phone, code=SMS_CODE)
+    set_test_auth_code(
+        mysql_probe,
+        kind="sms",
+        subject=normalize_phone_number(phone),
+        code=SMS_CODE,
+    )
     duplicate = _register(http_client, mysql_probe, phone=phone)
     assert duplicate.status_code == 409
 
@@ -249,7 +255,7 @@ def test_sms_provider_failure_has_explicit_gateway_error(
         mysql_probe.scalar(
             "SELECT COUNT(*) FROM nlp_auth_codes "
             "WHERE kind='sms' AND subject=:subject",
-            subject=phone,
+            subject=normalize_phone_number(phone),
         )
         == 0
     )

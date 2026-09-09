@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Callable
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -68,9 +68,11 @@ def create_sandbox_monitor_router(
     async def runtimes(
         db: AsyncSession = Depends(db_session_dependency),
         identity: AuthenticatedPrincipal = Depends(principal_dependency),
+        limit: int = Query(default=12, ge=1, le=100),
+        offset: int = Query(default=0, ge=0, le=1_000_000),
     ):
         require_monitor(identity)
-        return {"items": await list_runtimes(db)}
+        return await list_runtimes(db, limit=limit, offset=offset)
 
     @router.get("/runtimes/{runtime_id}")
     async def runtime(
@@ -103,10 +105,14 @@ def create_sandbox_monitor_router(
     async def executions(
         db: AsyncSession = Depends(db_session_dependency),
         identity: AuthenticatedPrincipal = Depends(principal_dependency),
-        status_filter: str | None = None,
+        status_filter: str | None = Query(default=None, min_length=1, max_length=32),
+        limit: int = Query(default=12, ge=1, le=100),
+        offset: int = Query(default=0, ge=0, le=1_000_000),
     ):
         require_monitor(identity)
-        return {"items": await list_executions(db, status_filter=status_filter)}
+        return await list_executions(
+            db, status_filter=status_filter, limit=limit, offset=offset
+        )
 
     @router.get("/executions/{execution_id}/events")
     async def execution_events(

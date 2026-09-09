@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import pytest
 
 from core.learning import TeachingMaterials
@@ -24,6 +26,22 @@ class FailingLearningRepository:
 
     def advance_guided_session(self, _guided_session_id, **_changes):
         raise RuntimeError("learning store unavailable")
+
+
+class CancelledAfterExecutionRepository:
+    def __init__(self):
+        self.statuses = []
+        self.ensured_events = []
+
+    def update_turn(self, _turn_id, status, **_changes):
+        self.statuses.append(status)
+        if status == TurnStatus.COMPLETED:
+            return SimpleNamespace(status=TurnStatus.CANCELLED)
+        return SimpleNamespace(status=status)
+
+    def ensure_event(self, **event):
+        self.ensured_events.append(event)
+        return None
 
 
 @pytest.mark.asyncio
@@ -55,3 +73,31 @@ async def test_learning_finalization_failure_moves_running_turn_to_failed():
         GatewayEventType.TURN_FAILED,
     ]
     assert events[-1][1]["error_kind"] == "RuntimeError"
+
+
+@pytest.mark.asyncio
+async def test_late_completion_does_not_emit_completion_after_repository_preserves_cancelled():
+    repository = CancelledAfterExecutionRepository()
+    events = []
+
+    async def emit(_turn_id, _session_id, event_type, payload):
+        events.append((event_type, payload))
+
+    executor = InProcessTurnExecutor(SuccessfulEngine(), repository, emit)
+    task = TurnTask(
+        context=SessionContext(session_id="session-1"),
+        turn_id="turn-1",
+        content="hello",
+        learning_context=None,
+        learning_progress=None,
+        exercise_state=None,
+        teaching_materials=TeachingMaterials(),
+        guided_session_id=None,
+        exercise_session_id=None,
+    )
+
+    await executor.run(task)
+
+    assert GatewayEventType.MESSAGE_COMPLETED not in [event_type for event_type, _ in events]
+    assert GatewayEventType.TURN_COMPLETED not in [event_type for event_type, _ in events]
+    assert [event["event_type"] for event in repository.ensured_events] == [GatewayEventType.TURN_CANCELLED]

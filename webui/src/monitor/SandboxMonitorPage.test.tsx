@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 
 import {
   MAX_SANDBOX_LOGS,
@@ -121,5 +121,66 @@ describe("SandboxMonitorPage", () => {
     expect(screen.getByText("近期故障")).toBeVisible();
     expect(screen.getByText("运行日志")).toBeVisible();
     expect(screen.getByText("运行时异常")).toBeVisible();
+  });
+
+  it("keeps rendering the chart when serialized timestamps arrive as strings", () => {
+    render(
+      <SandboxMonitorPage
+        overview={{ ...overview, capacity_history: [
+          { ...overview.capacity_history[0], timestamp: String(overview.capacity_history[0].timestamp) } as unknown as SandboxCapacitySample,
+          { ...overview.capacity_history[1], timestamp: String(overview.capacity_history[1].timestamp) } as unknown as SandboxCapacitySample,
+        ] }}
+        logs={[]}
+        runtimes={[]}
+        executions={[]}
+        live
+        loading={false}
+        logLoading={false}
+        onRefresh={() => undefined}
+        onDrain={() => undefined}
+      />,
+    );
+
+    expect(screen.getByRole("img", { name: "Sandbox 容量实时趋势" })).toBeVisible();
+  });
+
+  it("shows the chart frame while the first capacity sample is warming up", () => {
+    render(
+      <SandboxMonitorPage
+        overview={{ ...overview, capacity_history: [overview.capacity_history[0]] }}
+        logs={[]}
+        runtimes={[]}
+        executions={[]}
+        live
+        loading={false}
+        logLoading={false}
+        onRefresh={() => undefined}
+        onDrain={() => undefined}
+      />,
+    );
+
+    expect(screen.getByRole("img", { name: "Sandbox 容量实时趋势" })).toBeVisible();
+    expect(screen.getByText("正在积累趋势样本")).toBeVisible();
+  });
+
+  it("anchors a readable tooltip to the focused capacity sample", () => {
+    render(
+      <SandboxMonitorPage
+        overview={overview}
+        logs={[]}
+        runtimes={[]}
+        executions={[]}
+        live
+        loading={false}
+        logLoading={false}
+        onRefresh={() => undefined}
+        onDrain={() => undefined}
+      />,
+    );
+
+    const sample = screen.getByRole("button", { name: /待命 4/ });
+    fireEvent.focus(sample);
+    expect(screen.getByRole("status")).toHaveTextContent("缺口 0");
+    expect(screen.getByRole("status")).toHaveAttribute("data-placement", "below");
   });
 });

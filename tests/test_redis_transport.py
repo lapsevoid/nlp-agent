@@ -1,4 +1,5 @@
 import asyncio
+from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from core.session_context import SessionContext
@@ -6,6 +7,8 @@ from core.learning import TeachingMaterials
 from gateway.dispatch import ExecutionAuthorizationContext, TurnTask
 from gateway.contracts import GatewayEvent, GatewayEventType
 from gateway.redis_transport import RedisEventPublisher, RedisTransportConfig, RedisTurnDispatcher, RedisWorkerRuntime, TurnTaskCodec
+from server.application.turn_reliability import CancelledTurnClaim
+from server.worker.fencing import FencedTurnExecutor
 
 
 class FakeRedis:
@@ -19,6 +22,7 @@ class FakeRedis:
         self.publish_error = None
         self.claim_failures = 0
         self.get_results = []
+        self.read_blocks = []
 
     async def xadd(self, stream, fields):
         self.streams.append((stream, fields))
@@ -54,6 +58,7 @@ class FakeRedis:
         return True
 
     async def xreadgroup(self, group, consumer, streams, count, block):
+        self.read_blocks.append(block)
         return self.reads.pop(0) if self.reads else []
 
     async def xack(self, stream, group, message_id):
@@ -81,6 +86,32 @@ def test_turn_task_codec_preserves_worker_payload():
 
     assert restored == task
     assert restored.model_profile == "qwen"
+
+
+@pytest.mark.asyncio
+async def test_worker_uses_configured_poll_block_and_preserves_explicit_zero():
+    redis = FakeRedis()
+    config = RedisTransportConfig(
+        task_stream="turns", task_group="workers", poll_block_ms=1_234
+    )
+    worker = RedisWorkerRuntime(
+        redis, config, lambda _task: None,
+        consumer_name="worker-1", reclaim_pending=False,
+    )
+
+    assert await worker.run_once() == 0
+    assert await worker.run_once(block_ms=0) == 0
+    assert redis.read_blocks == [1_234, 0]
+
+
+@pytest.mark.parametrize("poll_block_ms", [0, 4_001, 5_000])
+def test_redis_transport_rejects_unsafe_poll_block_ms(poll_block_ms):
+    with pytest.raises(ValueError, match="between 1 and 4000 milliseconds"):
+        RedisTransportConfig(poll_block_ms=poll_block_ms)
+
+
+def test_redis_transport_accepts_maximum_safe_poll_block_ms():
+    assert RedisTransportConfig(poll_block_ms=4_000).poll_block_ms == 4_000
 
 
 def test_turn_task_codec_rejects_unknown_protocol_version():
@@ -326,6 +357,103 @@ async def test_worker_closes_cancel_race_before_execution_becomes_active():
 
     assert await worker.run_once(block_ms=0) == 1
     assert executed == []
+    assert redis.acks == [("turns", "workers", "1-0")]
+
+
+@pytest.mark.asyncio
+async def test_worker_cancel_returns_before_slow_execution_cleanup_finishes():
+    redis = FakeRedis()
+    config = RedisTransportConfig(task_stream="turns", task_group="workers")
+    task = TurnTask(
+        context=SessionContext(session_id="session-1"), turn_id="turn-1", content="hello",
+        learning_context=None, learning_progress=None, exercise_state=None,
+        teaching_materials=TeachingMaterials(), guided_session_id=None, exercise_session_id=None,
+    )
+    redis.reads.append([("turns", [("1-0", {"payload": TurnTaskCodec.dumps(task)})])])
+    started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    cancelled = []
+
+    async def execute(_task):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await release_cleanup.wait()
+
+    worker = RedisWorkerRuntime(
+        redis,
+        config,
+        execute,
+        consumer_name="worker-1",
+        cancel_pending=cancelled.append,
+    )
+    run = asyncio.create_task(worker.run_once(block_ms=0))
+    await started.wait()
+
+    assert worker.cancel_active(task.turn_id) is True
+    assert await asyncio.wait_for(run, timeout=0.5) == 1
+    assert cancelled == [task]
+    assert redis.acks == [("turns", "workers", "1-0")]
+    release_cleanup.set()
+    await asyncio.sleep(0)
+
+
+async def test_worker_runs_cancellation_finalizer_before_terminal_ack():
+    redis = FakeRedis()
+    config = RedisTransportConfig(
+        task_stream="turns", task_group="workers", cancel_key_prefix="cancel:"
+    )
+    task = TurnTask(
+        context=SessionContext(session_id="session-1"), turn_id="turn-1", content="hello",
+        learning_context=None, learning_progress=None, exercise_state=None,
+        teaching_materials=TeachingMaterials(), guided_session_id=None, exercise_session_id=None,
+    )
+    redis.values["cancel:turn-1"] = "1"
+    redis.reads.append([("turns", [("1-0", {"payload": TurnTaskCodec.dumps(task)})])])
+    cancelled = []
+    worker = RedisWorkerRuntime(
+        redis,
+        config,
+        lambda _task: pytest.fail("cancelled delivery must not execute"),
+        consumer_name="worker-1",
+        cancel_pending=cancelled.append,
+        is_terminal=lambda _task: True,
+    )
+
+    assert await worker.run_once(block_ms=0) == 1
+    assert cancelled == [task]
+    assert redis.acks == [("turns", "workers", "1-0")]
+
+
+@pytest.mark.asyncio
+async def test_worker_finalizes_cancellation_when_database_claim_is_already_cancelled():
+    redis = FakeRedis()
+    config = RedisTransportConfig(task_stream="turns", task_group="workers")
+    task = TurnTask(
+        context=SessionContext(session_id="session-1"), turn_id="turn-1", content="hello",
+        learning_context=None, learning_progress=None, exercise_state=None,
+        teaching_materials=TeachingMaterials(), guided_session_id=None, exercise_session_id=None,
+    )
+    redis.reads.append([("turns", [("1-0", {"payload": TurnTaskCodec.dumps(task)})])])
+    unit_of_work = AsyncMock()
+    unit_of_work.session = AsyncMock()
+    unit_of_work.__aenter__.return_value = unit_of_work
+    factory = MagicMock()
+    factory.begin.return_value = unit_of_work
+    reliability = AsyncMock()
+    reliability.claim_turn.return_value = CancelledTurnClaim()
+    cancelled = []
+    worker = RedisWorkerRuntime(
+        redis,
+        config,
+        FencedTurnExecutor(factory, reliability, lambda *_args: None, worker_id="worker-1", lease_s=30),
+        consumer_name="worker-1",
+        cancel_pending=cancelled.append,
+    )
+
+    assert await worker.run_once(block_ms=0) == 1
+    assert cancelled == [task]
     assert redis.acks == [("turns", "workers", "1-0")]
 
 

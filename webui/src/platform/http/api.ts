@@ -1,7 +1,8 @@
-import type { AgentSessionStats, AuthSession, AuthorizationAuditListResponse, AuthorizationAuditSummary, DeveloperSnapshot, LearningBookNavigationItem, LearningBookPage, RbacPermission, RbacRole, ReleaseNoteEntry, SessionListResponse, SettingsRuntime, SystemMenu, TeacherAIAnalysisResult, TeacherBookArchiveImportPreview, TeacherBookAssetInput, TeacherBookImportPreview, TeacherBookNavigationItem, TeacherBookPage, TeacherCatalog, TeacherOverview, TeachingGoals, SessionSummary, TurnRecord, UserSettings, UserListResponse, UserProfile, Workspace, WorkspaceMember, ClassroomSummary, JoinRequest, JoinRequestListResponse } from "@/shared/types";
+import type { AuthSession, AuthorizationAuditListResponse, AuthorizationAuditSummary, DeveloperRuntimeHealth, DeveloperSnapshot, LearningBookNavigationItem, LearningBookPage, QuotaAdjustment, QuotaAlert, QuotaArchiveBatch, QuotaBillingRecord, QuotaBillingStatementInput, QuotaBinding, QuotaBucketCandidate, QuotaBucketReplay, QuotaCreditOperation, QuotaCreditOperationInput, QuotaDailyRollup, QuotaGrant, QuotaPolicy, QuotaPolicyExplanation, QuotaPolicyUpdateInput, QuotaPricingRule, QuotaRoleCreditOperationInput, QuotaRoleCreditOperationResult, QuotaSnapshot, QuotaUsageSnapshot, RbacPermission, RbacRole, ReleaseNoteEntry, SessionListResponse, SettingsRuntime, SystemMenu, TeacherAIAnalysisResult, TeacherBookArchiveImportPreview, TeacherBookAssetInput, TeacherBookImportPreview, TeacherBookNavigationItem, TeacherBookPage, TeacherCatalog, TeacherOverview, TeacherAnalysisAnnotations, TeachingGoals, SessionSummary, TurnRecord, UserSettings, UserListResponse, UserProfile, Workspace, WorkspaceMember, ClassroomSummary, JoinRequest, JoinRequestListResponse } from "@/shared/types";
 import type { FeedbackCategory, FeedbackDailyState, FeedbackPriority, FeedbackStatus, FeedbackThread, FeedbackThreadList } from "@/shared/types";
 
 const API_ROOT = "/api/v1";
+export const AUTH_EXPIRED_EVENT = "nova:auth-expired";
 
 export class ApiError extends Error {
   constructor(
@@ -32,6 +33,17 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     credentials: "include",
   });
   if (!response.ok) {
+    if (
+  response.status === 401 &&
+  csrfToken &&
+  path !== "/auth/session" &&
+  path !== "/auth/login"
+) {
+  csrfToken = "";
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new Event(AUTH_EXPIRED_EVENT));
+  }
+}
     const problem = await response.json().catch(() => ({})) as { detail?: string; title?: string; code?: string };
     throw new ApiError(problem.detail ?? problem.title ?? `HTTP ${response.status}`, response.status, problem.code);
   }
@@ -120,7 +132,8 @@ export const api = {
     const suffix = query.size > 0 ? `?${query.toString()}` : "";
     return request<SessionListResponse>(`/sessions${suffix}`);
   },
-  getSessionStats: () => request<AgentSessionStats>("/sessions/stats"),
+  getUsage: (days = 30, workspaceId?: string, granularity: "day" | "week" = "day") => request<QuotaUsageSnapshot>(`/usage/me?days=${encodeURIComponent(String(days))}&granularity=${granularity}${workspaceId ? `&workspace_id=${encodeURIComponent(workspaceId)}` : ""}`),
+  getQuota: (workspaceId?: string) => request<{ quota: QuotaSnapshot; policy: QuotaPolicyExplanation | null }>(`/quota/me${workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : ""}`),
   createSession: (workspaceId = "default") =>
     request<SessionSummary>("/sessions", {
       method: "POST",
@@ -128,6 +141,11 @@ export const api = {
     }),
   deleteSession: (sessionId: string) =>
     request<void>(`/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" }),
+  renameSession: (sessionId: string, title: string) =>
+    request<{ session_id: string; title: string }>(`/sessions/${encodeURIComponent(sessionId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ title }),
+    }),
   listTurns: (sessionId: string) =>
     request<{ items: TurnRecord[] }>(`/sessions/${encodeURIComponent(sessionId)}/turns?limit=500`),
   cancelTurn: (turnId: string) =>
@@ -174,6 +192,54 @@ export const api = {
   deleteFeedback: (threadId: string) => request<void>(`/developer/feedback/${encodeURIComponent(threadId)}`, { method: "DELETE" }),
   deleteFeedbackThreads: (threadIds: string[]) => request<{ ok: boolean; deleted: number }>("/developer/feedback/bulk-delete", { method: "POST", body: JSON.stringify({ thread_ids: threadIds }) }),
   getDeveloperSnapshot: () => request<DeveloperSnapshot>("/developer/snapshot"),
+  getDeveloperHealth: () => request<DeveloperRuntimeHealth>("/developer/health"),
+  listQuotaPolicies: (code?: string) => request<{ items: QuotaPolicy[] }>(`/developer/quota/policies${code ? `?code=${encodeURIComponent(code)}` : ""}`),
+  listQuotaPricingRules: (pricingKey?: string) => request<{ items: QuotaPricingRule[] }>(`/developer/quota/pricing-rules${pricingKey ? `?pricing_key=${encodeURIComponent(pricingKey)}` : ""}`),
+  getQuotaPricingRule: (pricingRuleId: string) => request<QuotaPricingRule>(`/developer/quota/pricing-rules/${encodeURIComponent(pricingRuleId)}`),
+  createQuotaPricingRule: (input: Omit<QuotaPricingRule, "pricing_rule_id" | "status" | "created_by" | "created_at">) => request<QuotaPricingRule>("/developer/quota/pricing-rules", { method: "POST", body: JSON.stringify(input) }),
+  retireQuotaPricingRule: (pricingRuleId: string) => request<QuotaPricingRule>(`/developer/quota/pricing-rules/${encodeURIComponent(pricingRuleId)}`, { method: "DELETE" }),
+  getQuotaPolicy: (policyId: string) => request<QuotaPolicy>(`/developer/quota/policies/${encodeURIComponent(policyId)}`),
+  createQuotaPolicy: (input: Omit<QuotaPolicy, "policy_id" | "created_by" | "created_at" | "updated_at">) => request<QuotaPolicy>("/developer/quota/policies", { method: "POST", body: JSON.stringify(input) }),
+  updateQuotaPolicy: (policyId: string, input: QuotaPolicyUpdateInput) => request<QuotaPolicy>(`/developer/quota/policies/${encodeURIComponent(policyId)}`, { method: "PATCH", body: JSON.stringify(input) }),
+  archiveQuotaPolicy: (policyId: string) => request<QuotaPolicy>(`/developer/quota/policies/${encodeURIComponent(policyId)}/archive`, { method: "POST", body: "{}" }),
+  publishQuotaPolicy: (policyId: string) => request<QuotaPolicy>(`/developer/quota/policies/${encodeURIComponent(policyId)}/publish`, { method: "POST", body: "{}" }),
+  listQuotaBindings: () => request<{ items: QuotaBinding[] }>("/developer/quota/bindings"),
+  getQuotaBinding: (bindingId: string) => request<QuotaBinding>(`/developer/quota/bindings/${encodeURIComponent(bindingId)}`),
+  bindQuotaPolicy: (input: Omit<QuotaBinding, "binding_id" | "policy_code" | "policy_version" | "status">) => request<QuotaBinding>("/developer/quota/bindings", { method: "POST", body: JSON.stringify(input) }),
+  retireQuotaBinding: (bindingId: string) => request<QuotaBinding>(`/developer/quota/bindings/${encodeURIComponent(bindingId)}`, { method: "DELETE" }),
+  listQuotaGrants: (ownerType?: string, ownerId?: string) => request<{ items: QuotaGrant[] }>(`/developer/quota/grants${ownerType || ownerId ? `?${new URLSearchParams({ ...(ownerType ? { owner_type: ownerType } : {}), ...(ownerId ? { owner_id: ownerId } : {}) })}` : ""}`),
+  createQuotaGrant: (input: Omit<QuotaGrant, "grant_id" | "created_by" | "created_at" | "revoked_at" | "revoked_by" | "revocation_idempotency_key" | "status">) => request<QuotaGrant>("/developer/quota/grants", { method: "POST", body: JSON.stringify(input) }),
+  getQuotaGrant: (grantId: string) => request<QuotaGrant>(`/developer/quota/grants/${encodeURIComponent(grantId)}`),
+  revokeQuotaGrant: (grantId: string, idempotency_key: string) => request<QuotaGrant>(`/developer/quota/grants/${encodeURIComponent(grantId)}`, { method: "DELETE", body: JSON.stringify({ idempotency_key }) }),
+  listQuotaAdjustments: (ownerType?: string, ownerId?: string) => request<{ items: QuotaAdjustment[] }>(`/developer/quota/adjustments${ownerType || ownerId ? `?${new URLSearchParams({ ...(ownerType ? { owner_type: ownerType } : {}), ...(ownerId ? { owner_id: ownerId } : {}) })}` : ""}`),
+  getQuotaAdjustment: (adjustmentId: string) => request<QuotaAdjustment>(`/developer/quota/adjustments/${encodeURIComponent(adjustmentId)}`),
+  listQuotaDailyRollups: (start: string, end: string, filters: { userId?: string; workspaceId?: string } = {}) => {
+    const query = new URLSearchParams({ start, end });
+    if (filters.userId) query.set("user_id", filters.userId);
+    if (filters.workspaceId) query.set("workspace_id", filters.workspaceId);
+    return request<{ items: QuotaDailyRollup[] }>(`/developer/quota/daily-rollups?${query.toString()}`);
+  },
+  listQuotaBilling: (status?: string, limit = 100) => request<{ items: QuotaBillingRecord[] }>(`/developer/quota/billing?limit=${limit}${status ? `&status=${encodeURIComponent(status)}` : ""}`),
+  reconcileQuotaBilling: (statement: QuotaBillingStatementInput) => request<{ total: number; matched: number; discrepancies: number; unmatched: number; items: QuotaBillingRecord[] }>("/developer/quota/billing/reconcile", { method: "POST", body: JSON.stringify({ statements: [statement] }) }),
+  repairQuotaBilling: (billingId: string, reason: string, idempotencyKey: string) => request<QuotaBillingRecord>(`/developer/quota/billing/${encodeURIComponent(billingId)}/repair`, { method: "POST", body: JSON.stringify({ reason, idempotency_key: idempotencyKey }) }),
+  giftQuotaCredits: (input: QuotaCreditOperationInput) => request<QuotaCreditOperation>("/developer/quota/credits/gift", { method: "POST", body: JSON.stringify(input) }),
+  giftQuotaRoleCredits: (input: QuotaRoleCreditOperationInput) => request<QuotaRoleCreditOperationResult>("/developer/quota/credits/gift-role", { method: "POST", body: JSON.stringify(input) }),
+  resetQuotaCredits: (input: QuotaCreditOperationInput) => request<QuotaCreditOperation>("/developer/quota/credits/reset", { method: "POST", body: JSON.stringify(input) }),
+  listQuotaCreditOperations: (limit = 100) => request<{ items: QuotaCreditOperation[] }>(`/developer/quota/credits?limit=${limit}`),
+  listQuotaAlerts: (status?: string, limit = 100) => request<{ items: QuotaAlert[] }>(`/developer/quota/alerts?limit=${limit}${status ? `&status=${encodeURIComponent(status)}` : ""}`),
+  updateQuotaAlert: (alertId: string, status: "acknowledged" | "resolved", reason: string) => request<QuotaAlert>(`/developer/quota/alerts/${encodeURIComponent(alertId)}`, { method: "PATCH", body: JSON.stringify({ status, reason }) }),
+  archiveQuotaUsage: (before: string, batchSize = 10_000) => request<{ batch_id: string | null; archived_events: number; cutoff_at: string; deleted_events: number }>("/developer/quota/archive", { method: "POST", body: JSON.stringify({ before, batch_size: batchSize }) }),
+  purgeQuotaUsage: (before: string, batchSize = 10_000) => request<{ purged_events: number; deleted_events: number; cutoff_at: string }>("/developer/quota/archive/purge", { method: "POST", body: JSON.stringify({ before, batch_size: batchSize }) }),
+  listQuotaArchiveBatches: (limit = 100) => request<{ items: QuotaArchiveBatch[] }>(`/developer/quota/archive?limit=${limit}`),
+  listQuotaBuckets: (ownerType?: string, ownerId?: string, limit = 200) => {
+    const query = new URLSearchParams({ limit: String(limit) });
+    if (ownerType) query.set("owner_type", ownerType);
+    if (ownerId) query.set("owner_id", ownerId);
+    return request<{ items: QuotaBucketCandidate[] }>(`/developer/quota/buckets?${query.toString()}`);
+  },
+  replayQuotaBucket: (bucketId: string) => request<QuotaBucketReplay>(`/developer/quota/buckets/${encodeURIComponent(bucketId)}/replay`),
+  repairQuotaBucket: (bucketId: string, reason: string, idempotencyKey: string) => request<QuotaBucketReplay>(`/developer/quota/buckets/${encodeURIComponent(bucketId)}/repair`, { method: "POST", body: JSON.stringify({ reason, idempotency_key: idempotencyKey }) }),
+  createQuotaAdjustment: (input: Omit<QuotaAdjustment, "adjustment_id" | "actor_user_id" | "created_at">) => request<QuotaAdjustment>("/developer/quota/adjustments", { method: "POST", body: JSON.stringify(input) }),
   updateToolPolicies: (policies: Record<string, unknown>) =>
     request<Record<string, unknown>>("/developer/tools/policies", { method: "PUT", body: JSON.stringify({ policies }) }),
   updateCustomTools: (custom: Record<string, unknown>) => request<{ restart_required: boolean; reason: string }>("/developer/tools/custom", { method: "PUT", body: JSON.stringify({ custom }) }),
@@ -187,6 +253,14 @@ export const api = {
   deleteSkill: (name: string) => request<void>(`/developer/skills/${encodeURIComponent(name)}`, { method: "DELETE" }),
   saveWorkerProfile: (name: string, profile: Record<string, unknown>) => request<Record<string, unknown>>(`/developer/worker-profiles/${encodeURIComponent(name)}`, { method: "PUT", body: JSON.stringify({ profile }) }),
   deleteWorkerProfile: (name: string) => request<void>(`/developer/worker-profiles/${encodeURIComponent(name)}`, { method: "DELETE" }),
+  saveModelProvider: (name: string, config: Record<string, unknown>) =>
+    request<Record<string, unknown>>(`/developer/models/providers/${encodeURIComponent(name)}`, { method: "PUT", body: JSON.stringify({ config }) }),
+  saveModelPreset: (name: string, config: Record<string, unknown>) =>
+    request<Record<string, unknown>>(`/developer/models/presets/${encodeURIComponent(name)}`, { method: "PUT", body: JSON.stringify({ config }) }),
+  saveModelRoute: (name: string, config: Record<string, unknown>) =>
+    request<Record<string, unknown>>(`/developer/models/routes/${encodeURIComponent(name)}`, { method: "PUT", body: JSON.stringify({ config }) }),
+  saveModelProfile: (name: string, config: Record<string, unknown>) =>
+    request<Record<string, unknown>>(`/developer/models/profiles/${encodeURIComponent(name)}`, { method: "PUT", body: JSON.stringify({ config }) }),
   listReleaseNotes: () => request<{ items: ReleaseNoteEntry[] }>("/developer/release-notes"),
   createReleaseNote: (note: Omit<ReleaseNoteEntry, "id">) =>
     request<ReleaseNoteEntry>("/developer/release-notes", { method: "POST", body: JSON.stringify(note) }),
@@ -202,6 +276,11 @@ export const api = {
     request<{ goals: TeachingGoals; revision: number; updated_at: string }>(`/teacher/goals/${encodeURIComponent(workspaceId)}`, {
       method: "PUT",
       body: JSON.stringify(goals),
+    }),
+  updateTeacherAnalysisAnnotations: (workspaceId: string, annotations: Omit<TeacherAnalysisAnnotations, "workspace_id">) =>
+    request<{ annotations: TeacherAnalysisAnnotations; revision: number; updated_at: string }>(`/teacher/analysis-annotations/${encodeURIComponent(workspaceId)}`, {
+      method: "PUT",
+      body: JSON.stringify(annotations),
     }),
   getTeacherCatalog: (workspaceId = "default") => request<{ catalog: TeacherCatalog }>(`/teacher/catalog/${encodeURIComponent(workspaceId)}`),
   updateTeacherCatalog: (workspaceId: string, catalog: Omit<TeacherCatalog, "workspace_id">) => request<{ catalog: TeacherCatalog }>(`/teacher/catalog/${encodeURIComponent(workspaceId)}`, { method: "PUT", body: JSON.stringify(catalog) }),
@@ -224,7 +303,7 @@ export const api = {
     request<{ items: unknown[]; status: string }>(`/teacher/${resource}?workspace_id=${encodeURIComponent(workspaceId)}`),
 
   // ---- Admin module (用户 / 工作区 / 班级加入申请) ----
-  listUsers: (offset = 0, limit = 20, status?: string, keyword?: string, includeDeleted = false) =>
+  listUsers: (offset = 0, limit = 12, status?: string, keyword?: string, includeDeleted = false) =>
     request<UserListResponse>(
       `/users?offset=${offset}&limit=${limit}${status ? `&status=${encodeURIComponent(status)}` : ""}${keyword ? `&keyword=${encodeURIComponent(keyword)}` : ""}${includeDeleted ? "&include_deleted=true" : ""}`,
     ),
@@ -248,10 +327,6 @@ export const api = {
   replaceUserRoles: (userId: string, role_codes: string[]) =>
     request<{ user_id: string; role_codes: string[] }>(`/users/${encodeURIComponent(userId)}/roles`, { method: "PUT", body: JSON.stringify({ role_codes }) }),
   listRoles: () => request<{ items: RbacRole[] }>("/roles"),
-  createRole: (input: { code: string; name: string; description?: string }) =>
-    request<RbacRole>("/system/roles", { method: "POST", body: JSON.stringify(input) }),
-  updateRoleStatus: (roleCode: string, status: "active" | "disabled") =>
-    request<void>(`/system/roles/${encodeURIComponent(roleCode)}/status`, { method: "PATCH", body: JSON.stringify({ status }) }),
   listPermissions: () => request<{ items: RbacPermission[] }>("/permissions"),
   listRolePermissions: (roleCode: string) => request<{ role_code: string; permissions: Record<string, string[]> }>(`/system/roles/${encodeURIComponent(roleCode)}/permissions`),
   replaceRolePermissions: (roleCode: string, permission_codes: string[], scopes: Record<string, string[]>) =>

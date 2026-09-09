@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -28,6 +29,17 @@ class LostTurnClaimError(RuntimeError):
     pass
 
 
+class TurnCancellationRequested(RuntimeError):
+    """The durable turn state says this delivery must be finalized as cancelled."""
+
+
+@dataclass(frozen=True)
+class CancelledTurnClaim:
+    """Explicit claim outcome for the cancellation race at the worker boundary."""
+
+    reason: str = "durable_cancellation"
+
+
 class TurnReliabilityService:
     async def enqueue(self, session: AsyncSession, *, topic: str, payload: dict[str, Any]) -> OutboxMessageModel:
         message = OutboxMessageModel(id=str(uuid.uuid4()), topic=topic, payload_json=payload)
@@ -44,7 +56,7 @@ class TurnReliabilityService:
         lease_s: int,
         user_id: str | None = None,
         workspace_id: str | None = None,
-    ) -> int | None:
+    ) -> int | CancelledTurnClaim | None:
         statement = (
             select(TurnModel)
             .join(ConversationModel, ConversationModel.id == TurnModel.conversation_id)
@@ -76,7 +88,7 @@ class TurnReliabilityService:
                 turn.claimed_by = None
                 turn.lease_expires_at = None
                 await session.flush()
-            return None
+            return CancelledTurnClaim()
         if turn.status != "accepted" and not (
             turn.status == "running"
             and turn.lease_expires_at

@@ -1,0 +1,204 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+
+import { CaptureUpdateAction, Excalidraw, Footer, loadLibraryFromBlob, MainMenu } from "@excalidraw/excalidraw";
+import type { ExcalidrawElement } from "@excalidraw/excalidraw/element/types";
+import type {
+  AppState,
+  BinaryFiles,
+  ExcalidrawImperativeAPI,
+  ExcalidrawInitialDataState,
+} from "@excalidraw/excalidraw/types";
+import "@excalidraw/excalidraw/index.css";
+
+import { WHITEBOARD_LIBRARY_ASSETS, whiteboardLibraryUrl } from "./libraryAssets";
+import { withoutEmbeddableElements, type StoredWhiteboardScene } from "./storage";
+import { WhiteboardHelpDialog, WhiteboardHelpMenuItem, WhiteboardHelpTrigger } from "./WhiteboardHelp";
+import "./whiteboard.css";
+
+export interface ExcalidrawSceneChange {
+  elements: readonly ExcalidrawElement[];
+  appState: AppState;
+  files: BinaryFiles;
+}
+
+export interface WhiteboardLibraryLoadError {
+  clearFailed: boolean;
+  failedAssetNames: readonly string[];
+}
+
+type LoadedWhiteboardLibrary = {
+  asset: typeof WHITEBOARD_LIBRARY_ASSETS[number];
+  libraryItems: Awaited<ReturnType<typeof loadLibraryFromBlob>>;
+};
+
+type BundledLibraryLoadResult = {
+  libraries: LoadedWhiteboardLibrary[];
+  failedAssets: typeof WHITEBOARD_LIBRARY_ASSETS[number][];
+};
+
+let bundledLibrariesPromise: Promise<BundledLibraryLoadResult> | null = null;
+
+function loadBundledLibraries() {
+  if (!bundledLibrariesPromise) {
+    bundledLibrariesPromise = (async () => {
+      const failedAssets: typeof WHITEBOARD_LIBRARY_ASSETS[number][] = [];
+      const libraries = (await Promise.all(WHITEBOARD_LIBRARY_ASSETS.map(async (asset) => {
+        try {
+          const response = await fetch(whiteboardLibraryUrl(asset.fileName));
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          return {
+            asset,
+            libraryItems: await loadLibraryFromBlob(await response.blob(), "published"),
+          };
+        } catch (error) {
+          failedAssets.push(asset);
+          console.warn(`[whiteboard] failed to load ${asset.name} library`, error);
+          return null;
+        }
+      }))).filter((library): library is LoadedWhiteboardLibrary => library !== null);
+
+      // Keep successful loads cached, but allow a later board to retry when
+      // this attempt was incomplete (for example during a transient outage).
+      if (failedAssets.length > 0) bundledLibrariesPromise = null;
+      return { libraries, failedAssets };
+    })();
+  }
+  return bundledLibrariesPromise;
+}
+
+/** Test-only cache reset; production callers keep successful loads cached. */
+export function resetBundledLibrariesCache() {
+  bundledLibrariesPromise = null;
+}
+
+export function ExcalidrawAdapter({ initialScene, onChange, onLibraryLoadError }: {
+  initialScene: StoredWhiteboardScene | null;
+  onChange: (scene: ExcalidrawSceneChange) => void;
+  onLibraryLoadError?: (error: WhiteboardLibraryLoadError) => void;
+}) {
+  const libraryLoadStarted = useRef(false);
+  const excalidrawApi = useRef<ExcalidrawImperativeAPI | null>(null);
+  const mounted = useRef(true);
+  const panelRef = useRef<HTMLElement>(null);
+  const [helpOpen, setHelpOpen] = useState(false);
+  const openHelp = useCallback(() => setHelpOpen(true), []);
+  const closeHelp = useCallback(() => setHelpOpen(false), []);
+  const initialData: ExcalidrawInitialDataState | undefined = initialScene ? {
+    elements: withoutEmbeddableElements(initialScene.elements),
+    appState: initialScene.appState,
+    files: initialScene.files,
+  } : undefined;
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      excalidrawApi.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    const handleHelpShortcut = (event: KeyboardEvent) => {
+      if (event.key !== "?" || event.ctrlKey || event.metaKey || event.altKey) return;
+      if (!(event.target instanceof Node) || !panelRef.current?.contains(event.target)) return;
+      if (event.target instanceof HTMLElement && event.target.closest("input, textarea, [contenteditable=\"true\"]")) return;
+      event.preventDefault();
+      event.stopPropagation();
+      openHelp();
+    };
+
+    window.addEventListener("keydown", handleHelpShortcut, true);
+    return () => window.removeEventListener("keydown", handleHelpShortcut, true);
+  }, [openHelp]);
+
+  const handleExcalidrawAPI = useCallback((api: ExcalidrawImperativeAPI) => {
+    excalidrawApi.current = api;
+    if (libraryLoadStarted.current) return;
+    libraryLoadStarted.current = true;
+
+    const installBundledLibraries = async () => {
+      if (!mounted.current) return;
+
+      // Clear the engine's library before awaiting our local assets so a
+      // user's personal/public library cannot flash into this read-only view.
+      let clearFailed = false;
+      try {
+        await api.updateLibrary({
+          libraryItems: [],
+          merge: false,
+          defaultStatus: "published",
+        });
+      } catch (error) {
+        clearFailed = true;
+        console.warn("[whiteboard] failed to clear the library", error);
+      }
+
+      if (!mounted.current) return;
+      const { libraries: loadedLibraries, failedAssets } = await loadBundledLibraries();
+      if (!mounted.current) return;
+
+      const installationFailures = [...failedAssets];
+      let libraryNeedsReplacement = clearFailed;
+      for (const { asset, libraryItems } of loadedLibraries) {
+        if (!mounted.current) return;
+        try {
+          await api.updateLibrary({
+            libraryItems,
+            merge: !libraryNeedsReplacement,
+            defaultStatus: "published",
+          });
+          libraryNeedsReplacement = false;
+        } catch (error) {
+          installationFailures.push(asset);
+          console.warn(`[whiteboard] failed to install ${asset.name} library`, error);
+        }
+      }
+      if (clearFailed || installationFailures.length > 0) {
+        onLibraryLoadError?.({
+          clearFailed,
+          failedAssetNames: installationFailures.map((asset) => asset.name),
+        });
+      }
+    };
+
+    void installBundledLibraries();
+  }, [onLibraryLoadError]);
+
+  const handleSceneChange = useCallback((elements: readonly ExcalidrawElement[], appState: AppState, files: BinaryFiles) => {
+    const safeElements = elements.filter((element) => element.type !== "embeddable");
+    if (safeElements.length !== elements.length) {
+      excalidrawApi.current?.updateScene({
+        elements: safeElements,
+        captureUpdate: CaptureUpdateAction.NEVER,
+      });
+    }
+    onChange({ elements: safeElements, appState, files });
+  }, [onChange]);
+
+  return <section ref={panelRef} className="whiteboard-panel" aria-label="白板绘图">
+    <Excalidraw
+      initialData={initialData}
+      langCode="zh-CN"
+      onChange={handleSceneChange}
+      excalidrawAPI={handleExcalidrawAPI}
+      aiEnabled={false}
+      validateEmbeddable={() => false}
+    >
+      <MainMenu>
+        <MainMenu.DefaultItems.LoadScene />
+        <MainMenu.DefaultItems.SaveToActiveFile />
+        <MainMenu.DefaultItems.Export />
+        <MainMenu.DefaultItems.SaveAsImage />
+        <MainMenu.DefaultItems.SearchMenu />
+        <WhiteboardHelpMenuItem onOpen={openHelp} />
+        <MainMenu.DefaultItems.ClearCanvas />
+        <MainMenu.Separator />
+        <MainMenu.DefaultItems.ToggleTheme />
+        <MainMenu.DefaultItems.ChangeCanvasBackground />
+      </MainMenu>
+      <Footer>
+        <WhiteboardHelpTrigger onOpen={openHelp} />
+      </Footer>
+    </Excalidraw>
+    <WhiteboardHelpDialog open={helpOpen} onClose={closeHelp} />
+  </section>;
+}

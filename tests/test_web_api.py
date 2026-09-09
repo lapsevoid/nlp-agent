@@ -4,11 +4,13 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import io
 import json
+import time
 import zipfile
 
 import pytest
 from argon2 import PasswordHasher
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import OperationalError
 from starlette.websockets import WebSocketDisconnect
 
 from core.identity import AuthenticatedPrincipal
@@ -184,6 +186,14 @@ def test_login_requires_valid_credentials_and_logout_revokes_cookie_session(web_
         assert client.get("/api/v1/sessions").status_code == 401
 
 
+def test_developer_session_management_stats_endpoint_is_not_exposed(web_app):
+    app, _engine = web_app
+
+    assert "/api/v1/sessions/stats" not in {
+        route.path for route in app.routes if hasattr(route, "path")
+    }
+
+
 def test_guest_session_has_only_guest_capabilities(web_app):
     app, _engine = web_app
     with TestClient(app) as client:
@@ -214,6 +224,122 @@ def test_auth_session_exposes_human_readable_account_identity(web_app):
         assert session.json()["display_name"] == "nova"
 
 
+def test_usage_me_requires_authentication_and_reports_persistence_unavailable_without_mysql(web_app):
+    app, _engine = web_app
+    with TestClient(app) as client:
+        assert client.get("/api/v1/usage/me").status_code == 401
+        authenticate(client)
+        response = client.get("/api/v1/usage/me")
+
+    assert response.status_code == 503
+    assert response.json()["code"] == "usage_unavailable"
+
+
+def test_usage_me_forwards_workspace_scope_to_usage_reader(web_app):
+    app, _engine = web_app
+
+    class Reader:
+        def __init__(self):
+            self.kwargs = None
+
+        def user_snapshot(self, user_id, **kwargs):
+            self.kwargs = (user_id, kwargs)
+            return {"user_id": user_id, "workspace_id": kwargs["workspace_id"]}
+
+    reader = Reader()
+    app.state.quota_usage_reader = reader
+    with TestClient(app) as client:
+        authenticate(client)
+        response = client.get("/api/v1/usage/me?workspace_id=default&days=7&granularity=week")
+
+    assert response.status_code == 200
+    assert response.json() == {"user_id": "nova", "workspace_id": "default"}
+    assert reader.kwargs == ("nova", {"workspace_id": "default", "days": 7, "granularity": "week"})
+
+
+def test_quota_me_reports_database_schema_upgrade_instead_of_internal_error(web_app):
+    app, _engine = web_app
+
+    class OutdatedQuotaService:
+        def snapshot(self, **_kwargs):
+            raise OperationalError(
+                "select quota policy",
+                {},
+                RuntimeError("(1054, 'Unknown column weekly_limit_micro')"),
+            )
+
+    app.state.quota_read_service = OutdatedQuotaService()
+    with TestClient(app) as client:
+        authenticate(client)
+        response = client.get("/api/v1/quota/me")
+
+    assert response.status_code == 503
+    assert response.json()["code"] == "quota_schema_outdated"
+
+
+def test_developer_quota_grant_supports_rest_revoke_route(web_app):
+    app, _engine = web_app
+
+    routes = [
+        route
+        for route in app.routes
+        if getattr(route, "path", None) == "/api/v1/developer/quota/grants/{grant_id}"
+    ]
+
+    assert any("DELETE" in getattr(route, "methods", set()) for route in routes)
+
+
+def test_developer_quota_pricing_rule_management_routes_are_exposed(web_app):
+    app, _engine = web_app
+
+    collection_methods = {
+        method
+        for route in app.routes
+        if getattr(route, "path", None) == "/api/v1/developer/quota/pricing-rules"
+        for method in getattr(route, "methods", set())
+    }
+    item_methods = {
+        method
+        for route in app.routes
+        if getattr(route, "path", None) == "/api/v1/developer/quota/pricing-rules/{pricing_rule_id}"
+        for method in getattr(route, "methods", set())
+    }
+
+    assert {"GET", "POST"}.issubset(collection_methods)
+    assert {"GET", "DELETE"}.issubset(item_methods)
+
+
+def test_login_sets_httponly_cookie_reports_expiry_and_refreshes_on_activity(web_app):
+    """The real login link: response body, Set-Cookie attributes and the
+    sliding-cookie refresh that keeps a TTL increase from stranding existing
+    sessions."""
+    app, _engine = web_app
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/auth/login",
+            json={"username": "nova", "password": "test-password"},
+            headers={"Origin": "http://testserver"},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["csrf_token"]
+        assert body["expires_at"] > time.time()
+
+        set_cookie = response.headers.get("set-cookie", "")
+        assert set_cookie.startswith("nlp_session=")
+        assert "HttpOnly" in set_cookie
+        assert "Max-Age=86400" in set_cookie
+        assert "SameSite=lax" in set_cookie
+
+        # The issued cookie authenticates a follow-up request, and that request
+        # re-issues the cookie with the current Max-Age (sliding session).
+        refreshed = client.get("/api/v1/auth/session")
+        assert refreshed.status_code == 200
+        assert refreshed.json()["user_id"] == "nova"
+        refreshed_cookie = refreshed.headers.get("set-cookie", "")
+        assert "Max-Age=86400" in refreshed_cookie
+
+
 def test_student_cannot_call_teacher_or_developer_control_planes(student_web_app):
     app, _engine = student_web_app
     with TestClient(app) as client:
@@ -221,12 +347,15 @@ def test_student_cannot_call_teacher_or_developer_control_planes(student_web_app
 
         teacher = client.get("/api/v1/teacher/overview?workspace_id=default")
         developer = client.get("/api/v1/developer/snapshot")
+        developer_health = client.get("/api/v1/developer/health")
         release_notes = client.get("/api/v1/developer/release-notes")
 
         assert teacher.status_code == 403
         assert teacher.json()["code"] == "forbidden"
         assert developer.status_code == 403
         assert developer.json()["code"] == "forbidden"
+        assert developer_health.status_code == 403
+        assert developer_health.json()["code"] == "forbidden"
         assert release_notes.status_code == 403
         assert release_notes.json()["code"] == "forbidden"
         assert client.post("/api/v1/auth/session", headers={"Origin": "http://testserver"}).status_code == 405
@@ -314,8 +443,21 @@ def test_http_lifecycle_sessions_chat_settings_and_csrf(web_app, monkeypatch):
         csrf = authenticate(client)
         developer = client.get("/api/v1/developer/snapshot")
         assert developer.status_code == 200
-        assert developer.json()["runtime"]["status"] == "ok"
-        assert "tools" in developer.json()
+        developer_payload = developer.json()
+        assert developer_payload["runtime"]["status"] == "ok"
+        assert "tools" in developer_payload
+        providers = developer_payload["models"]["providers"]
+        assert providers["kimi"]["adapter"] == "kimi"
+        assert providers["kimi"]["api_key_env"] == "KIMI_API_KEY"
+        assert providers["glm"]["adapter"] == "glm"
+        assert providers["glm"]["api_key_env"] == "GLM_API_KEY"
+        for provider in providers.values():
+            assert isinstance(provider["api_key_configured"], bool)
+            assert "api_key" not in provider
+        developer_health = client.get("/api/v1/developer/health")
+        assert developer_health.status_code == 200
+        assert developer_health.json()["status"] == "ok"
+        assert developer_health.json()["active_turns"] == 0
         teacher = client.get("/api/v1/teacher/overview?workspace_id=default")
         assert teacher.status_code == 200
         assert teacher.json()["summary"]["questions"] == 0
@@ -999,7 +1141,41 @@ def test_websocket_hub_enforces_global_and_per_user_limits():
     assert hub.try_add(connection(AuthenticatedPrincipal(user_id="carol"))) is False
 
 
-def test_session_list_exposes_page_metadata_and_usage_stats(web_app):
+@pytest.mark.asyncio
+async def test_websocket_hub_broadcast_targets_workspace_members():
+    hub = WebSocketHub(max_connections=4, max_connections_per_user=1)
+    delivered: dict[str, int] = {}
+
+    def connection(principal):
+        item = WebSocketConnection(
+            SlowWebSocket(),
+            gateway=None,
+            principal=principal,
+            max_queue=10,
+            send_queue_size=1,
+            send_timeout_s=0.1,
+        )
+
+        async def capture(_event, *, wait=False):
+            delivered[principal.user_id] = delivered.get(principal.user_id, 0) + 1
+            return True
+
+        item.send = capture
+        return item
+
+    assert hub.try_add(connection(AuthenticatedPrincipal(user_id="alice", workspace_ids=frozenset({"workspace-1"})))) is True
+    assert hub.try_add(connection(AuthenticatedPrincipal(user_id="bob", workspace_ids=frozenset({"workspace-2"})))) is True
+    assert hub.try_add(connection(AuthenticatedPrincipal(user_id="developer", workspace_ids=frozenset({"*"})))) is True
+
+    await hub.broadcast(
+        ServerEventEnvelope(type="usage.snapshot", payload={"refresh_required": True}),
+        workspace_id="workspace-1",
+    )
+
+    assert delivered == {"alice": 1, "developer": 1}
+
+
+def test_session_list_exposes_page_metadata(web_app):
     app, _engine = web_app
     with TestClient(app) as client:
         csrf = authenticate(client)
@@ -1017,7 +1193,3 @@ def test_session_list_exposes_page_metadata_and_usage_stats(web_app):
         assert page.json()["offset"] == 1
         assert len(page.json()["items"]) == 1
         assert page.json()["has_more"] is False
-
-        stats = client.get("/api/v1/sessions/stats")
-        assert stats.status_code == 200
-        assert stats.json()["sessions_total"] == 2

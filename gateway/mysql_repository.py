@@ -9,6 +9,7 @@ import hashlib
 import json
 import re
 import uuid
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import unquote
@@ -17,6 +18,8 @@ from sqlalchemy import bindparam, create_engine, text
 from sqlalchemy.engine import Connection
 
 from core.learning import ExerciseState, LearningContext, LearningProgress, knowledge_point_ids
+from core.observability.reset_lock import runtime_reset_lock, runtime_write_transaction
+from gateway.analytics_time import localize_turn_time
 from gateway.contracts import (
     GatewayEvent,
     GatewayEventType,
@@ -25,6 +28,8 @@ from gateway.contracts import (
     TurnRecord,
     TurnStatus,
 )
+from server.quota.contracts import AdmitTurn
+from server.quota.service import QuotaService, retry_mysql_transaction
 
 
 def _now() -> datetime:
@@ -32,11 +37,24 @@ def _now() -> datetime:
 
 
 class MySQLGatewayRepository:
-    def __init__(self, url: str, *, knowledge_point_prompt_budget: int = 12_000) -> None:
+    def __init__(
+        self,
+        url: str,
+        *,
+        knowledge_point_prompt_budget: int = 12_000,
+        quota_enforcement: bool = False,
+    ) -> None:
         if not url.startswith("mysql+aiomysql://"):
             raise ValueError("MySQL Gateway repository requires mysql+aiomysql DSN")
         self._engine = create_engine(url.replace("mysql+aiomysql://", "mysql+pymysql://"), pool_pre_ping=True)
+        self._runtime_lock_enabled = True
         self.knowledge_point_prompt_budget = max(1, knowledge_point_prompt_budget)
+        self.quota_service = QuotaService(self._engine) if quota_enforcement else None
+
+    def _runtime_begin(self):
+        return runtime_write_transaction(
+            self._engine, enabled=getattr(self, "_runtime_lock_enabled", False)
+        )
 
     def _row(self, turn_id: str) -> dict[str, Any] | None:
         with self._engine.connect() as c:
@@ -91,30 +109,100 @@ class MySQLGatewayRepository:
         if identity["workspace_id"] != workspace_id or identity["owner_user_id"] != user_id:
             raise PermissionError("conversation identity does not match the current session")
 
-    def create_turn(self, *, turn_id: str, session_id: str, workspace_id: str, user_id: str, input_text: str, idempotency_key: str | None, learning_context=None, learning_progress=None, exercise_state=None, dispatch_payload: str | None = None, **_: Any) -> tuple[TurnRecord, bool]:
-        with self._engine.begin() as c:
-            self._ensure_conversation(
-                c,
-                session_id=session_id,
-                workspace_id=workspace_id,
-                user_id=user_id,
-                title=input_text,
+    def create_turn(
+        self,
+        *,
+        turn_id: str,
+        session_id: str,
+        workspace_id: str,
+        user_id: str,
+        input_text: str,
+        idempotency_key: str | None,
+        learning_context=None,
+        learning_progress=None,
+        exercise_state=None,
+        dispatch_payload: str | None = None,
+        quota_admission: AdmitTurn | None = None,
+        quota_role_codes: tuple[str, ...] = (),
+        quota_classroom_ids: tuple[str, ...] = (),
+        **_: Any,
+    ) -> tuple[TurnRecord, bool]:
+        quota_service = getattr(self, "quota_service", None)
+
+        def create_once() -> tuple[TurnRecord | None, bool]:
+            with self._runtime_begin() as c:
+                self._ensure_conversation(
+                    c,
+                    session_id=session_id,
+                    workspace_id=workspace_id,
+                    user_id=user_id,
+                    title=input_text,
+                )
+                if idempotency_key:
+                    old = c.execute(text("SELECT * FROM nlp_turns WHERE user_id=:u AND conversation_id=:s AND idempotency_key=:k"), {"u": user_id, "s": session_id, "k": idempotency_key}).mappings().first()
+                    if old:
+                        if (
+                            old["status"] == "failed"
+                            and old.get("error_kind") == "dispatch_failed"
+                            and quota_service is not None
+                            and quota_admission is not None
+                        ):
+                            quota_service.admit_in_transaction(
+                                c,
+                                quota_admission.model_copy(
+                                    update={"turn_id": old["id"]}
+                                ),
+                                role_codes=quota_role_codes,
+                                classroom_ids=quota_classroom_ids,
+                            )
+                        return self._record(dict(old)), True
+                if quota_service is not None and quota_admission is not None:
+                    quota_service.admit_in_transaction(
+                        c,
+                        quota_admission,
+                        role_codes=quota_role_codes,
+                        classroom_ids=quota_classroom_ids,
+                    )
+                state = {"context": learning_context.model_dump(mode="json") if learning_context else None, "progress": learning_progress.model_dump(mode="json") if learning_progress else None, "exercise": exercise_state.model_dump(mode="json") if exercise_state else None}
+                c.execute(text("INSERT INTO nlp_turns(id,conversation_id,workspace_id,user_id,status,input_text,learning_state_json,idempotency_key) VALUES(:id,:s,:w,:u,'accepted',:input,:state,:key)"), {"id": turn_id, "s": session_id, "w": workspace_id, "u": user_id, "input": input_text, "state": json.dumps(state), "key": idempotency_key})
+                if dispatch_payload is not None:
+                    c.execute(text("INSERT INTO nlp_outbox_messages(id,topic,payload_json,status) VALUES(UUID(),'turn.dispatch',:payload,'pending')"), {"payload": json.dumps({"turn_id": turn_id, "task": dispatch_payload})})
+            return None, False
+
+        existing_record, duplicate = retry_mysql_transaction(create_once)
+        if duplicate:
+            return existing_record, True  # type: ignore[return-value]
+        record = self._record(self._row(turn_id) or {})
+        if quota_service is not None and quota_admission is not None:
+            quota_service.notify_reservation(
+                quota_service.reservation_id_for_turn(turn_id)
             )
-            if idempotency_key:
-                old = c.execute(text("SELECT * FROM nlp_turns WHERE user_id=:u AND conversation_id=:s AND idempotency_key=:k"), {"u": user_id, "s": session_id, "k": idempotency_key}).mappings().first()
-                if old:
-                    return self._record(dict(old)), True
-            state = {"context": learning_context.model_dump(mode="json") if learning_context else None, "progress": learning_progress.model_dump(mode="json") if learning_progress else None, "exercise": exercise_state.model_dump(mode="json") if exercise_state else None}
-            c.execute(text("INSERT INTO nlp_turns(id,conversation_id,workspace_id,user_id,status,input_text,learning_state_json,idempotency_key) VALUES(:id,:s,:w,:u,'accepted',:input,:state,:key)"), {"id": turn_id, "s": session_id, "w": workspace_id, "u": user_id, "input": input_text, "state": json.dumps(state), "key": idempotency_key})
-            if dispatch_payload is not None:
-                c.execute(text("INSERT INTO nlp_outbox_messages(id,topic,payload_json,status) VALUES(UUID(),'turn.dispatch',:payload,'pending')"), {"payload": json.dumps({"turn_id": turn_id, "task": dispatch_payload})})
-        return self._record(self._row(turn_id) or {}), False
+        return record, False
 
     def update_turn(self, turn_id: str, status: TurnStatus, *, final_text=None, error_kind=None, error_message=None, exercise_state=None, dispatch_payload: str | None = None) -> TurnRecord:
         terminal = status in {TurnStatus.COMPLETED, TurnStatus.FAILED, TurnStatus.CANCELLED, TurnStatus.INTERRUPTED}
-        with self._engine.begin() as c:
-            c.execute(text("UPDATE nlp_turns SET status=:status,result_text=:result,error_kind=:kind,error_message=:message,started_at=CASE WHEN :running='running' THEN UTC_TIMESTAMP(6) ELSE started_at END,completed_at=CASE WHEN :terminal=1 THEN UTC_TIMESTAMP(6) ELSE completed_at END WHERE id=:id"), {"status": status.value, "result": final_text, "kind": error_kind, "message": (error_message or "")[:1000] or None, "running": status.value, "terminal": int(terminal), "id": turn_id})
-            if dispatch_payload is not None:
+        preserve_terminal = False
+        with self._runtime_begin() as c:
+            current = c.execute(
+                text("SELECT status,error_kind FROM nlp_turns WHERE id=:id FOR UPDATE"),
+                {"id": turn_id},
+            ).mappings().first()
+            if current is None:
+                raise KeyError(turn_id)
+            retrying_dispatch_failure = (
+                current["status"] == TurnStatus.FAILED.value
+                and current["error_kind"] == "dispatch_failed"
+                and status == TurnStatus.ACCEPTED
+            )
+            if (
+                current["status"] in {"completed", "failed", "cancelled", "interrupted"}
+                and current["status"] != status.value
+                and not retrying_dispatch_failure
+            ):
+                preserve_terminal = True
+            if not preserve_terminal:
+                c.execute(text("UPDATE nlp_turns SET status=:status,result_text=:result,error_kind=:kind,error_message=:message,started_at=CASE WHEN :running='running' THEN UTC_TIMESTAMP(6) ELSE started_at END,completed_at=CASE WHEN :terminal=1 THEN UTC_TIMESTAMP(6) ELSE completed_at END WHERE id=:id"), {"status": status.value, "result": final_text, "kind": error_kind, "message": (error_message or "")[:1000] or None, "running": status.value, "terminal": int(terminal), "id": turn_id})
+            if not preserve_terminal and dispatch_payload is not None:
                 c.execute(text("INSERT INTO nlp_outbox_messages(id,topic,payload_json,status) VALUES(UUID(),'turn.dispatch',:payload,'pending')"), {"payload": json.dumps({"turn_id": turn_id, "task": dispatch_payload})})
         row = self._row(turn_id)
         if row is None:
@@ -129,7 +217,7 @@ class MySQLGatewayRepository:
         self, *, turn_id: str, requested_by: str, reason: str = "user_requested"
     ) -> TurnRecord | None:
         """Record cancellation in MySQL before any transport-level signal."""
-        with self._engine.begin() as c:
+        with self._runtime_begin() as c:
             row = c.execute(
                 text("SELECT status FROM nlp_turns WHERE id=:id FOR UPDATE"),
                 {"id": turn_id},
@@ -169,7 +257,7 @@ class MySQLGatewayRepository:
         return self._record(dict(row)) if row else None
 
     def append_event(self, *, turn_id: str, session_id: str, event_type: GatewayEventType, payload=None) -> GatewayEvent:
-        with self._engine.begin() as c:
+        with self._runtime_begin() as c:
             c.execute(text("SELECT id FROM nlp_turns WHERE id=:id FOR UPDATE"), {"id": turn_id})
             sequence = int(c.execute(text("SELECT COALESCE(MAX(sequence),0)+1 FROM nlp_turn_events WHERE turn_id=:id"), {"id": turn_id}).scalar_one())
             event_id = str(uuid.uuid4())
@@ -190,7 +278,7 @@ class MySQLGatewayRepository:
             rows = c.execute(text("SELECT * FROM nlp_turns WHERE conversation_id=:s ORDER BY created_at DESC LIMIT :limit"), {"s": session_id, "limit": min(max(1, limit), 500)}).mappings().all()
         return [self._record(dict(r)) for r in rows]
 
-    def list_question_turns(self, *, workspace_id: str, since: str) -> list[dict[str, Any]]:
+    def list_question_turns(self, *, workspace_id: str, since: str, timezone_name: str = "UTC") -> list[dict[str, Any]]:
         """Teacher read model: structured question rows for analytics.
 
         Deliberately omits ``input_text`` so teacher analytics can only report
@@ -237,7 +325,7 @@ class MySQLGatewayRepository:
         for row in rows:
             context = (self._json(row["learning_state_json"] or {}) or {}).get("context") or {}
             created = row["created_at"]
-            day = created.strftime("%Y-%m-%d") if hasattr(created, "strftime") else str(created)[:10]
+            day, hour, weekday = localize_turn_time(created, timezone_name)
             profile = profiles.get(str(row["user_id"]), {})
             result.append(
                 {
@@ -251,8 +339,8 @@ class MySQLGatewayRepository:
                     "level": context.get("level"),
                     "mode": context.get("mode"),
                     "day": day,
-                    "hour": created.hour if hasattr(created, "hour") else None,
-                    "weekday": created.weekday() if hasattr(created, "weekday") else None,
+                    "hour": hour,
+                    "weekday": weekday,
                 }
             )
         return result
@@ -273,8 +361,13 @@ class MySQLGatewayRepository:
             ).all()
         return {str(row[0]) for row in rows}
 
-    def exercise_evidence_stats(self, *, workspace_id: str, since: str, until: str | None = None, limit: int = 10_000) -> list[dict[str, Any]]:
-        """Teacher read model: one row per graded exercise item with topic/knowledge-point refs."""
+    def exercise_evidence_stats(self, *, workspace_id: str, since: str, until: str | None = None, limit: int = 10_000) -> tuple[list[dict[str, Any]], bool]:
+        """Teacher read model: one row per graded exercise item with topic/knowledge-point refs.
+
+        Returns ``(rows, truncated)``; ``truncated`` is True when more than
+        ``limit`` rows matched and only the newest ``limit`` are returned.
+        """
+        cap = min(max(1, limit), 10_000)
         with self._engine.connect() as c:
             rows = c.execute(
                 text(
@@ -290,8 +383,10 @@ class MySQLGatewayRepository:
                     "AND (ur.expires_at IS NULL OR ur.expires_at>UTC_TIMESTAMP())) "
                     "ORDER BY s.completed_at DESC LIMIT :limit"
                 ),
-                {"w": workspace_id, "since": since, "until": until, "limit": min(max(1, limit), 10_000)},
+                {"w": workspace_id, "since": since, "until": until, "limit": cap + 1},
             ).mappings().all()
+        truncated = len(rows) > cap
+        rows = rows[:cap]
         result: list[dict[str, Any]] = []
         for row in rows:
             blueprint = self._json(row["blueprint_snapshot_json"] or {})
@@ -308,10 +403,15 @@ class MySQLGatewayRepository:
                     "completed_at": row["completed_at"],
                 }
             )
-        return result
+        return result, truncated
 
-    def exercise_criterion_stats(self, *, workspace_id: str, since: str, until: str | None = None, limit: int = 20_000) -> list[dict[str, Any]]:
-        """Teacher read model: per-attempt rubric matches for criterion hit-rate aggregation."""
+    def exercise_criterion_stats(self, *, workspace_id: str, since: str, until: str | None = None, limit: int = 20_000) -> tuple[list[dict[str, Any]], bool]:
+        """Teacher read model: per-attempt rubric matches for criterion hit-rate aggregation.
+
+        Returns ``(rows, truncated)``; ``truncated`` is True when more than
+        ``limit`` rows matched and only the newest ``limit`` are returned.
+        """
+        cap = min(max(1, limit), 50_000)
         with self._engine.connect() as c:
             rows = c.execute(
                 text(
@@ -327,8 +427,10 @@ class MySQLGatewayRepository:
                     "AND (ur.expires_at IS NULL OR ur.expires_at>UTC_TIMESTAMP())) "
                     "ORDER BY s.completed_at DESC LIMIT :limit"
                 ),
-                {"w": workspace_id, "since": since, "until": until, "limit": min(max(1, limit), 50_000)},
+                {"w": workspace_id, "since": since, "until": until, "limit": cap + 1},
             ).mappings().all()
+        truncated = len(rows) > cap
+        rows = rows[:cap]
         result: list[dict[str, Any]] = []
         for row in rows:
             blueprint = self._json(row["blueprint_snapshot_json"] or {})
@@ -342,7 +444,7 @@ class MySQLGatewayRepository:
                     "completed_at": row["completed_at"],
                 }
             )
-        return result
+        return result, truncated
 
     def guided_session_stats(self, *, workspace_id: str, since: str, limit: int = 10_000) -> list[dict[str, Any]]:
         """Teacher read model: misconception counts per guided session (active + recent completed)."""
@@ -392,7 +494,7 @@ class MySQLGatewayRepository:
         return self._guided(row) if row else None
 
     def start_or_resume_guided_session(self, *, session_id: str, workspace_id: str, user_id: str, topic_id: str, first_message: str, guided_blueprint=None):
-        with self._engine.begin() as c:
+        with self._runtime_begin() as c:
             row = c.execute(text("SELECT * FROM nlp_guided_sessions WHERE conversation_id=:s AND topic_id=:t AND status='active' ORDER BY created_at DESC LIMIT 1 FOR UPDATE"), {"s": session_id, "t": topic_id}).mappings().first()
             if row:
                 state = self._json(row["state_json"])
@@ -406,21 +508,21 @@ class MySQLGatewayRepository:
     def advance_guided_session(self, guided_session_id: str, *, tutor_message: str, known_concepts: object = None, misconceptions: object = None, completed: bool = False):
         known = [str(item)[:300] for item in known_concepts if str(item).strip()][:30] if isinstance(known_concepts, list) else []
         mistakes = [str(item)[:300] for item in misconceptions if str(item).strip()][:20] if isinstance(misconceptions, list) else []
-        with self._engine.begin() as c:
+        with self._runtime_begin() as c:
             row = c.execute(text("SELECT state_json FROM nlp_guided_sessions WHERE id=:id AND status='active' FOR UPDATE"), {"id": guided_session_id}).mappings().first()
             if row is None: return None
             state = self._json(row["state_json"])
             state.update({"stage": "completed" if completed else "awaiting_learner_response", "known_concepts": known, "misconceptions": mistakes, "last_question": tutor_message[:2000]})
             c.execute(text("UPDATE nlp_guided_sessions SET status=:status,state_json=:state,completed_at=CASE WHEN :completed THEN UTC_TIMESTAMP(6) ELSE NULL END WHERE id=:id"), {"id": guided_session_id, "status": "completed" if completed else "active", "state": json.dumps(state, ensure_ascii=False), "completed": completed})
     def update_turn_guided_status(self, turn_id: str, *, status: str) -> None:
-        with self._engine.begin() as c:
+        with self._runtime_begin() as c:
             c.execute(text("UPDATE nlp_turns SET learning_state_json=JSON_SET(COALESCE(learning_state_json, JSON_OBJECT()), '$.guided_session_status', :status) WHERE id=:id"), {"id": turn_id, "status": status})
     def end_guided_sessions(self, *, session_id: str, status: str = "cancelled") -> int:
         if status not in {"completed", "cancelled", "expired"}: raise ValueError("invalid guided session terminal status")
-        with self._engine.begin() as c:
+        with self._runtime_begin() as c:
             return c.execute(text("UPDATE nlp_guided_sessions SET status=:status,completed_at=UTC_TIMESTAMP(6) WHERE conversation_id=:s AND status='active'"), {"s": session_id, "status": status}).rowcount
     def expire_guided_sessions(self, *, session_id: str, idle_minutes: int = 30) -> int:
-        with self._engine.begin() as c:
+        with self._runtime_begin() as c:
             return c.execute(text("UPDATE nlp_guided_sessions SET status='expired',completed_at=UTC_TIMESTAMP(6) WHERE conversation_id=:s AND status='active' AND updated_at < :cutoff"), {"s": session_id, "cutoff": _now() - timedelta(minutes=max(1, idle_minutes))}).rowcount
 
     def _exercise(self, row: Any) -> dict[str, Any]:
@@ -445,15 +547,15 @@ class MySQLGatewayRepository:
         candidates = [item for item in catalog["exercise_blueprints" if mode == "practice" else "review_blueprints"] if item.get("topic_id") == topic_id and item.get("status") == "enabled"] if topic else []
         if not candidates: return None
         record_id = str(uuid.uuid4())
-        with self._engine.begin() as c: c.execute(text("INSERT INTO nlp_exercise_sessions(id,conversation_id,workspace_id,user_id,topic_id,mode,status,blueprint_snapshot_json) VALUES(:id,:s,:w,:u,:t,:m,'active',:blueprint)"), {"id": record_id, "s": session_id, "w": workspace_id, "u": user_id, "t": topic_id, "m": mode, "blueprint": json.dumps(candidates[0], ensure_ascii=False)})
+        with self._runtime_begin() as c: c.execute(text("INSERT INTO nlp_exercise_sessions(id,conversation_id,workspace_id,user_id,topic_id,mode,status,blueprint_snapshot_json) VALUES(:id,:s,:w,:u,:t,:m,'active',:blueprint)"), {"id": record_id, "s": session_id, "w": workspace_id, "u": user_id, "t": topic_id, "m": mode, "blueprint": json.dumps(candidates[0], ensure_ascii=False)})
         return self.get_exercise_session(record_id)
 
     def end_exercise_sessions(self, *, session_id: str, status: str = "cancelled") -> int:
         if status not in {"completed", "cancelled", "expired"}: raise ValueError("invalid exercise session terminal status")
-        with self._engine.begin() as c: return c.execute(text("UPDATE nlp_exercise_sessions SET status=:status,completed_at=UTC_TIMESTAMP(6) WHERE conversation_id=:s AND status='active'"), {"s": session_id, "status": status}).rowcount
+        with self._runtime_begin() as c: return c.execute(text("UPDATE nlp_exercise_sessions SET status=:status,completed_at=UTC_TIMESTAMP(6) WHERE conversation_id=:s AND status='active'"), {"s": session_id, "status": status}).rowcount
 
     def expire_exercise_sessions(self, *, session_id: str, idle_minutes: int = 30) -> int:
-        with self._engine.begin() as c: return c.execute(text("UPDATE nlp_exercise_sessions SET status='expired',completed_at=UTC_TIMESTAMP(6) WHERE conversation_id=:s AND status='active' AND updated_at < :cutoff"), {"s": session_id, "cutoff": _now() - timedelta(minutes=max(1, idle_minutes))}).rowcount
+        with self._runtime_begin() as c: return c.execute(text("UPDATE nlp_exercise_sessions SET status='expired',completed_at=UTC_TIMESTAMP(6) WHERE conversation_id=:s AND status='active' AND updated_at < :cutoff"), {"s": session_id, "cutoff": _now() - timedelta(minutes=max(1, idle_minutes))}).rowcount
 
     def exercise_questions(self, exercise_session_id: str) -> list[dict[str, Any]]:
         with self._engine.connect() as c: rows = c.execute(text("SELECT * FROM nlp_exercise_questions WHERE exercise_session_id=:id ORDER BY sequence"), {"id": exercise_session_id}).mappings().all()
@@ -487,7 +589,7 @@ class MySQLGatewayRepository:
         if any(item["status"] == "awaiting_answer" for item in questions): raise ValueError("exercise already has an unanswered question")
         if len(questions) >= 1: raise ValueError("exercise question count is complete")
         record = {"id": str(uuid.uuid4()), "exercise_session_id": exercise_session_id, "sequence": 1, "question": question, "rubric": session["blueprint_snapshot"].get("rubric", []), "status": "awaiting_answer"}
-        with self._engine.begin() as c:
+        with self._runtime_begin() as c:
             c.execute(text("INSERT INTO nlp_exercise_questions(id,exercise_session_id,sequence,question,rubric_json,status) VALUES(:id,:session,:sequence,:question,:rubric,:status)"), {"id": record["id"], "session": exercise_session_id, "sequence": 1, "question": question, "rubric": json.dumps(record["rubric"], ensure_ascii=False), "status": "awaiting_answer"})
         return record
 
@@ -502,7 +604,7 @@ class MySQLGatewayRepository:
         score = round(sum(weights[int(item["criterion_index"])] for item in matches if item.get("achieved")) / (sum(weights) or float(len(weights) or 1)) * 100)
         normalized = [{"criterion_index": int(item["criterion_index"]), "criterion": str(rubric[int(item["criterion_index"])].get("criterion", "") if isinstance(rubric[int(item["criterion_index"])], dict) else rubric[int(item["criterion_index"])]), "weight": weights[int(item["criterion_index"])], "achieved": bool(item.get("achieved")), "evidence": str(item.get("evidence", ""))[:1000]} for item in sorted(matches, key=lambda item: int(item["criterion_index"]))]
         attempt_number = sum(item["exercise_question_id"] == question["id"] for item in self.exercise_attempts(exercise_session_id)) + 1
-        with self._engine.begin() as c:
+        with self._runtime_begin() as c:
             c.execute(text("INSERT INTO nlp_exercise_attempts(id,exercise_question_id,answer,attempt_number,rubric_matches_json,normalized_score,passed,feedback) VALUES(UUID(),:question,:answer,:attempt,:matches,:score,:passed,:feedback)"), {"question": question["id"], "answer": answer, "attempt": attempt_number, "matches": json.dumps(normalized, ensure_ascii=False), "score": score, "passed": score >= 60, "feedback": feedback[:4000]})
             c.execute(text("UPDATE nlp_exercise_questions SET status='completed' WHERE id=:id"), {"id": question["id"]})
             c.execute(text("INSERT INTO nlp_learning_evidence(id,exercise_session_id,exercise_question_id,blueprint_snapshot_json,learner_answer,normalized_score,passed,completed_at) VALUES(UUID(),:session,:question,:blueprint,:answer,:score,:passed,UTC_TIMESTAMP(6))"), {"session": exercise_session_id, "question": question["id"], "blueprint": json.dumps(session["blueprint_snapshot"], ensure_ascii=False), "answer": answer, "score": score, "passed": score >= 60})
@@ -515,10 +617,10 @@ class MySQLGatewayRepository:
 
     def update_user_settings(self, user_id: str, changes: dict[str, Any]):
         current = self.get_user_settings(user_id); settings = {**current["settings"], **changes}; revision = current["revision"] + 1
-        with self._engine.begin() as c: c.execute(text("INSERT INTO nlp_user_preferences(user_id,preferences_json,revision) VALUES(:id,:settings,:revision) ON DUPLICATE KEY UPDATE preferences_json=VALUES(preferences_json),revision=VALUES(revision)"), {"id": user_id, "settings": json.dumps(settings, ensure_ascii=False), "revision": revision})
+        with self._runtime_begin() as c: c.execute(text("INSERT INTO nlp_user_preferences(user_id,preferences_json,revision) VALUES(:id,:settings,:revision) ON DUPLICATE KEY UPDATE preferences_json=VALUES(preferences_json),revision=VALUES(revision)"), {"id": user_id, "settings": json.dumps(settings, ensure_ascii=False), "revision": revision})
         return self.get_user_settings(user_id)
     def delete_session(self, session_id: str) -> None:
-        with self._engine.begin() as c:
+        with self._runtime_begin() as c:
             c.execute(text("DELETE FROM nlp_turn_events WHERE turn_id IN (SELECT id FROM nlp_turns WHERE conversation_id=:s)"), {"s": session_id})
             c.execute(text("DELETE FROM nlp_turn_cancellations WHERE turn_id IN (SELECT id FROM nlp_turns WHERE conversation_id=:s)"), {"s": session_id})
             c.execute(text("DELETE FROM nlp_tool_audits WHERE turn_id IN (SELECT id FROM nlp_turns WHERE conversation_id=:s)"), {"s": session_id})
@@ -535,17 +637,64 @@ class MySQLGatewayRepository:
             c.execute(text("DELETE FROM nlp_guided_sessions WHERE conversation_id=:s"), {"s": session_id})
             c.execute(text("DELETE FROM nlp_exercise_sessions WHERE conversation_id=:s"), {"s": session_id})
             c.execute(text("UPDATE nlp_conversations SET status='deleted', updated_at=UTC_TIMESTAMP(6) WHERE id=:s"), {"s": session_id})
+
+    def clear_learning_sessions(self, *, _lock_held: bool = False) -> dict[str, int]:
+        """Clear learner runtime data while preserving accounts and catalogues.
+
+        This is the MySQL counterpart of the local repository reset. The
+        monitor reset is global, so all session-owned rows are removed in one
+        transaction, while users, preferences, workspaces, teaching catalogues,
+        usage facts, and authorization audit records remain intact.
+        """
+        statements = (
+            ("gateway_events", "DELETE FROM nlp_turn_events"),
+            ("gateway_cancellations", "DELETE FROM nlp_turn_cancellations"),
+            ("gateway_tool_audits", "DELETE FROM nlp_tool_audits"),
+            ("gateway_tool_calls", "DELETE FROM nlp_tool_calls"),
+            ("gateway_messages", "DELETE FROM nlp_conversation_messages"),
+            ("gateway_transcripts", "DELETE FROM nlp_conversation_transcripts"),
+            ("gateway_checkpoints", "DELETE FROM nlp_agent_checkpoints"),
+            ("gateway_langgraph_writes", "DELETE FROM nlp_langgraph_checkpoint_writes"),
+            ("gateway_langgraph_blobs", "DELETE FROM nlp_langgraph_checkpoint_blobs"),
+            ("gateway_langgraph_checkpoints", "DELETE FROM nlp_langgraph_checkpoints"),
+            ("gateway_memory_archives", "DELETE FROM nlp_memory_archives"),
+            ("gateway_memory_documents", "DELETE FROM nlp_memory_documents"),
+            ("gateway_learning_evidence", "DELETE FROM nlp_learning_evidence"),
+            ("gateway_exercise_attempts", "DELETE FROM nlp_exercise_attempts"),
+            ("gateway_exercise_questions", "DELETE FROM nlp_exercise_questions"),
+            ("gateway_exercise_sessions", "DELETE FROM nlp_exercise_sessions"),
+            ("gateway_guided_sessions", "DELETE FROM nlp_guided_sessions"),
+            ("gateway_turns", "DELETE FROM nlp_turns"),
+            ("gateway_dead_letters", "DELETE FROM nlp_dead_letters WHERE turn_id IS NOT NULL"),
+            ("gateway_dispatch_outbox", "DELETE FROM nlp_outbox_messages WHERE topic='turn.dispatch'"),
+            (
+                "gateway_conversations",
+                "UPDATE nlp_conversations SET status='deleted', last_message_at=NULL, "
+                "updated_at=UTC_TIMESTAMP(6) WHERE status <> 'deleted'",
+            ),
+        )
+        lock = nullcontext() if _lock_held else runtime_reset_lock(
+            self._engine, enabled=getattr(self, "_runtime_lock_enabled", False)
+        )
+        with lock:
+            with self._engine.begin() as c:
+                counts = {
+                    key: max(0, int(c.execute(text(sql)).rowcount or 0))
+                    for key, sql in statements
+                }
+        return counts
+
     def latest_event_sequence(self, turn_id: str) -> int:
         with self._engine.connect() as c: return int(c.execute(text("SELECT COALESCE(MAX(sequence),0) FROM nlp_turn_events WHERE turn_id=:id"), {"id": turn_id}).scalar_one())
     def recover_interrupted(self):
-        with self._engine.begin() as c:
+        with self._runtime_begin() as c:
             rows = c.execute(text("SELECT id FROM nlp_turns WHERE status IN ('accepted','running')")).scalars().all()
             for turn_id in rows:
                 c.execute(text("UPDATE nlp_turns SET status='interrupted',error_kind='gateway_restart',error_message='Gateway restarted before the turn completed.',completed_at=UTC_TIMESTAMP(6) WHERE id=:id"), {"id": turn_id})
         return [self.get_turn(turn_id) for turn_id in rows if self.get_turn(turn_id) is not None]
     def prune_events(self, *, retention_days: int, max_events_per_session: int, now: datetime | None = None):
         cutoff = (now or _now()) - timedelta(days=max(1, retention_days))
-        with self._engine.begin() as c:
+        with self._runtime_begin() as c:
             compacted = c.execute(text("DELETE e FROM nlp_turn_events e JOIN nlp_turns t ON t.id=e.turn_id WHERE e.created_at < :cutoff AND t.status IN ('completed','failed','cancelled','interrupted') AND e.event_type NOT IN ('message.completed','turn.completed','turn.failed','turn.cancelled')"), {"cutoff": cutoff}).rowcount
             remaining = int(c.execute(text("SELECT COUNT(*) FROM nlp_turn_events")).scalar_one())
         return {"compacted": int(compacted or 0), "capped": 0, "remaining": remaining}
@@ -646,7 +795,7 @@ class MySQLGatewayRepository:
             "review": list(catalog.get("review_blueprints", [])),
             "guided": list(catalog.get("guided_blueprints", [])),
         }
-        with self._engine.begin() as connection:
+        with self._runtime_begin() as connection:
             self._ensure_workspace(connection, workspace_id)
             row = connection.execute(
                 text("SELECT revision FROM nlp_course_catalogs WHERE workspace_id=:workspace_id FOR UPDATE"),
@@ -731,7 +880,7 @@ class MySQLGatewayRepository:
         *,
         expected_revision: int | None = None,
     ) -> dict[str, Any]:
-        with self._engine.begin() as connection:
+        with self._runtime_begin() as connection:
             row = connection.execute(
                 text(
                     "SELECT workspace_id,knowledge_point_id,draft_markdown,published_markdown,"
@@ -780,7 +929,7 @@ class MySQLGatewayRepository:
         *,
         expected_revision: int,
     ) -> dict[str, Any]:
-        with self._engine.begin() as connection:
+        with self._runtime_begin() as connection:
             row = connection.execute(
                 text(
                     "SELECT draft_markdown,revision FROM nlp_knowledge_pages "
@@ -832,7 +981,7 @@ class MySQLGatewayRepository:
         pages: list[dict[str, Any]],
         assets: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        with self._engine.begin() as connection:
+        with self._runtime_begin() as connection:
             currents: dict[str, dict[str, Any] | None] = {}
             for page in pages:
                 point_id = str(page["knowledge_point_id"])
@@ -927,4 +1076,7 @@ class MySQLGatewayRepository:
     def select_guided_blueprint(self, *, workspace_id: str, topic_id: str):
         return next((item for item in self.get_teaching_catalog(workspace_id)["catalog"]["guided_blueprints"] if item.get("topic_id") == topic_id and item.get("status", "enabled") == "enabled"), None)
 
-    def close(self) -> None: self._engine.dispose()
+    def close(self) -> None:
+        if self.quota_service is not None:
+            self.quota_service.close()
+        self._engine.dispose()

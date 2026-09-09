@@ -41,11 +41,11 @@ services:
       timeout: 3s
       retries: 10
 
-  # Alembic, rather than application code, owns all schema creation and upgrades.
+  # One-shot deployment bootstrap owns schema upgrades and built-in pricing.
   nova-migrate:
     image: ${NOVA_IMAGE_REF:-nova-agent:local}
     pull_policy: ${NOVA_PULL_POLICY:-build}
-    command: [".venv/bin/python", "-m", "alembic", "upgrade", "head"]
+    command: [".venv/bin/python", "main.py", "bootstrap-db"]
     env_file:
       - ${NOVA_ENV_FILE:-.env}
     restart: "no"
@@ -131,7 +131,9 @@ services:
       NLP_AGENT_MONITOR_HOST: 0.0.0.0
       NLP_AGENT_MONITOR_PORT: 8766
     ports:
-      - "${NOVA_MONITOR_HOST_PORT:-8766}:8766"
+      # Bind to loopback by default.  Set NOVA_MONITOR_BIND_ADDRESS explicitly
+      # when an internal reverse proxy/VPN should expose the monitor.
+      - "${NOVA_MONITOR_BIND_ADDRESS:-127.0.0.1}:${NOVA_MONITOR_HOST_PORT:-8766}:8766"
     restart: unless-stopped
     profiles: ["monitor"]
     depends_on:

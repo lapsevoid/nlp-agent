@@ -140,10 +140,17 @@ notepad .env
 docker compose up -d --build
 ```
 
-Compose 会先启动 MySQL 8.4，再运行一次 `nova-migrate` 执行 Alembic；只有迁移
-成功后 Web、Worker 和 Monitor 才会启动。业务表由 Alembic 创建，应用进程不会
-运行时建表。MySQL 数据保存在 Docker 卷 `mysql-data`，Redis 只保存队列与实时
-传输状态。
+Compose 会先启动 MySQL 8.4，再由 `nova-migrate` 运行 `python main.py bootstrap-db`。
+该引导先执行 Alembic，再幂等安装内置定价并检查生产路由覆盖；只有全部必需步骤
+成功后 Web、Worker 和 Monitor 才会启动。业务表仍只由 Alembic 创建，应用进程
+不会运行时建表。MySQL 数据保存在 Docker 卷 `mysql-data`，Redis 只保存队列与
+实时传输状态。
+
+本地数据库升级使用同一入口：
+
+```powershell
+& .\.venv\Scripts\python.exe main.py bootstrap-db
+```
 
 3. 如需启动运行监控：
 
@@ -151,8 +158,9 @@ Compose 会先启动 MySQL 8.4，再运行一次 `nova-migrate` 执行 Alembic�
 docker compose --profile monitor up -d
 ```
 
-主服务访问地址为 `http://服务器IP:8765`，监控地址为
-`http://服务器IP:8766`。数据会分别保存在 Compose 项目作用域内的
+主服务访问地址为 `http://服务器IP:8765`。监控端口默认只绑定本机，地址为
+`http://127.0.0.1:8766`；如需通过内网反向代理或 VPN 暴露，显式设置
+`NOVA_MONITOR_BIND_ADDRESS`。数据会分别保存在 Compose 项目作用域内的
 `mysql-data` 和 `redis-data` 卷中，更新镜像不会丢失会话数据。测试和生产必须
 使用不同的 Compose 项目名、数据库、Redis、密钥和网络；监控端口只开放给内网或 VPN。
 
