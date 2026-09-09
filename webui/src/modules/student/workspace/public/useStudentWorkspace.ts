@@ -56,6 +56,7 @@ export function useStudentWorkspace() {
   const socketRef = useRef<StudentSocket | null>(null);
   const pendingRequests = useRef(new Map<string, string>());
   const inFlightTurnIds = useRef(new Set<string>());
+  const cancelledTurnIds = useRef(new Set<string>());
   const loadGenerationRef = useRef(0);
 
   const loadTurns = useTurnHistory({
@@ -76,6 +77,7 @@ export function useStudentWorkspace() {
       activeSessionRef,
       pendingRequests,
       inFlightTurnIds,
+      cancelledTurnIds,
       setMessages,
       setActiveSessionId,
       setRequestError,
@@ -84,7 +86,7 @@ export function useStudentWorkspace() {
       loadSessions,
       loadTurns,
     }),
-    [activeSessionRef, inFlightTurnIds, loadSessions, loadTurns, persistPreferences, setActiveSessionId, socketRef, updateSessionMeta],
+    [activeSessionRef, cancelledTurnIds, inFlightTurnIds, loadSessions, loadTurns, persistPreferences, setActiveSessionId, socketRef, updateSessionMeta],
   );
 
   useWorkspaceBootstrap({
@@ -116,6 +118,7 @@ export function useStudentWorkspace() {
 
   useEffect(() => {
     loadGenerationRef.current += 1;
+    cancelledTurnIds.current.clear();
     socketRef.current?.setSession(activeSessionId);
     queueMicrotask(() => {
       if (activeSessionId && freshSessionIdsRef.current.delete(activeSessionId)) {
@@ -133,6 +136,7 @@ export function useStudentWorkspace() {
     socketRef,
     pendingRequests,
     inFlightTurnIds,
+    cancelledTurnIds,
     preferences,
     settings,
     messages,
@@ -142,7 +146,8 @@ export function useStudentWorkspace() {
     setRequestError,
   });
   const activeMeta = activeSessionId ? preferences.sessions[activeSessionId] ?? {} : {};
-  const isRunning = messages.some((message) => message.role === "assistant" && ["accepted", "running"].includes(message.status ?? ""));
+  const isCancelling = messages.some((message) => message.role === "assistant" && message.status === "cancelling");
+  const isRunning = messages.some((message) => message.role === "assistant" && ["accepted", "running", "cancelling"].includes(message.status ?? ""));
 
 const authenticate = useCallback(async (username: string, password: string) => {
   const result = globalAuth
@@ -200,6 +205,7 @@ const authenticate = useCallback(async (username: string, password: string) => {
     socketStatus,
     loadingMessages,
     isRunning,
+    isCancelling,
     startNewChat,
     ensureSession: createBackendSession,
     send,

@@ -11,7 +11,11 @@ from core.rbac import Permission, authorization_service
 from core.rbac import required_permission_for_high_risk_tool
 from core.identity import AuthenticatedPrincipal
 from server.rbac.service import rbac_service
-from server.application.turn_reliability import TurnReliabilityService
+from server.application.turn_reliability import (
+    CancelledTurnClaim,
+    TurnCancellationRequested,
+    TurnReliabilityService,
+)
 
 
 @dataclass(frozen=True)
@@ -38,6 +42,8 @@ class TurnExecutionContext:
 class FencedTurnExecutor:
     """Claim, heartbeat and execute one Turn without exposing lease mechanics."""
 
+    _CANCEL_DRAIN_TIMEOUT_S = 0.25
+
     def __init__(
         self,
         unit_of_work_factory: Any,
@@ -63,6 +69,9 @@ class FencedTurnExecutor:
                 user_id=task.context.user_id,
                 workspace_id=task.context.workspace_id,
             )
+            if isinstance(generation, CancelledTurnClaim):
+                await unit_of_work.commit()
+                raise TurnCancellationRequested(task.turn_id)
             if generation is None:
                 return False
             if task.authorization is None:
@@ -121,8 +130,32 @@ class FencedTurnExecutor:
         finally:
             if not execution.done():
                 execution.cancel()
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(execution), timeout=self._CANCEL_DRAIN_TIMEOUT_S
+                    )
+                except asyncio.TimeoutError:
+                    execution.add_done_callback(self._consume_task)
+                except asyncio.CancelledError:
+                    if not execution.done():
+                        execution.add_done_callback(self._consume_task)
+                else:
+                    self._consume_task(execution)
+            else:
+                self._consume_task(execution)
             heartbeat.cancel()
-            await asyncio.gather(execution, heartbeat, return_exceptions=True)
+            await asyncio.gather(heartbeat, return_exceptions=True)
+
+    @staticmethod
+    def _consume_task(task: asyncio.Future[Any]) -> None:
+        if task.cancelled():
+            return
+        try:
+            task.exception()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            return
 
     async def _heartbeat(self, turn_id: str, generation: int) -> None:
         while True:
@@ -137,4 +170,4 @@ class FencedTurnExecutor:
                 )
                 await unit_of_work.commit()
                 if not active:
-                    raise PermissionError("turn cancellation requested")
+                    raise TurnCancellationRequested(turn_id)

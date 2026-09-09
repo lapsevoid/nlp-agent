@@ -6,6 +6,8 @@ export type TurnStatus =
   | "cancelled"
   | "interrupted";
 
+export type ChatMessageStatus = TurnStatus | "cancelling";
+
 export interface AuthSession {
   user_id: string;
   username?: string;
@@ -472,7 +474,7 @@ export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
   reasoning?: string;
-  status?: TurnStatus;
+  status?: ChatMessageStatus;
   activities?: ActivityItem[];
   attachments?: ChatAttachment[];
   createdAt: string;

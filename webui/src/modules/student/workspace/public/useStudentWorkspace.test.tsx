@@ -16,16 +16,19 @@ const {
   ensureAuthMock,
   getSettingsMock,
   createSessionMock,
+  cancelTurnMock,
   deleteSessionMock,
   sendChatMock,
   renameSessionMock,
   socketConnectMock,
   socketCloseMock,
   socketEventHandlerRef,
+  socketCancelMock,
 } = vi.hoisted(() => ({
   ensureAuthMock: vi.fn(),
   getSettingsMock: vi.fn(),
   createSessionMock: vi.fn(),
+  cancelTurnMock: vi.fn(),
   deleteSessionMock: vi.fn(async () => undefined),
   sendChatMock: vi.fn(),
   renameSessionMock: vi.fn(),
@@ -34,6 +37,7 @@ const {
   socketEventHandlerRef: {
     current: undefined as ((event: ServerEvent) => void) | undefined,
   },
+  socketCancelMock: vi.fn(),
 }));
 
 vi.mock("@/platform/http/api", () => ({
@@ -43,6 +47,7 @@ vi.mock("@/platform/http/api", () => ({
     listSessions: vi.fn(async () => ({ items: [] })),
     getSettings: getSettingsMock,
     createSession: createSessionMock,
+    cancelTurn: cancelTurnMock,
     deleteSession: deleteSessionMock,
     renameSession: renameSessionMock,
     login: vi.fn(),
@@ -61,6 +66,7 @@ vi.mock("@/platform/realtime/client", () => ({
     close() { socketCloseMock(); }
     setSession() {}
     sendChat(...args: unknown[]) { sendChatMock(...args); }
+    cancel(...args: unknown[]) { socketCancelMock(...args); }
   },
 }));
 
@@ -88,8 +94,11 @@ describe("useStudentWorkspace settings", () => {
     vi.mocked(api.logout).mockReset();
     vi.mocked(api.listSessions).mockResolvedValue({ items: [] });
     createSessionMock.mockClear();
+    cancelTurnMock.mockReset();
+    cancelTurnMock.mockResolvedValue({ status: "cancelled" });
     deleteSessionMock.mockClear();
     sendChatMock.mockClear();
+    socketCancelMock.mockClear();
     renameSessionMock.mockClear();
   });
 
@@ -357,6 +366,135 @@ describe("useStudentWorkspace settings", () => {
     expect(sendChatMock).toHaveBeenCalledTimes(1);
     expect(sendChatMock.mock.calls[0][0]).toBe("session-fresh");
   });
+
+  it("marks a running turn as cancelling immediately and uses the HTTP cancellation path", async () => {
+    const { result } = renderHook(() => useStudentWorkspace());
+    await waitFor(() => expect(result.current.bootStatus).toBe("ready"));
+
+    await act(async () => { await result.current.send("请解释注意力机制"); });
+    const requestId = sendChatMock.mock.calls[0][2] as string;
+    act(() => socketEventHandlerRef.current?.({
+      v: "1",
+      type: "command.ack",
+      request_id: requestId,
+      session_id: "session-new",
+      turn_id: "turn-1",
+      timestamp: "2026-09-09T00:00:00Z",
+      payload: { command: "chat.send" },
+    }));
+    act(() => socketEventHandlerRef.current?.({
+      v: "1",
+      type: "chat.started",
+      session_id: "session-new",
+      turn_id: "turn-1",
+      timestamp: "2026-09-09T00:00:01Z",
+      payload: {},
+    }));
+    expect(result.current.isRunning).toBe(true);
+
+    act(() => result.current.cancel());
+
+    expect(cancelTurnMock).toHaveBeenCalledWith("turn-1");
+    expect(result.current.isCancelling).toBe(true);
+    expect(socketCancelMock).not.toHaveBeenCalled();
+  });
+
+  it("settles the message from a successful HTTP cancellation response", async () => {
+    const { result } = renderHook(() => useStudentWorkspace());
+    await waitFor(() => expect(result.current.bootStatus).toBe("ready"));
+
+    await act(async () => { await result.current.send("请停止这个回答"); });
+    const requestId = sendChatMock.mock.calls[0][2] as string;
+    act(() => socketEventHandlerRef.current?.({
+      v: "1",
+      type: "command.ack",
+      request_id: requestId,
+      session_id: "session-new",
+      turn_id: "turn-http-cancel",
+      timestamp: "2026-09-09T00:00:00Z",
+      payload: { command: "chat.send" },
+    }));
+    act(() => socketEventHandlerRef.current?.({
+      v: "1",
+      type: "chat.started",
+      session_id: "session-new",
+      turn_id: "turn-http-cancel",
+      timestamp: "2026-09-09T00:00:01Z",
+      payload: {},
+    }));
+
+    await act(async () => {
+      result.current.cancel();
+      await Promise.resolve();
+    });
+
+    expect(result.current.isCancelling).toBe(false);
+    expect(result.current.messages.find((message) => message.turnId === "turn-http-cancel" && message.role === "assistant")?.status).toBe("cancelled");
+    expect(socketCancelMock).not.toHaveBeenCalled();
+  });
+
+  it("sends only one cancellation request for a rapid double click", async () => {
+    const { result } = renderHook(() => useStudentWorkspace());
+    await waitFor(() => expect(result.current.bootStatus).toBe("ready"));
+
+    await act(async () => { await result.current.send("请停止这个回答"); });
+    const requestId = sendChatMock.mock.calls[0][2] as string;
+    act(() => socketEventHandlerRef.current?.({
+      v: "1",
+      type: "command.ack",
+      request_id: requestId,
+      session_id: "session-new",
+      turn_id: "turn-double-click",
+      timestamp: "2026-09-09T00:00:00Z",
+      payload: { command: "chat.send" },
+    }));
+    act(() => socketEventHandlerRef.current?.({
+      v: "1",
+      type: "chat.started",
+      session_id: "session-new",
+      turn_id: "turn-double-click",
+      timestamp: "2026-09-09T00:00:01Z",
+      payload: {},
+    }));
+
+    act(() => {
+      result.current.cancel();
+      result.current.cancel();
+    });
+
+    expect(cancelTurnMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls back to the WebSocket cancellation path when HTTP cancellation fails", async () => {
+    cancelTurnMock.mockRejectedValueOnce(new Error("offline"));
+    const { result } = renderHook(() => useStudentWorkspace());
+    await waitFor(() => expect(result.current.bootStatus).toBe("ready"));
+
+    await act(async () => { await result.current.send("请停止这个回答"); });
+    const requestId = sendChatMock.mock.calls[0][2] as string;
+    act(() => socketEventHandlerRef.current?.({
+      v: "1",
+      type: "command.ack",
+      request_id: requestId,
+      session_id: "session-new",
+      turn_id: "turn-ws-fallback",
+      timestamp: "2026-09-09T00:00:00Z",
+      payload: { command: "chat.send" },
+    }));
+    act(() => socketEventHandlerRef.current?.({
+      v: "1",
+      type: "chat.started",
+      session_id: "session-new",
+      turn_id: "turn-ws-fallback",
+      timestamp: "2026-09-09T00:00:01Z",
+      payload: {},
+    }));
+
+    act(() => result.current.cancel());
+    await waitFor(() => expect(socketCancelMock).toHaveBeenCalledWith("turn-ws-fallback"));
+    expect(result.current.isCancelling).toBe(true);
+  });
+
   it("preserves the student WebSocket while expired authentication is restored", async () => {
   ensureAuthMock.mockResolvedValue({
     user_id: "user-1",
