@@ -45,10 +45,10 @@ function buildSelectionPrompt(page: LearningBookPage, text: string, heading: str
   ].join("\n");
 }
 
-function buildCodePrompt(page: LearningBookPage, code: string, language: string, heading: string | undefined): string {
+function buildCodePrompt(page: LearningBookPage, code: string, language: string, heading: string | undefined, question: string): string {
   const maxCodeLength = 6000;
   const excerpt = code.length > maxCodeLength ? `${code.slice(0, maxCodeLength)}\n……（代码过长，已截断）` : code;
-  return [`我正在阅读「${page.topic_name} / ${page.title}」${heading ? `的「${heading}」小节` : ""}中的代码示例。`, "", `语言：${language}`, "", "```" + language, excerpt, "```", "", "请解释这段代码的作用、关键步骤，以及它在本节知识点中的意义。"].join("\n");
+  return [`我正在阅读「${page.topic_name} / ${page.title}」${heading ? `的「${heading}」小节` : ""}中的代码示例。`, "", `语言：${language}`, "", "```" + language, excerpt, "```", "", "我的问题：", question].join("\n");
 }
 
 function isExcludedSelectionNode(node: Node | null): boolean {
@@ -188,11 +188,11 @@ export function KnowledgeBookPanel({ workspaceId, onAskNova, onOpenInSandbox }: 
   const codeActions = useMemo<MarkdownCodeActions>(() => {
     const actions: MarkdownCodeActions = {};
     if (canAskNova) {
-      actions.onAskNova = (code, language) => {
+      actions.onAskNova = (code, language, question) => {
         const currentPage = visiblePageRef.current;
         if (!currentPage) return;
         const heading = headingIndexRef.current.headings.find((item) => item.id === activeHeadingIdRef.current)?.text;
-        onAskNovaRef.current?.(buildCodePrompt(currentPage, code, language, heading));
+        onAskNovaRef.current?.(buildCodePrompt(currentPage, code, language, heading, question));
       };
     }
     if (canOpenInSandbox) {

@@ -101,6 +101,26 @@ describe("KnowledgeBookPanel", () => {
     expect(screen.queryByRole("button", { name: "向 Nova 提问" })).not.toBeInTheDocument();
   });
 
+  it("sends a custom prompt with the lesson code context", async () => {
+    const user = userEvent.setup();
+    const askNova = vi.fn();
+    vi.mocked(api.getLearningBookPage).mockResolvedValue({
+      page: {
+        ...page,
+        content_markdown: "## 示例\n\n```python\nscores = torch.softmax(logits, dim=-1)\n```",
+      },
+    });
+
+    render(<KnowledgeBookPanel workspaceId="workspace-1" onAskNova={askNova} />);
+
+    await user.click(await screen.findByRole("button", { name: "询问 Nova" }));
+    await user.type(screen.getByRole("textbox", { name: "询问 Nova" }), "这里的 scores 是什么？");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(askNova).toHaveBeenCalledOnce();
+    expect(askNova).toHaveBeenCalledWith(expect.any(String));
+  });
+
   it("hands Python lesson code to the sandbox callback", async () => {
     const user = userEvent.setup();
     const openInSandbox = vi.fn();

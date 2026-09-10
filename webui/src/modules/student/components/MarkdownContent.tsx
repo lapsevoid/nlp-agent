@@ -22,7 +22,7 @@ const LazyCode = lazy(async () => {
 });
 
 export interface MarkdownCodeActions {
-  onAskNova?: (code: string, language: string) => void;
+  onAskNova?: (code: string, language: string, prompt: string) => void;
   onOpenInSandbox?: (code: string, language: string) => void;
 }
 
@@ -45,8 +45,11 @@ async function copyText(text: string): Promise<void> {
 
 function LessonCodeBlock({ code, language, actions, streaming = false }: { code: string; language: string; actions?: MarkdownCodeActions; streaming?: boolean }) {
   const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "error">("idle");
+  const [askOpen, setAskOpen] = useState(false);
+  const [askPrompt, setAskPrompt] = useState("");
   const [codeReady, setCodeReady] = useState(() => typeof IntersectionObserver === "undefined");
   const codeRef = useRef<HTMLDivElement>(null);
+  const askInputRef = useRef<HTMLTextAreaElement>(null);
   useEffect(() => {
     if (copyStatus === "idle") return undefined;
     const timer = window.setTimeout(() => setCopyStatus("idle"), 1800);
@@ -78,6 +81,10 @@ function LessonCodeBlock({ code, language, actions, streaming = false }: { code:
     return () => observer.disconnect();
   }, [codeReady]);
 
+  useEffect(() => {
+    if (askOpen) askInputRef.current?.focus();
+  }, [askOpen]);
+
   const copy = async () => {
     try {
       await copyText(code);
@@ -89,13 +96,21 @@ function LessonCodeBlock({ code, language, actions, streaming = false }: { code:
 
   const supportsLessonActions = /^(?:python|pytorch|py)$/i.test(language);
   const lessonActions = supportsLessonActions ? actions : undefined;
+  const submitAsk = (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const prompt = askPrompt.trim();
+    if (!prompt) return;
+    lessonActions?.onAskNova?.(code, language, prompt);
+    setAskPrompt("");
+    setAskOpen(false);
+  };
   return <div ref={codeRef} className="code-shell">
     <div className="code-toolbar">
       <div className="code-label">{language}</div>
       <div className="code-actions">
         <button className="code-copy-button" type="button" aria-label={`${copyStatus === "copied" ? "已复制" : "复制"} ${language} 代码`} onClick={() => void copy()}>{copyStatus === "copied" ? <Check size={14} /> : <Copy size={14} />}<span className="code-action-text">{copyStatus === "copied" ? "已复制" : "复制"}</span></button>
         {lessonActions && <>
-        {lessonActions.onAskNova && <button type="button" aria-label="询问 Nova" onClick={() => lessonActions.onAskNova?.(code, language)}><MessageCircleQuestion size={13} />询问 Nova</button>}
+        {lessonActions.onAskNova && <button type="button" aria-label="询问 Nova" aria-expanded={askOpen} onClick={() => setAskOpen((open) => !open)}><MessageCircleQuestion size={13} />询问 Nova</button>}
         {lessonActions.onOpenInSandbox && <button type="button" aria-label="在沙箱中打开" onClick={() => lessonActions.onOpenInSandbox?.(code, language)}><ExternalLink size={13} />在沙箱中打开</button>}
         </>}
         <span className="sr-only" aria-live="polite">{copyStatus === "copied" ? `已复制 ${language} 代码` : copyStatus === "error" ? `复制 ${language} 代码失败` : ""}</span>
@@ -103,6 +118,10 @@ function LessonCodeBlock({ code, language, actions, streaming = false }: { code:
       </div>
     </div>
     {codeReady && !streaming ? <Suspense fallback={<pre><code>{code}</code></pre>}><LazyCode language={language} code={code} /></Suspense> : <pre className="code-lazy-fallback"><code>{code}</code></pre>}
+    {lessonActions?.onAskNova && askOpen && <form className="code-ask-composer" aria-label="询问 Nova" onSubmit={submitAsk}>
+      <textarea ref={askInputRef} aria-label="询问 Nova" rows={2} value={askPrompt} onChange={(event) => setAskPrompt(event.target.value)} placeholder="输入你想问 Nova 的问题…" />
+      <button type="submit" disabled={!askPrompt.trim()}>发送</button>
+    </form>}
   </div>;
 }
 

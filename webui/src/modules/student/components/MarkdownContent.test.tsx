@@ -161,7 +161,7 @@ describe("MarkdownContent LaTeX delimiters", () => {
     expect(screen.getByRole("heading", { name: "10.3 注意力评分函数" })).toHaveAttribute("data-knowledge-book-heading-id", "10.3");
   });
 
-  it("exposes copy and ask-Nova actions only when lesson code actions are enabled", async () => {
+  it("opens an inline Nova composer and sends the custom prompt with the code", async () => {
     const user = userEvent.setup();
     const askNova = vi.fn();
     const openInSandbox = vi.fn();
@@ -173,7 +173,13 @@ describe("MarkdownContent LaTeX delimiters", () => {
     await user.click(screen.getByRole("button", { name: "复制 python 代码" }));
     expect(await screen.findByRole("button", { name: "已复制 python 代码" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "询问 Nova" }));
-    expect(askNova).toHaveBeenCalledWith("print('hello')", "python");
+    expect(askNova).not.toHaveBeenCalled();
+    const promptInput = screen.getByRole("textbox", { name: "询问 Nova" });
+    expect(promptInput).toBeVisible();
+    await user.type(promptInput, "为什么这里使用 softmax？");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    expect(askNova).toHaveBeenCalledWith("print('hello')", "python", "为什么这里使用 softmax？");
+    expect(screen.queryByRole("textbox", { name: "询问 Nova" })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "在沙箱中打开" }));
     expect(openInSandbox).toHaveBeenCalledWith("print('hello')", "python");
   });
