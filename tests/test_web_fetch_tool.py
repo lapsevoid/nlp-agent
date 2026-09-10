@@ -178,6 +178,51 @@ async def test_fetch_rejects_redirect_to_blocked_host(monkeypatch):
     assert excinfo.value.code == "blocked_address"
 
 
+async def test_fetch_uses_configured_proxy_without_local_destination_dns(monkeypatch):
+    async def resolver(*_args, **_kwargs):
+        raise AssertionError("a trusted proxy must not depend on local destination DNS")
+
+    monkeypatch.setattr(fetch_module, "resolve_and_check", resolver)
+
+    def handler(request):
+        return httpx.Response(
+            200, headers={"content-type": "text/plain"}, text="proxied"
+        )
+
+    service = WebFetchService(
+        WebToolsConfig(proxy_url="http://proxy.example:8080"),
+        transport=httpx.MockTransport(handler),
+        cache=TTLCache(0),
+    )
+
+    result = await service.fetch(WebFetchInput(url="https://example.com/"))
+
+    assert result.status_code == 200
+    assert "proxied" in result.text
+
+
+async def test_fetch_configured_proxy_still_rejects_literal_loopback(monkeypatch):
+    async def resolver(*_args, **_kwargs):
+        return ["93.184.216.34"]
+
+    monkeypatch.setattr(fetch_module, "resolve_and_check", resolver)
+
+    service = WebFetchService(
+        WebToolsConfig(proxy_url="http://proxy.example:8080"),
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200, headers={"content-type": "text/plain"}, text="unsafe"
+            )
+        ),
+        cache=TTLCache(0),
+    )
+
+    with pytest.raises(WebAccessError) as excinfo:
+        await service.fetch(WebFetchInput(url="http://127.0.0.1/secret"))
+
+    assert excinfo.value.code == "blocked_address"
+
+
 async def test_fetch_limits_redirect_hops(monkeypatch):
     _allow_dns(monkeypatch)
 
