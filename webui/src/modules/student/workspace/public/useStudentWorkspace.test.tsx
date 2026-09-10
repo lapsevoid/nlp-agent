@@ -1,4 +1,4 @@
-import { act, renderHook, waitFor } from "@testing-library/react";
+import { act, render, renderHook, waitFor } from "@testing-library/react";
 import type { ServerEvent, TurnRecord } from "@/shared/types";
 import { useStudentWorkspace } from "./useStudentWorkspace";
 import { api, AUTH_EXPIRED_EVENT } from "@/platform/http/api";
@@ -360,6 +360,85 @@ describe("useStudentWorkspace settings", () => {
 
     await act(async () => { resolveSessionB({ items: [turn("session-b", "会话 B 内容")] }); });
     await waitFor(() => expect(result.current.messages.some((message) => message.content === "会话 B 内容")).toBe(true));
+  });
+
+  it("never renders the previous conversation under a newly selected session", async () => {
+    const turn = (sessionId: string, content: string): TurnRecord => ({
+      turn_id: `${sessionId}-turn`,
+      session_id: sessionId,
+      status: "completed",
+      input_text: `${sessionId} question`,
+      final_text: content,
+      error_kind: null,
+      error_message: null,
+      created_at: "2026-09-10T00:00:00Z",
+      started_at: "2026-09-10T00:00:01Z",
+      completed_at: "2026-09-10T00:00:02Z",
+    });
+    vi.mocked(api.listSessions).mockResolvedValue({ items: [
+      { session_id: "session-a", user_id: "user", workspace_id: "default", channel: "web" },
+      { session_id: "session-b", user_id: "user", workspace_id: "default", channel: "web" },
+    ] });
+    let resolveSessionB!: (response: { items: TurnRecord[] }) => void;
+    listTurnsMock.mockImplementation(async (sessionId: string) => {
+      if (sessionId === "session-a") return { items: [turn(sessionId, "会话 A 内容")] };
+      return new Promise((resolve) => { resolveSessionB = resolve; });
+    });
+    const snapshots: Array<{ activeSessionId: string | null; messages: string[] }> = [];
+    let workspace!: ReturnType<typeof useStudentWorkspace>;
+    function Probe() {
+      workspace = useStudentWorkspace();
+      snapshots.push({
+        activeSessionId: workspace.activeSessionId,
+        messages: workspace.messages.map((message) => message.content),
+      });
+      return null;
+    }
+    const view = render(<Probe />);
+    await waitFor(() => expect(workspace.bootStatus).toBe("ready"));
+
+    await act(async () => { workspace.selectSession("session-a"); });
+    await waitFor(() => expect(workspace.messages.some((message) => message.content === "会话 A 内容")).toBe(true));
+    snapshots.length = 0;
+
+    await act(async () => {
+      workspace.selectSession("session-b");
+      await Promise.resolve();
+    });
+
+    expect(snapshots).not.toContainEqual(expect.objectContaining({
+      activeSessionId: "session-b",
+      messages: expect.arrayContaining(["会话 A 内容"]),
+    }));
+
+    await act(async () => { resolveSessionB({ items: [turn("session-b", "会话 B 内容")] }); });
+    view.unmount();
+  });
+
+  it("clears conversation state when authentication changes to another user", async () => {
+    const userOne = {
+      user_id: "user-1",
+      csrf_token: "csrf-1",
+      workspace_ids: ["default"],
+      roles: ["student"],
+      permissions: [],
+      expires_at: 1_900_000_000,
+    };
+    const userTwo = { ...userOne, user_id: "user-2", csrf_token: "csrf-2" };
+    ensureAuthMock.mockResolvedValue(userOne);
+    vi.mocked(api.login).mockResolvedValue(userTwo);
+    const wrapper = ({ children }: { children: React.ReactNode }) => <AuthProvider>{children}</AuthProvider>;
+    const { result } = renderHook(() => useStudentWorkspace(), { wrapper });
+    await waitFor(() => expect(result.current.bootStatus).toBe("ready"));
+
+    await act(async () => { await result.current.send("用户一的私密内容"); });
+    expect(result.current.messages.some((message) => message.content === "用户一的私密内容")).toBe(true);
+
+    await act(async () => { await result.current.authenticate("user-2", "password"); });
+    await waitFor(() => expect(result.current.authSession?.user_id).toBe("user-2"));
+
+    expect(result.current.activeSessionId).toBeNull();
+    expect(result.current.messages).toEqual([]);
   });
 
   it("creates the backend session in the resolved workspace only on the first message", async () => {

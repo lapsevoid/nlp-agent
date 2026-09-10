@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "@/platform/http/api";
 import { useOptionalAuth } from "@/platform/auth/AuthContext";
@@ -36,12 +36,12 @@ export function useStudentWorkspace() {
     activeSessionId,
     composerRevision,
     setActiveSessionId,
-    selectSession,
+    selectSession: selectSessionInternal,
     activeSessionRef,
     freshSessionIdsRef,
     loadSessions,
     createBackendSession,
-    startNewChat,
+    startNewChat: startNewChatInternal,
     deleteSession,
     renameSessionTitle,
   } = useSessionController({ preferences, persistPreferences, updateSessionMeta, onRequestError: setRequestError });
@@ -69,6 +69,40 @@ export function useStudentWorkspace() {
     setLoadingMessages,
     updateSessionMeta,
   });
+  const selectSession = useCallback((sessionId: string) => {
+    if (activeSessionRef.current === sessionId) return;
+    setMessages([]);
+    setLoadingMessages(true);
+    selectSessionInternal(sessionId);
+  }, [activeSessionRef, selectSessionInternal]);
+  const startNewChat = useCallback(() => {
+    setMessages([]);
+    setLoadingMessages(false);
+    startNewChatInternal();
+  }, [startNewChatInternal]);
+  const authenticatedUserId = globalAuth !== null
+    ? globalAuth.user?.user_id ?? null
+    : authSession?.user_id ?? null;
+  const previousAuthenticatedUserIdRef = useRef<string | null>(null);
+  useLayoutEffect(() => {
+    const previousUserId = previousAuthenticatedUserIdRef.current;
+    if (previousUserId !== null && previousUserId !== authenticatedUserId) {
+      loadGenerationRef.current += 1;
+      pendingRequests.current.clear();
+      inFlightTurnIds.current.clear();
+      cancelledTurnIds.current.clear();
+      freshSessionIdsRef.current.clear();
+      socketRef.current?.close();
+      socketRef.current = null;
+      startNewChat();
+      setSessions([]);
+      setAuthSession(null);
+      setRequestError("");
+      setError("");
+      setBootStatus("loading");
+    }
+    previousAuthenticatedUserIdRef.current = authenticatedUserId;
+  }, [authenticatedUserId, cancelledTurnIds, freshSessionIdsRef, inFlightTurnIds, pendingRequests, setSessions, startNewChat]);
   const handleEvent = useMemo(
     // The factory stores refs for the socket callback; it does not read them during render.
     // eslint-disable-next-line react-hooks/refs
