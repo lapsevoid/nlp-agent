@@ -23,6 +23,8 @@ class FakeRedis:
         self.claim_failures = 0
         self.get_results = []
         self.read_blocks = []
+        self.autoclaimed = []
+        self.autoclaim_requests = []
 
     async def xadd(self, stream, fields):
         self.streams.append((stream, fields))
@@ -60,6 +62,15 @@ class FakeRedis:
     async def xreadgroup(self, group, consumer, streams, count, block):
         self.read_blocks.append(block)
         return self.reads.pop(0) if self.reads else []
+
+    async def xautoclaim(
+        self, stream, group, consumer, min_idle_time, start_id, **options
+    ):
+        self.autoclaim_requests.append(
+            (stream, group, consumer, min_idle_time, start_id, options)
+        )
+        messages = self.autoclaimed.pop(0) if self.autoclaimed else []
+        return ("0-0", messages)
 
     async def xack(self, stream, group, message_id):
         self.acks.append((stream, group, message_id))
@@ -159,6 +170,46 @@ async def test_worker_executes_stream_task_and_acknowledges_it():
     assert processed == 1
     assert executed == [task]
     assert redis.acks == [("turns", "workers", "1-0")]
+
+
+async def test_mysql_fenced_worker_reclaims_and_acks_stale_terminal_delivery():
+    redis = FakeRedis()
+    config = RedisTransportConfig(
+        task_stream="turns", task_group="workers", reclaim_idle_ms=30
+    )
+    task = TurnTask(
+        context=SessionContext(session_id="session-1"),
+        turn_id="turn-stale",
+        content="hello",
+        learning_context=None,
+        learning_progress=None,
+        exercise_state=None,
+        teaching_materials=TeachingMaterials(),
+        guided_session_id=None,
+        exercise_session_id=None,
+    )
+    redis.autoclaimed.append(
+        [("9-0", {"payload": TurnTaskCodec.dumps(task)})]
+    )
+    executed = []
+    worker = RedisWorkerRuntime.for_fenced_mysql(
+        redis,
+        config,
+        executed.append,
+        consumer_name="worker-new",
+        is_terminal=lambda _task: True,
+    )
+
+    assert await worker.run_once(block_ms=0) == 1
+    assert executed == []
+    assert redis.acks == [("turns", "workers", "9-0")]
+    assert redis.autoclaim_requests[0][:5] == (
+        "turns",
+        "workers",
+        "worker-new",
+        30,
+        "0-0",
+    )
 
 
 @pytest.mark.asyncio

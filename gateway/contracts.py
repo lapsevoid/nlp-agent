@@ -27,6 +27,7 @@ class TurnStatus(str, Enum):
 class GatewayEventType(str, Enum):
     TURN_ACCEPTED = "turn.accepted"
     TURN_STARTED = "turn.started"
+    TURN_HANDOVER = "turn.handover"
     TURN_COMPLETED = "turn.completed"
     TURN_FAILED = "turn.failed"
     TURN_CANCELLED = "turn.cancelled"
