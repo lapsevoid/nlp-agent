@@ -135,6 +135,21 @@ class FinishThenHangModel(FakeStreamModel):
         await asyncio.Event().wait()
 
 
+class FinishThenCancellationHangsModel(FakeStreamModel):
+    async def astream(self, _input, config=None, **_kwargs):
+        self.calls += 1
+        yield AIMessageChunk(content="partial")
+        yield AIMessageChunk(
+            content="", response_metadata={"finish_reason": "stop"}
+        )
+        try:
+            await asyncio.Event().wait()
+        finally:
+            # Simulate a provider transport that swallows cancellation while
+            # closing its response stream.
+            await asyncio.Event().wait()
+
+
 class FinishThenUsageModel(FakeStreamModel):
     async def astream(self, _input, config=None, **_kwargs):
         self.calls += 1
@@ -641,6 +656,29 @@ async def test_stream_ends_when_provider_emits_finish_reason(monkeypatch):
         return [chunk async for chunk in runtime.astream([HumanMessage(content="hello")])]
 
     chunks = await asyncio.wait_for(consume(), timeout=1.5)
+    assert [chunk.content for chunk in chunks] == ["partial", ""]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider_name", ["qwen", "deepseek", "kimi", "glm"])
+async def test_stream_finish_drain_is_bounded_for_all_provider_families(provider_name):
+    runtime = ResilientChatModel(
+        [
+            ModelCandidate(
+                preset_name=provider_name,
+                provider_name=provider_name,
+                model_name=provider_name,
+                definition=definition(provider_name),
+                preset=preset(),
+                model=FinishThenCancellationHangsModel([]),
+            )
+        ]
+    )
+
+    async def consume():
+        return [chunk async for chunk in runtime.astream([HumanMessage(content="hello")])]
+
+    chunks = await asyncio.wait_for(consume(), timeout=0.75)
     assert [chunk.content for chunk in chunks] == ["partial", ""]
 
 
