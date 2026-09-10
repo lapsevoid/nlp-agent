@@ -227,7 +227,9 @@ class InProcessTurnExecutor:
                 {execution}, timeout=self._turn_timeout_s
             )
         except asyncio.CancelledError:
-            await self._cancel_and_drain(task, execution)
+            # The outer executor owns the external-cancellation signal and
+            # will call cancel_turn exactly once after this cleanup returns.
+            await self._cancel_and_drain(task, execution, request_engine_cancel=False)
             raise
         if done:
             return execution.result()
@@ -235,16 +237,24 @@ class InProcessTurnExecutor:
         raise TurnExecutionTimeoutError(self._turn_timeout_s)
 
     async def _cancel_and_drain(
-        self, task: TurnTask, execution: asyncio.Task[Any]
+        self,
+        task: TurnTask,
+        execution: asyncio.Task[Any],
+        *,
+        request_engine_cancel: bool = True,
     ) -> None:
         if not execution.done():
             execution.cancel()
-        cancellation = asyncio.create_task(
-            self._engine.cancel_turn(task.context, task.turn_id),
-            name=f"turn-cancel:{task.turn_id}",
-        )
+        pending_tasks: set[asyncio.Task[Any]] = {execution}
+        if request_engine_cancel:
+            pending_tasks.add(
+                asyncio.create_task(
+                    self._engine.cancel_turn(task.context, task.turn_id),
+                    name=f"turn-cancel:{task.turn_id}",
+                )
+            )
         done, pending = await asyncio.wait(
-            {execution, cancellation}, timeout=_CANCEL_DRAIN_TIMEOUT_S
+            pending_tasks, timeout=_CANCEL_DRAIN_TIMEOUT_S
         )
         for pending_task in pending:
             pending_task.cancel()
