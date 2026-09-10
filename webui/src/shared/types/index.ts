@@ -183,6 +183,18 @@ export interface LearningBookPage {
   content_markdown: string;
   revision: number;
 }
+export interface KnowledgeBookContext {
+  workspace_id: string;
+  topic_id: string;
+  topic_name: string;
+  knowledge_point_id: string;
+  title: string;
+  heading?: string;
+  selected_text?: string;
+  code?: string;
+  language?: string;
+  content_markdown: string;
+}
 export interface TeacherBookImportPreview {
   file_name: string;
   content_markdown: string;

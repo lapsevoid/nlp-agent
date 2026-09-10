@@ -96,8 +96,14 @@ describe("KnowledgeBookPanel", () => {
 
     const askButton = await screen.findByRole("button", { name: "向 Nova 提问" });
     await user.click(askButton);
-    expect(askNova).toHaveBeenCalledWith(expect.stringContaining("词元是文本处理的基本单位。"));
-    expect(askNova).toHaveBeenCalledWith(expect.stringContaining("的「核心概念」小节"));
+    const promptInput = screen.getByRole("textbox", { name: "向 Nova 提问" });
+    expect(promptInput).toHaveAttribute("placeholder", "这是什么意思？");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    expect(askNova).toHaveBeenCalledWith("这是什么意思？", expect.objectContaining({
+      knowledge_point_id: "point-1",
+      selected_text: "词元是文本处理的基本单位。",
+      content_markdown: page.content_markdown,
+    }));
     expect(screen.queryByRole("button", { name: "向 Nova 提问" })).not.toBeInTheDocument();
   });
 
@@ -118,7 +124,12 @@ describe("KnowledgeBookPanel", () => {
     await user.click(screen.getByRole("button", { name: "发送" }));
 
     expect(askNova).toHaveBeenCalledOnce();
-    expect(askNova).toHaveBeenCalledWith(expect.any(String));
+    expect(askNova).toHaveBeenCalledWith("这里的 scores 是什么？", expect.objectContaining({
+      knowledge_point_id: "point-1",
+      code: "scores = torch.softmax(logits, dim=-1)",
+      language: "python",
+      content_markdown: expect.stringContaining("scores = torch.softmax"),
+    }));
   });
 
   it("hands Python lesson code to the sandbox callback", async () => {

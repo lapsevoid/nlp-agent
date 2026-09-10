@@ -74,6 +74,7 @@ class InProcessTurnExecutor:
         self._accepts_learning = parameter_count >= 6
         self._accepts_teaching_materials = parameter_count >= 7
         self._accepts_model_profile = "model_profile" in parameters
+        self._accepts_knowledge_book_context = "knowledge_book_context" in parameters
 
     async def run(self, task: TurnTask, execution_context: Any | None = None) -> None:
         await asyncio.to_thread(self._repository.update_turn, task.turn_id, TurnStatus.RUNNING)
@@ -308,6 +309,8 @@ class InProcessTurnExecutor:
             kwargs["teaching_materials"] = task.teaching_materials
         if self._accepts_model_profile:
             kwargs["model_profile"] = task.model_profile
+        if self._accepts_knowledge_book_context:
+            kwargs["knowledge_book_context"] = task.knowledge_book_context
         return await self._engine.run_turn(
             task.context, task.turn_id, task.content, **kwargs
         )

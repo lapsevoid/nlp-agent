@@ -1,6 +1,7 @@
 from server.tools.api.academic_search_tool import academic_search
 from server.tools.api.file_read_tool import read_local_file
 from server.tools.api.image_analyze_tool import image_analyze
+from server.tools.api.knowledge_book_tool import get_knowledge_book_context
 from server.tools.api.time_tool import get_current_time
 from server.tools.api.web_fetch_tool import web_fetch
 from server.sandbox.model_tools import MODEL_SANDBOX_TOOLS
@@ -51,6 +52,19 @@ def register_builtin_tools(catalog: ToolCatalog | None = None) -> list[str]:
             timeout_s=5,
             retry=ToolRetryPolicy(max_attempts=2),
             factory=lambda: get_current_time.model_copy(deep=True),
+        ),
+        ToolDescriptor(
+            name=get_knowledge_book_context.name,
+            description=get_knowledge_book_context.description,
+            source=ToolSource.BUILTIN,
+            provider="knowledge-book",
+            scopes=frozenset({ToolScope.COORDINATOR}),
+            capabilities=frozenset({"knowledge_book.read"}),
+            read_only=True,
+            concurrency_safe=True,
+            timeout_s=5,
+            retry=ToolRetryPolicy(max_attempts=1),
+            factory=lambda: get_knowledge_book_context.model_copy(deep=True),
         ),
         ToolDescriptor(
             name=web_fetch.name,

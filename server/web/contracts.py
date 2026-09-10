@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StringConstraints, field_validator, model_validator
-from core.learning import LearningContext
+from core.learning import KnowledgeBookContext, LearningContext
 from gateway.contracts import EvaluationContext
 
 
@@ -135,6 +135,7 @@ class SubmitChatBody(StrictModel):
     attachments: list[ChatAttachment] = Field(default_factory=list, max_length=5)
     idempotency_key: str | None = Field(default=None, max_length=128)
     learning_context: LearningContext | None = None
+    knowledge_book_context: KnowledgeBookContext | None = None
     evaluation: EvaluationContext | None = None
     model_profile: str | None = Field(
         default=None, pattern=r"^[a-z][a-z0-9_-]{0,63}$"
@@ -364,6 +365,7 @@ class ChatSendPayload(StrictModel):
     attachments: list[ChatAttachment] = Field(default_factory=list, max_length=5)
     idempotency_key: str | None = Field(default=None, max_length=128)
     learning_context: LearningContext | None = None
+    knowledge_book_context: KnowledgeBookContext | None = None
     model_profile: str | None = Field(
         default=None, pattern=r"^[a-z][a-z0-9_-]{0,63}$"
     )

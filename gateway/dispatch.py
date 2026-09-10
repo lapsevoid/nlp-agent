@@ -7,7 +7,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Protocol
 
-from core.learning import ExerciseState, LearningContext, LearningProgress, TeachingMaterials
+from core.learning import ExerciseState, KnowledgeBookContext, LearningContext, LearningProgress, TeachingMaterials
 from core.session_context import SessionContext
 
 
@@ -33,6 +33,7 @@ class TurnTask:
     teaching_materials: TeachingMaterials
     guided_session_id: str | None
     exercise_session_id: str | None
+    knowledge_book_context: KnowledgeBookContext | None = None
     model_profile: str | None = None
     authorization: ExecutionAuthorizationContext | None = None
     reservation_id: str | None = None

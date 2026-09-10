@@ -2,7 +2,7 @@ import { useCallback, type Dispatch, type MutableRefObject, type SetStateAction 
 
 import { api } from "@/platform/http/api";
 import { StudentSocket } from "@/platform/realtime/client";
-import type { ChatAttachment, ChatMessage, LearningPreferences, SessionLearningMeta, UserSettings } from "@/shared/types";
+import type { ChatAttachment, ChatMessage, KnowledgeBookContext, LearningPreferences, SessionLearningMeta, UserSettings } from "@/shared/types";
 import { createUuid } from "@/shared/utils/uuid";
 
 const CANCEL_FALLBACK_SETTLE_MS = 2_000;
@@ -36,7 +36,7 @@ export function useTurnSender({
   setMessages,
   setRequestError,
 }: TurnSenderOptions) {
-  const send = useCallback(async (content: string, attachments?: ChatAttachment[]) => {
+  const send = useCallback(async (content: string, attachments?: ChatAttachment[], knowledgeBookContext?: KnowledgeBookContext) => {
     setRequestError("");
     const requestId = createUuid();
     inFlightTurnIds.current.add(requestId);
@@ -80,6 +80,7 @@ export function useTurnSender({
       preferences.context,
       settings.model_profile,
       attachments?.map((attachment) => ({ file_name: attachment.fileName })),
+      knowledgeBookContext,
     );
   }, [activeSessionRef, createBackendSession, inFlightTurnIds, pendingRequests, preferences.context, preferences.sessions, setMessages, setRequestError, settings.model_profile, socketRef, updateSessionMeta]);
 

@@ -9,6 +9,8 @@ import remarkMath from "remark-math";
 
 import "katex/dist/katex.min.css";
 
+import { KnowledgeBookPromptComposer } from "./KnowledgeBookPromptComposer";
+
 const LazyCode = lazy(async () => {
   const [{ default: SyntaxHighlighter }, { default: oneLight }] = await Promise.all([
     import("react-syntax-highlighter/dist/esm/prism-async-light"),
@@ -46,10 +48,8 @@ async function copyText(text: string): Promise<void> {
 function LessonCodeBlock({ code, language, actions, streaming = false }: { code: string; language: string; actions?: MarkdownCodeActions; streaming?: boolean }) {
   const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "error">("idle");
   const [askOpen, setAskOpen] = useState(false);
-  const [askPrompt, setAskPrompt] = useState("");
   const [codeReady, setCodeReady] = useState(() => typeof IntersectionObserver === "undefined");
   const codeRef = useRef<HTMLDivElement>(null);
-  const askInputRef = useRef<HTMLTextAreaElement>(null);
   useEffect(() => {
     if (copyStatus === "idle") return undefined;
     const timer = window.setTimeout(() => setCopyStatus("idle"), 1800);
@@ -81,10 +81,6 @@ function LessonCodeBlock({ code, language, actions, streaming = false }: { code:
     return () => observer.disconnect();
   }, [codeReady]);
 
-  useEffect(() => {
-    if (askOpen) askInputRef.current?.focus();
-  }, [askOpen]);
-
   const copy = async () => {
     try {
       await copyText(code);
@@ -96,12 +92,8 @@ function LessonCodeBlock({ code, language, actions, streaming = false }: { code:
 
   const supportsLessonActions = /^(?:python|pytorch|py)$/i.test(language);
   const lessonActions = supportsLessonActions ? actions : undefined;
-  const submitAsk = (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const prompt = askPrompt.trim();
-    if (!prompt) return;
+  const submitAsk = (prompt: string) => {
     lessonActions?.onAskNova?.(code, language, prompt);
-    setAskPrompt("");
     setAskOpen(false);
   };
   return <div ref={codeRef} className="code-shell">
@@ -118,10 +110,7 @@ function LessonCodeBlock({ code, language, actions, streaming = false }: { code:
       </div>
     </div>
     {codeReady && !streaming ? <Suspense fallback={<pre><code>{code}</code></pre>}><LazyCode language={language} code={code} /></Suspense> : <pre className="code-lazy-fallback"><code>{code}</code></pre>}
-    {lessonActions?.onAskNova && askOpen && <form className="code-ask-composer" aria-label="询问 Nova" onSubmit={submitAsk}>
-      <textarea ref={askInputRef} aria-label="询问 Nova" rows={2} value={askPrompt} onChange={(event) => setAskPrompt(event.target.value)} placeholder="输入你想问 Nova 的问题…" />
-      <button type="submit" disabled={!askPrompt.trim()}>发送</button>
-    </form>}
+    {lessonActions?.onAskNova && askOpen && <KnowledgeBookPromptComposer className="code-ask-composer" ariaLabel="询问 Nova" placeholder="这段代码是什么意思？" onSubmit={submitAsk} />}
   </div>;
 }
 

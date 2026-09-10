@@ -22,7 +22,7 @@ from core.rbac import (
     required_permission_for_high_risk_tool,
 )
 from core.session_context import SessionContext
-from core.learning import LearningContext, TeachingMaterials, default_progress
+from core.learning import KnowledgeBookContext, LearningContext, TeachingMaterials, default_progress
 from gateway.contracts import (
     GatewayEvent,
     GatewayEventType,
@@ -102,6 +102,25 @@ _EXPLICIT_EXERCISE_START_RE = re.compile(
 
 def _is_explicit_exercise_start(content: str) -> bool:
     return bool(_EXPLICIT_EXERCISE_START_RE.search(content.strip()))
+
+
+async def _resolve_knowledge_book_context(
+    repository: Any, context: SessionContext, candidate: KnowledgeBookContext | None
+) -> KnowledgeBookContext | None:
+    """Replace client-supplied page text with the published server copy."""
+    if candidate is None:
+        return None
+    get_published_page = getattr(repository, "get_published_knowledge_page", None)
+    if not callable(get_published_page):
+        return candidate
+    page = await asyncio.to_thread(
+        get_published_page, context.workspace_id, candidate.knowledge_point_id
+    )
+    if page is None:
+        return candidate.model_copy(update={"content_markdown": ""})
+    return candidate.model_copy(
+        update={"content_markdown": str(page.get("published_markdown") or "")}
+    )
 
 
 class BackendGateway:
@@ -347,6 +366,11 @@ class BackendGateway:
         if auth_session_id:
             context = context.model_copy(update={"auth_session_id": auth_session_id})
         authorization_service.require(principal, Permission.AGENT_TURN_SUBMIT, workspace_id=context.workspace_id)
+        if request.knowledge_book_context is not None and request.knowledge_book_context.workspace_id != context.workspace_id:
+            raise ValueError("知识教材上下文不属于当前工作区")
+        knowledge_book_context = await _resolve_knowledge_book_context(
+            self.repository, context, request.knowledge_book_context
+        )
         if request.model_profile is not None:
             from core.model_runtime.factory import get_global_model_factory
 
@@ -531,6 +555,7 @@ class BackendGateway:
             turn_id=turn_id,
             content=enriched_content,
             learning_context=learning_context,
+            knowledge_book_context=knowledge_book_context,
             learning_progress=progress,
             exercise_state=exercise,
             teaching_materials=teaching_materials,
@@ -597,7 +622,8 @@ class BackendGateway:
         )
         task = task.__class__(
             context=task.context, turn_id=turn.turn_id, content=task.content,
-            learning_context=task.learning_context, learning_progress=task.learning_progress,
+            learning_context=task.learning_context, knowledge_book_context=task.knowledge_book_context,
+            learning_progress=task.learning_progress,
             exercise_state=task.exercise_state, teaching_materials=task.teaching_materials,
             guided_session_id=task.guided_session_id, exercise_session_id=task.exercise_session_id,
             model_profile=task.model_profile, authorization=task.authorization,

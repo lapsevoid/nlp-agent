@@ -5,7 +5,7 @@ import pytest
 
 import gateway.core as gateway_core
 from core.identity import AccessDeniedError, AuthenticatedPrincipal
-from core.learning import LearningContext, TeachingMaterials
+from core.learning import KnowledgeBookContext, LearningContext, TeachingMaterials
 from core.session_context import SessionContext
 from configs.settings import settings
 from gateway.contracts import (
@@ -20,6 +20,31 @@ from gateway.contracts import (
 from gateway.core import BackendGateway
 from gateway.dispatch import InProcessTurnDispatcher, TurnTask
 from gateway.repository import GatewayRepository
+
+
+@pytest.mark.asyncio
+async def test_knowledge_book_context_uses_published_server_copy():
+    class Repository:
+        def get_published_knowledge_page(self, workspace_id, knowledge_point_id):
+            assert workspace_id == "workspace-1"
+            assert knowledge_point_id == "point-1"
+            return {"published_markdown": "# Published textbook"}
+
+    candidate = KnowledgeBookContext(
+        workspace_id="workspace-1",
+        topic_id="topic-1",
+        knowledge_point_id="point-1",
+        content_markdown="# Client supplied text",
+    )
+
+    resolved = await gateway_core._resolve_knowledge_book_context(
+        Repository(),
+        SessionContext(session_id="session-1", workspace_id="workspace-1"),
+        candidate,
+    )
+
+    assert resolved is not None
+    assert resolved.content_markdown == "# Published textbook"
 
 
 class FakeSessions:

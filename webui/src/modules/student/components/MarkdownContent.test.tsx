@@ -176,12 +176,25 @@ describe("MarkdownContent LaTeX delimiters", () => {
     expect(askNova).not.toHaveBeenCalled();
     const promptInput = screen.getByRole("textbox", { name: "询问 Nova" });
     expect(promptInput).toBeVisible();
+    expect(promptInput).toHaveAttribute("placeholder", "这段代码是什么意思？");
     await user.type(promptInput, "为什么这里使用 softmax？");
     await user.click(screen.getByRole("button", { name: "发送" }));
     expect(askNova).toHaveBeenCalledWith("print('hello')", "python", "为什么这里使用 softmax？");
     expect(screen.queryByRole("textbox", { name: "询问 Nova" })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "在沙箱中打开" }));
     expect(openInSandbox).toHaveBeenCalledWith("print('hello')", "python");
+  });
+
+  it("can send the code composer placeholder as the default question", async () => {
+    const user = userEvent.setup();
+    const askNova = vi.fn();
+
+    render(<MarkdownContent codeActions={{ onAskNova: askNova }}>{"```python\nprint('hello')\n```"}</MarkdownContent>);
+
+    await user.click(screen.getByRole("button", { name: "询问 Nova" }));
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(askNova).toHaveBeenCalledWith("print('hello')", "python", "这段代码是什么意思？");
   });
 
   it("keeps the copy action when Nova actions are unavailable", () => {

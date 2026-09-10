@@ -9,6 +9,7 @@ import { LearningContextBar } from "@/modules/student/components/LearningContext
 import { LearningPanel } from "@/modules/student/components/LearningPanel";
 import { KnowledgeBookPanel } from "@/modules/student/components/KnowledgeBookPanel";
 import { readKnowledgeBookUrl } from "@/modules/student/components/knowledgeBook";
+import type { KnowledgeBookContext } from "@/shared/types";
 import { LoginDialog } from "@/modules/student/components/LoginDialog";
 import { MessageList } from "@/modules/student/components/MessageList";
 import { SettingsDialog } from "@/modules/student/components/SettingsDialog";
@@ -198,7 +199,7 @@ export function StudentWorkspace({ onNavigateTo, onOpenInSandbox }: { onNavigate
         void workspace.send("请解释以下 Python 代码：\n\n```python\n" + source + "\n```");
       }}
       learningPanel={<LearningPanel open onClose={() => closeTool("learning")} title={activeTitle} context={workspace.preferences.context} meta={workspace.activeMeta} messages={workspace.messages} catalog={learningCatalog} onPrompt={(content) => { setToolDockOpen(false); setToolDockExpanded(false); setToolMenuOpen(false); void workspace.send(content); }} onMeta={(patch) => { if (workspace.activeSessionId) workspace.updateSessionMeta(workspace.activeSessionId, patch); }} />}
-      knowledgeBookPanel={<KnowledgeBookPanel workspaceId={workspace.workspaceId} onAskNova={statusOnline && !workspace.isRunning ? (prompt) => { setToolDockExpanded(false); setToolMenuOpen(false); void workspace.send(prompt); } : undefined} onOpenInSandbox={openCodeInSandbox} />}
+      knowledgeBookPanel={<KnowledgeBookPanel workspaceId={workspace.workspaceId} onAskNova={statusOnline && !workspace.isRunning ? (prompt: string, context: KnowledgeBookContext) => { setToolDockExpanded(false); setToolMenuOpen(false); void workspace.send(prompt, undefined, context); } : undefined} onOpenInSandbox={openCodeInSandbox} />}
       whiteboardPanel={<Suspense fallback={<div className="whiteboard-loading" role="status">正在加载白板…</div>}><WhiteboardPanel userId={workspace.authSession?.user_id ?? null} /></Suspense>}
       sandboxSource={sandboxSource}
       filesUserId={workspace.authSession?.user_id ?? null}
