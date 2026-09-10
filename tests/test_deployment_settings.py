@@ -76,6 +76,9 @@ def test_compose_passes_outbound_proxy_to_web_and_worker_containers():
         environment = service["environment"]
         assert environment["HTTP_PROXY"] == "${NOVA_OUTBOUND_PROXY_URL:-}"
         assert environment["HTTPS_PROXY"] == "${NOVA_OUTBOUND_PROXY_URL:-}"
+        assert environment["NOVA_OUTBOUND_PROXY_URL"] == "${NOVA_OUTBOUND_PROXY_URL:-}"
+        assert environment["NOVA_DIRECT_DOMAINS"].startswith("${NOVA_DIRECT_DOMAINS:-")
+        assert "${NOVA_DIRECT_DOMAINS:-" in environment["NO_PROXY"]
         assert "redis" in environment["NO_PROXY"]
         assert "mysql" in environment["NO_PROXY"]
 

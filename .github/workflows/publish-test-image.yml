@@ -209,6 +209,50 @@ jobs:
             docker compose --profile monitor -p "$COMPOSE_PROJECT_NAME" --env-file "$DEPLOY_ENV_FILE" -f compose.yaml logs --no-color --tail=200 nova-migrate || true
             exit 1
           fi
+          worker_running=0
+          for worker_attempt in {1..12}; do
+            if docker compose --profile monitor -p "$COMPOSE_PROJECT_NAME" --env-file "$DEPLOY_ENV_FILE" -f compose.yaml ps --status running --services nova-worker | grep -Fxq "nova-worker"; then
+              worker_running=1
+              break
+            fi
+            sleep 5
+          done
+          if [ "$worker_running" -ne 1 ]; then
+            echo "::error::nova-worker is not running; cannot validate outbound network configuration."
+            docker compose --profile monitor -p "$COMPOSE_PROJECT_NAME" --env-file "$DEPLOY_ENV_FILE" -f compose.yaml ps || true
+            docker compose --profile monitor -p "$COMPOSE_PROJECT_NAME" --env-file "$DEPLOY_ENV_FILE" -f compose.yaml logs --no-color --tail=200 nova-worker || true
+            exit 1
+          fi
+          echo "Proxy connectivity preflight"
+          if ! docker compose --profile monitor -p "$COMPOSE_PROJECT_NAME" --env-file "$DEPLOY_ENV_FILE" -f compose.yaml exec -T nova-worker .venv/bin/python -c '
+          import os
+          import socket
+          import sys
+          from urllib.parse import urlsplit
+
+          raw = os.environ.get("NOVA_OUTBOUND_PROXY_URL", "").strip() or os.environ.get("HTTPS_PROXY", "").strip()
+          if not raw:
+              print("Outbound proxy disabled; skipping proxy connectivity check.")
+              raise SystemExit(0)
+          parsed = urlsplit(raw)
+          try:
+              port = parsed.port
+          except ValueError:
+              port = None
+          if parsed.scheme not in {"http", "https"} or not parsed.hostname or not port:
+              print("Configured outbound proxy must be an HTTP(S) URL with a host and port.", file=sys.stderr)
+              raise SystemExit(1)
+          try:
+              with socket.create_connection((parsed.hostname, port), timeout=5):
+                  pass
+          except OSError as error:
+              print(f"Outbound proxy is not reachable from the container at {parsed.hostname}:{port}: {error}", file=sys.stderr)
+              raise SystemExit(1)
+          print(f"Outbound proxy is reachable from the container at {parsed.hostname}:{port}.")
+          '; then
+            echo "::error::Outbound proxy preflight failed. Ensure the proxy listens on the Docker-reachable host.docker.internal address, not only 127.0.0.1."
+            exit 1
+          fi
           for attempt in {1..12}; do
             if docker compose --profile monitor -p "$COMPOSE_PROJECT_NAME" --env-file "$DEPLOY_ENV_FILE" -f compose.yaml exec -T nova-web .venv/bin/python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/health/ready')" \
               && docker compose --profile monitor -p "$COMPOSE_PROJECT_NAME" --env-file "$DEPLOY_ENV_FILE" -f compose.yaml exec -T nova-monitor .venv/bin/python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8766/health/ready')" \

@@ -9,6 +9,7 @@ from langchain_core.language_models import LanguageModelInput
 from langchain_core.messages import AIMessage
 from langchain_deepseek import ChatDeepSeek
 
+from core.model_runtime.network import model_http_client_kwargs
 from core.model_runtime.contracts import (
     ModelDefinition,
     ModelPresetConfig,
@@ -145,6 +146,7 @@ class DeepSeekAdapter:
             "default_headers": provider.default_headers or None,
             "extra_body": {"thinking": thinking},
         }
+        kwargs.update(model_http_client_kwargs(provider.base_url, timeout))
         effort = self._effort(preset)
         if effort:
             kwargs["reasoning_effort"] = effort
