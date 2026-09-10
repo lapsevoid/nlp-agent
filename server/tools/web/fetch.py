@@ -12,6 +12,7 @@ from typing import Any
 
 import httpx
 
+from core.outbound_network import OutboundNetworkPolicy
 from core.tool_config import WebToolsConfig
 from server.tools.web.cache import TTLCache, cache_key
 from server.tools.web.contracts import (
@@ -133,7 +134,7 @@ class WebFetchService:
         )
         return result
 
-    def _build_client(self) -> httpx.AsyncClient:
+    def _build_client(self, proxy_url: str | None) -> httpx.AsyncClient:
         network = self.config.network
         timeout = httpx.Timeout(
             connect=network.connect_timeout_s,
@@ -141,7 +142,7 @@ class WebFetchService:
             write=network.connect_timeout_s,
             pool=network.connect_timeout_s,
         )
-        proxy = None if self.transport is not None else (self._proxy_url() or None)
+        proxy = None if self.transport is not None else proxy_url
         return httpx.AsyncClient(
             transport=self.transport,
             proxy=proxy,
@@ -159,17 +160,22 @@ class WebFetchService:
             return os.environ.get(self.config.proxy_url_env, "").strip()
         return ""
 
+    def _proxy_url_for_host(self, host: str) -> str | None:
+        policy = OutboundNetworkPolicy.from_environment(proxy_url=self._proxy_url())
+        return policy.proxy_for_host(host)
+
     async def _download(self, entry: ParsedUrl, *, as_markdown: bool) -> dict[str, Any]:
         network = self.config.network
         blocked_cidrs = tuple(network.blocked_cidrs)
         current = entry
         redirects = 0
-        async with self._build_client() as client:
-            while True:
-                if self._proxy_url():
-                    check_literal_host(current, blocked_cidrs=blocked_cidrs)
-                else:
-                    await resolve_and_check(current, blocked_cidrs=blocked_cidrs)
+        while True:
+            proxy_url = self._proxy_url_for_host(current.host)
+            if proxy_url:
+                check_literal_host(current, blocked_cidrs=blocked_cidrs)
+            else:
+                await resolve_and_check(current, blocked_cidrs=blocked_cidrs)
+            async with self._build_client(proxy_url) as client:
                 client.cookies.clear()
                 try:
                     response = await client.send(

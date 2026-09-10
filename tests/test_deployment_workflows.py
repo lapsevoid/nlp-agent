@@ -38,6 +38,16 @@ def test_deployment_workflows_update_and_check_worker() -> None:
         )
 
 
+def test_deployment_workflows_preflight_container_proxy_reachability() -> None:
+    for workflow_path in WORKFLOW_PATHS:
+        workflow = workflow_path.read_text(encoding="utf-8")
+
+        assert "Proxy connectivity preflight" in workflow
+        assert 'NOVA_OUTBOUND_PROXY_URL' in workflow
+        assert "socket.create_connection" in workflow
+        assert "host.docker.internal" in workflow
+
+
 def test_publish_workflow_builds_and_publishes_the_runtime_image() -> None:
     workflow = (ROOT / ".github" / "workflows" / "publish-test-image.yml").read_text(
         encoding="utf-8"

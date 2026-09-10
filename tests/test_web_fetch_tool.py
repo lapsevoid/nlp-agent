@@ -34,6 +34,42 @@ def _service(monkeypatch, handler, *, config=None, cache_ttl: float = 0) -> WebF
     )
 
 
+async def test_fetch_reselects_direct_route_after_external_redirect(monkeypatch):
+    seen_proxy_urls = []
+
+    def handler(request):
+        if request.url.host == "example.com":
+            return httpx.Response(
+                302,
+                headers={"location": "https://example.cn/final"},
+            )
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/plain"},
+            text="国内直连内容",
+        )
+
+    service = WebFetchService(
+        WebToolsConfig(proxy_url="http://proxy.example:8080"),
+        cache=TTLCache(0),
+    )
+
+    def build_client(proxy_url):
+        seen_proxy_urls.append(proxy_url)
+        return httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            trust_env=False,
+        )
+
+    _allow_dns(monkeypatch)
+    monkeypatch.setattr(service, "_build_client", build_client)
+
+    result = await service.fetch(WebFetchInput(url="https://example.com/start"))
+
+    assert result.final_url == "https://example.cn/final"
+    assert seen_proxy_urls == ["http://proxy.example:8080", None]
+
+
 async def test_fetch_html_extracts_markdown_with_banner_and_citation(monkeypatch):
     html = (
         "<html><head><title>Docs</title></head>"
