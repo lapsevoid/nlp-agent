@@ -1,5 +1,5 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
-import type { ServerEvent } from "@/shared/types";
+import type { ServerEvent, TurnRecord } from "@/shared/types";
 import { useStudentWorkspace } from "./useStudentWorkspace";
 import { api, AUTH_EXPIRED_EVENT } from "@/platform/http/api";
 import { AuthProvider } from "@/platform/auth/AuthContext";
@@ -18,6 +18,7 @@ const {
   createSessionMock,
   cancelTurnMock,
   deleteSessionMock,
+  listTurnsMock,
   sendChatMock,
   renameSessionMock,
   socketConnectMock,
@@ -30,6 +31,7 @@ const {
   createSessionMock: vi.fn(),
   cancelTurnMock: vi.fn(),
   deleteSessionMock: vi.fn(async () => undefined),
+  listTurnsMock: vi.fn(),
   sendChatMock: vi.fn(),
   renameSessionMock: vi.fn(),
   socketConnectMock: vi.fn(),
@@ -49,6 +51,7 @@ vi.mock("@/platform/http/api", () => ({
     createSession: createSessionMock,
     cancelTurn: cancelTurnMock,
     deleteSession: deleteSessionMock,
+    listTurns: listTurnsMock,
     renameSession: renameSessionMock,
     login: vi.fn(),
     logout: vi.fn(async () => undefined),
@@ -93,6 +96,7 @@ describe("useStudentWorkspace settings", () => {
     vi.mocked(api.updateSettings).mockReset();
     vi.mocked(api.logout).mockReset();
     vi.mocked(api.listSessions).mockResolvedValue({ items: [] });
+    listTurnsMock.mockResolvedValue({ items: [] });
     createSessionMock.mockClear();
     cancelTurnMock.mockReset();
     cancelTurnMock.mockResolvedValue({ status: "cancelled" });
@@ -316,6 +320,46 @@ describe("useStudentWorkspace settings", () => {
 
     act(() => result.current.selectSession("session-a"));
     expect(result.current.composerRevision).toBe(composerRevision + 1);
+  });
+
+  it("clears the previous conversation while the selected session history is loading", async () => {
+    const turn = (sessionId: string, content: string): TurnRecord => ({
+      turn_id: `${sessionId}-turn`,
+      session_id: sessionId,
+      status: "completed",
+      input_text: `${sessionId} question`,
+      final_text: content,
+      error_kind: null,
+      error_message: null,
+      created_at: "2026-09-10T00:00:00Z",
+      started_at: "2026-09-10T00:00:01Z",
+      completed_at: "2026-09-10T00:00:02Z",
+    });
+    vi.mocked(api.listSessions).mockResolvedValue({ items: [
+      { session_id: "session-a", user_id: "user", workspace_id: "default", channel: "web" },
+      { session_id: "session-b", user_id: "user", workspace_id: "default", channel: "web" },
+    ] });
+    let resolveSessionB!: (response: { items: TurnRecord[] }) => void;
+    listTurnsMock.mockImplementation(async (sessionId: string) => {
+      if (sessionId === "session-a") return { items: [turn(sessionId, "会话 A 内容")] };
+      return new Promise((resolve) => { resolveSessionB = resolve; });
+    });
+    const { result } = renderHook(() => useStudentWorkspace());
+    await waitFor(() => expect(result.current.bootStatus).toBe("ready"));
+
+    await act(async () => { result.current.selectSession("session-a"); });
+    await waitFor(() => expect(result.current.messages.some((message) => message.content === "会话 A 内容")).toBe(true));
+
+    await act(async () => {
+      result.current.selectSession("session-b");
+      await Promise.resolve();
+    });
+
+    expect(result.current.messages).toEqual([]);
+    expect(result.current.loadingMessages).toBe(true);
+
+    await act(async () => { resolveSessionB({ items: [turn("session-b", "会话 B 内容")] }); });
+    await waitFor(() => expect(result.current.messages.some((message) => message.content === "会话 B 内容")).toBe(true));
   });
 
   it("creates the backend session in the resolved workspace only on the first message", async () => {

@@ -119,13 +119,15 @@ export function useStudentWorkspace() {
   useEffect(() => {
     loadGenerationRef.current += 1;
     cancelledTurnIds.current.clear();
+    const freshSession = activeSessionId ? freshSessionIdsRef.current.has(activeSessionId) : false;
+    if (!freshSession) setMessages([]);
+    setLoadingMessages(Boolean(activeSessionId && !freshSession));
     socketRef.current?.setSession(activeSessionId);
     queueMicrotask(() => {
       if (activeSessionId && freshSessionIdsRef.current.delete(activeSessionId)) {
         setLoadingMessages(false);
       } else if (activeSessionId) void loadTurns(activeSessionId).catch((reason) => setError(String(reason)));
       else {
-        setMessages([]);
         setLoadingMessages(false);
       }
     });
