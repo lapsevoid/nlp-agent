@@ -9,7 +9,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from core.learning import ExerciseState, LearningContext, LearningProgress, TeachingMaterials
+from core.learning import ExerciseState, KnowledgeBookContext, LearningContext, LearningProgress, TeachingMaterials
 from core.session_context import SessionContext
 from gateway.dispatch import ExecutionAuthorizationContext, TurnTask
 from gateway.contracts import GatewayEvent
@@ -530,6 +530,7 @@ class TurnTaskCodec:
                 "turn_id": task.turn_id,
                 "content": task.content,
                 "learning_context": task.learning_context.model_dump(mode="json") if task.learning_context else None,
+                "knowledge_book_context": task.knowledge_book_context.model_dump(mode="json") if task.knowledge_book_context else None,
                 "learning_progress": task.learning_progress.model_dump(mode="json") if task.learning_progress else None,
                 "exercise_state": task.exercise_state.model_dump(mode="json") if task.exercise_state else None,
                 "teaching_materials": task.teaching_materials.model_dump(mode="json") if task.teaching_materials else None,
@@ -562,6 +563,7 @@ class TurnTaskCodec:
             turn_id=str(value["turn_id"]),
             content=str(value["content"]),
             learning_context=LearningContext.model_validate(value["learning_context"]) if value["learning_context"] else None,
+            knowledge_book_context=KnowledgeBookContext.model_validate(value["knowledge_book_context"]) if value.get("knowledge_book_context") else None,
             learning_progress=LearningProgress.model_validate(value["learning_progress"]) if value["learning_progress"] else None,
             exercise_state=ExerciseState.model_validate(value["exercise_state"]) if value["exercise_state"] else None,
             teaching_materials=TeachingMaterials.model_validate(value["teaching_materials"]) if value["teaching_materials"] else TeachingMaterials(),

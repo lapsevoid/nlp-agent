@@ -401,6 +401,7 @@ tools:
         - TaskStop
         - read_local_file
         - get_current_time
+        - get_knowledge_book_context
         - academic_search
         # Phase 4 model-facing Sandbox surface. High-risk entries still need
         # a ToolRuntime grant and explicit confirmation at invocation time.
@@ -414,6 +415,7 @@ tools:
         - context.manage
         - nlp.analyze
         - academic.search
+        - knowledge_book.read
       denied_capabilities:
         - business.write
     worker:

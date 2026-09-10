@@ -9,6 +9,8 @@ import remarkMath from "remark-math";
 
 import "katex/dist/katex.min.css";
 
+import { KnowledgeBookPromptComposer } from "./KnowledgeBookPromptComposer";
+
 const LazyCode = lazy(async () => {
   const [{ default: SyntaxHighlighter }, { default: oneLight }] = await Promise.all([
     import("react-syntax-highlighter/dist/esm/prism-async-light"),
@@ -22,7 +24,7 @@ const LazyCode = lazy(async () => {
 });
 
 export interface MarkdownCodeActions {
-  onAskNova?: (code: string, language: string) => void;
+  onAskNova?: (code: string, language: string, prompt: string) => void;
   onOpenInSandbox?: (code: string, language: string) => void;
 }
 
@@ -45,6 +47,7 @@ async function copyText(text: string): Promise<void> {
 
 function LessonCodeBlock({ code, language, actions, streaming = false }: { code: string; language: string; actions?: MarkdownCodeActions; streaming?: boolean }) {
   const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "error">("idle");
+  const [askOpen, setAskOpen] = useState(false);
   const [codeReady, setCodeReady] = useState(() => typeof IntersectionObserver === "undefined");
   const codeRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -89,13 +92,17 @@ function LessonCodeBlock({ code, language, actions, streaming = false }: { code:
 
   const supportsLessonActions = /^(?:python|pytorch|py)$/i.test(language);
   const lessonActions = supportsLessonActions ? actions : undefined;
+  const submitAsk = (prompt: string) => {
+    lessonActions?.onAskNova?.(code, language, prompt);
+    setAskOpen(false);
+  };
   return <div ref={codeRef} className="code-shell">
     <div className="code-toolbar">
       <div className="code-label">{language}</div>
       <div className="code-actions">
         <button className="code-copy-button" type="button" aria-label={`${copyStatus === "copied" ? "已复制" : "复制"} ${language} 代码`} onClick={() => void copy()}>{copyStatus === "copied" ? <Check size={14} /> : <Copy size={14} />}<span className="code-action-text">{copyStatus === "copied" ? "已复制" : "复制"}</span></button>
         {lessonActions && <>
-        {lessonActions.onAskNova && <button type="button" aria-label="询问 Nova" onClick={() => lessonActions.onAskNova?.(code, language)}><MessageCircleQuestion size={13} />询问 Nova</button>}
+        {lessonActions.onAskNova && <button type="button" aria-label="询问 Nova" aria-expanded={askOpen} onClick={() => setAskOpen((open) => !open)}><MessageCircleQuestion size={13} />询问 Nova</button>}
         {lessonActions.onOpenInSandbox && <button type="button" aria-label="在沙箱中打开" onClick={() => lessonActions.onOpenInSandbox?.(code, language)}><ExternalLink size={13} />在沙箱中打开</button>}
         </>}
         <span className="sr-only" aria-live="polite">{copyStatus === "copied" ? `已复制 ${language} 代码` : copyStatus === "error" ? `复制 ${language} 代码失败` : ""}</span>
@@ -103,6 +110,7 @@ function LessonCodeBlock({ code, language, actions, streaming = false }: { code:
       </div>
     </div>
     {codeReady && !streaming ? <Suspense fallback={<pre><code>{code}</code></pre>}><LazyCode language={language} code={code} /></Suspense> : <pre className="code-lazy-fallback"><code>{code}</code></pre>}
+    {lessonActions?.onAskNova && askOpen && <KnowledgeBookPromptComposer className="code-ask-composer" ariaLabel="询问 Nova" placeholder="这段代码是什么意思？" onSubmit={submitAsk} />}
   </div>;
 }
 

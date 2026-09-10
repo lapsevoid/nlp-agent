@@ -31,6 +31,7 @@ class ToolPoliciesConfig(StrictConfigModel):
                 "TaskStop",
                 "read_local_file",
                 "get_current_time",
+                "get_knowledge_book_context",
             },
             allowed_capabilities={"context.manage"},
             denied_capabilities={"business.write"},

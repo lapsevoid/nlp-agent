@@ -223,6 +223,21 @@ def test_knowledge_book_page_keeps_draft_and_published_content_separate(tmp_path
     repository.close()
 
 
+def test_repository_persists_global_whiteboard_library_items_across_reopen(tmp_path):
+    repository = GatewayRepository(tmp_path / "gateway.sqlite3")
+    item = repository.create_whiteboard_library_item(
+        name="流程图",
+        elements=[{"id": "shape-1", "type": "rectangle"}],
+        created_by="teacher-1",
+    )
+
+    assert item["status"] == "published"
+    assert repository.list_whiteboard_library() == [item]
+
+    reopened = GatewayRepository(tmp_path / "gateway.sqlite3")
+    assert reopened.list_whiteboard_library() == [item]
+
+
 def test_turn_persists_the_real_guided_session_and_blueprint_snapshot_reference(tmp_path):
     repository = GatewayRepository(tmp_path / "gateway.sqlite3")
     turn, _ = repository.create_turn(

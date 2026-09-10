@@ -8,7 +8,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from core.learning import ExerciseState, LearningContext, LearningProgress
+from core.learning import ExerciseState, KnowledgeBookContext, LearningContext, LearningProgress
 
 
 def utc_now() -> datetime:
@@ -70,6 +70,7 @@ class SubmitTurnRequest(BaseModel):
     attachments: list[dict[str, str]] = Field(default_factory=list)
     idempotency_key: str | None = Field(default=None, max_length=128)
     learning_context: LearningContext | None = None
+    knowledge_book_context: KnowledgeBookContext | None = None
     evaluation: EvaluationContext | None = None
     model_profile: str | None = Field(
         default=None, pattern=r"^[a-z][a-z0-9_-]{0,63}$"

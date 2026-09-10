@@ -19,6 +19,14 @@ export interface AuthSession {
   permissions?: string[];
 }
 
+export interface WhiteboardLibraryItem {
+  id: string;
+  status: "published" | "unpublished";
+  elements: unknown[];
+  created: number;
+  name?: string;
+}
+
 export interface DeveloperSnapshot {
   runtime: Record<string, unknown>;
   features: Record<string, { available: boolean; reason: string }>;
@@ -182,6 +190,18 @@ export interface LearningBookPage {
   title: string;
   content_markdown: string;
   revision: number;
+}
+export interface KnowledgeBookContext {
+  workspace_id: string;
+  topic_id: string;
+  topic_name: string;
+  knowledge_point_id: string;
+  title: string;
+  heading?: string;
+  selected_text?: string;
+  code?: string;
+  language?: string;
+  content_markdown: string;
 }
 export interface TeacherBookImportPreview {
   file_name: string;

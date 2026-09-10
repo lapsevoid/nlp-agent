@@ -5,8 +5,9 @@ import pytest
 
 import gateway.core as gateway_core
 from core.identity import AccessDeniedError, AuthenticatedPrincipal
-from core.learning import LearningContext, TeachingMaterials
+from core.learning import KnowledgeBookContext, LearningContext, TeachingMaterials
 from core.session_context import SessionContext
+from core.rbac import Permission
 from configs.settings import settings
 from gateway.contracts import (
     EvaluationContext,
@@ -20,6 +21,31 @@ from gateway.contracts import (
 from gateway.core import BackendGateway
 from gateway.dispatch import InProcessTurnDispatcher, TurnTask
 from gateway.repository import GatewayRepository
+
+
+@pytest.mark.asyncio
+async def test_knowledge_book_context_uses_published_server_copy():
+    class Repository:
+        def get_published_knowledge_page(self, workspace_id, knowledge_point_id):
+            assert workspace_id == "workspace-1"
+            assert knowledge_point_id == "point-1"
+            return {"published_markdown": "# Published textbook"}
+
+    candidate = KnowledgeBookContext(
+        workspace_id="workspace-1",
+        topic_id="topic-1",
+        knowledge_point_id="point-1",
+        content_markdown="# Client supplied text",
+    )
+
+    resolved = await gateway_core._resolve_knowledge_book_context(
+        Repository(),
+        SessionContext(session_id="session-1", workspace_id="workspace-1"),
+        candidate,
+    )
+
+    assert resolved is not None
+    assert resolved.content_markdown == "# Published textbook"
 
 
 class FakeSessions:
@@ -272,6 +298,30 @@ async def test_gateway_rejects_student_teaching_catalog_updates(tmp_path, princi
                 "review_blueprints": [],
                 "guided_blueprints": [],
             },
+        )
+
+
+@pytest.mark.asyncio
+async def test_gateway_rejects_non_manager_role_even_with_content_manage_permission(tmp_path):
+    repository = GatewayRepository(tmp_path / "gateway.sqlite3")
+    gateway = BackendGateway(
+        engine=FakeEngine(),
+        repository=repository,
+        sessions=FakeSessions(),
+        dispatcher=RecordingTurnDispatcher(),
+    )
+    student_with_override = AuthenticatedPrincipal(
+        user_id="student-override",
+        workspace_ids=frozenset({"w1"}),
+        roles=frozenset({"student"}),
+        permissions=frozenset({Permission.LEARNING_CONTENT_MANAGE.value}),
+    )
+
+    with pytest.raises(AccessDeniedError, match="teacher or developer"):
+        await gateway.create_whiteboard_library_item(
+            student_with_override,
+            name="不应发布",
+            elements=[{"id": "shape-1", "type": "rectangle"}],
         )
 
 

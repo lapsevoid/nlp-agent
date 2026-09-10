@@ -9,10 +9,17 @@ const excalidraw = vi.hoisted(() => ({
   loadLibraryFromBlob: vi.fn().mockResolvedValue([]),
 }));
 
+const whiteboardApi = vi.hoisted(() => ({
+  getWhiteboardLibrary: vi.fn().mockResolvedValue({ items: [] }),
+  createWhiteboardLibraryItem: vi.fn(),
+}));
+
+vi.mock("@/platform/http/api", () => ({ api: whiteboardApi }));
+
 vi.mock("@excalidraw/excalidraw", () => ({
   CaptureUpdateAction: { NEVER: "NEVER" },
   loadLibraryFromBlob: excalidraw.loadLibraryFromBlob,
-  Excalidraw: (props: { initialData?: unknown; onChange?: (elements: unknown, appState: unknown, files: unknown) => void; validateEmbeddable?: (link: string) => boolean | undefined; children?: React.ReactNode }) => {
+  Excalidraw: (props: { initialData?: unknown; onChange?: (elements: unknown, appState: unknown, files: unknown) => void; onLibraryChange?: (items: unknown[]) => void | Promise<unknown>; validateEmbeddable?: (link: string) => boolean | undefined; children?: React.ReactNode }) => {
     excalidraw.render(props);
     return <><button type="button" onClick={() => props.onChange?.([{ id: "line-1", type: "line" }] as never, { theme: "light", viewBackgroundColor: "#fff" } as never, {})}>模拟绘图</button>{props.children}</>;
   },
@@ -46,6 +53,9 @@ describe("WhiteboardPanel", () => {
     excalidraw.render.mockClear();
     excalidraw.loadLibraryFromBlob.mockClear();
     excalidraw.loadLibraryFromBlob.mockResolvedValue([]);
+    whiteboardApi.getWhiteboardLibrary.mockReset();
+    whiteboardApi.getWhiteboardLibrary.mockResolvedValue({ items: [] });
+    whiteboardApi.createWhiteboardLibraryItem.mockReset();
     resetBundledLibrariesCache();
     vi.useFakeTimers();
   });
@@ -220,6 +230,104 @@ describe("WhiteboardPanel", () => {
     style.remove();
   });
 
+  it("exposes native library creation only to users who can manage the global library", () => {
+    const style = document.createElement("style");
+    style.textContent = readFileSync("src/modules/student/components/whiteboard/whiteboard.css", "utf8");
+    document.head.appendChild(style);
+
+    const panel = document.createElement("section");
+    panel.className = "whiteboard-panel whiteboard-can-manage-library";
+    panel.innerHTML = `
+      <div class="library-menu-control-buttons" data-testid="library-controls"></div>
+      <div class="library-menu-dropdown-container" data-testid="library-dropdown"></div>
+      <input class="library-unit__checkbox" data-testid="library-checkbox" />`;
+    document.body.appendChild(panel);
+
+    const contextMenu = document.createElement("ul");
+    contextMenu.className = "context-menu";
+    contextMenu.innerHTML = '<li data-testid="addToLibrary">加入素材库</li>';
+    document.body.appendChild(contextMenu);
+    document.body.classList.add("whiteboard-library-manager");
+
+    expect(getComputedStyle(panel.querySelector('[data-testid="library-controls"]')!).display).not.toBe("none");
+    expect(getComputedStyle(panel.querySelector('[data-testid="library-dropdown"]')!).display).not.toBe("none");
+    expect(getComputedStyle(panel.querySelector('[data-testid="library-checkbox"]')!).display).not.toBe("none");
+    expect(getComputedStyle(contextMenu.querySelector('[data-testid="addToLibrary"]')!).display).not.toBe("none");
+
+    panel.remove();
+    contextMenu.remove();
+    document.body.classList.remove("whiteboard-library-manager");
+    style.remove();
+  });
+
+  it("publishes a newly created library item and makes it shared", async () => {
+    vi.useRealTimers();
+    const updateLibrary = vi.fn().mockResolvedValue([]);
+    const createdItem = {
+      id: "library-1",
+      status: "published",
+      created: 123,
+      name: "我的素材",
+      elements: [{ id: "shape-1", type: "rectangle" }],
+    };
+    whiteboardApi.createWhiteboardLibraryItem.mockResolvedValue({ item: createdItem });
+    vi.stubGlobal("prompt", vi.fn().mockReturnValue("自定义素材"));
+    const blob = new Blob([JSON.stringify({ type: "excalidrawlib", version: 2, libraryItems: [] })], { type: "application/json" });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, blob: () => Promise.resolve(blob) }));
+
+    render(<WhiteboardPanel userId="teacher-1" canManageLibrary />);
+    const props = excalidraw.render.mock.calls.at(-1)?.[0] as {
+      excalidrawAPI?: (api: { updateLibrary: typeof updateLibrary }) => void;
+      onLibraryChange?: (items: unknown[]) => void | Promise<unknown>;
+    };
+    props.excalidrawAPI?.({ updateLibrary });
+    await waitFor(() => expect(updateLibrary).toHaveBeenCalled());
+
+    await props.onLibraryChange?.([{
+      id: "library-1",
+      status: "unpublished",
+      created: 123,
+      elements: [{ id: "shape-1", type: "rectangle" }],
+    }]);
+
+    expect(whiteboardApi.createWhiteboardLibraryItem).toHaveBeenCalledWith(
+      "自定义素材",
+      [{ id: "shape-1", type: "rectangle" }],
+    );
+    const publishOptions = updateLibrary.mock.calls.at(-1)?.[0] as {
+      merge?: boolean;
+      libraryItems?: (currentItems: Array<{ id: string }>) => unknown;
+    };
+    expect(publishOptions.merge).toBe(false);
+    expect(publishOptions.libraryItems?.([{ id: "library-1" }])).toEqual([createdItem]);
+  });
+
+  it("shows a visible error when publishing a library item fails", async () => {
+    vi.useRealTimers();
+    const updateLibrary = vi.fn().mockResolvedValue([]);
+    whiteboardApi.createWhiteboardLibraryItem.mockRejectedValue(new Error("network failure"));
+    vi.stubGlobal("prompt", vi.fn().mockReturnValue("失败素材"));
+    const blob = new Blob([JSON.stringify({ type: "excalidrawlib", version: 2, libraryItems: [] })], { type: "application/json" });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, blob: () => Promise.resolve(blob) }));
+
+    render(<WhiteboardPanel userId="teacher-1" canManageLibrary />);
+    const props = excalidraw.render.mock.calls.at(-1)?.[0] as {
+      excalidrawAPI?: (api: { updateLibrary: typeof updateLibrary }) => void;
+      onLibraryChange?: (items: unknown[]) => void | Promise<unknown>;
+    };
+    props.excalidrawAPI?.({ updateLibrary });
+    await waitFor(() => expect(updateLibrary).toHaveBeenCalled());
+
+    await props.onLibraryChange?.([{
+      id: "library-failed",
+      status: "unpublished",
+      created: 123,
+      elements: [{ id: "shape-1", type: "rectangle" }],
+    }]);
+
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("暂未全局共享"));
+  });
+
   it("ships stable source metadata for bundled libraries", () => {
     for (const asset of WHITEBOARD_LIBRARY_ASSETS) {
       const contents = readFileSync(`public/excalidraw/libraries/${asset.fileName}`, "utf8");
@@ -261,6 +369,31 @@ describe("WhiteboardPanel", () => {
     await waitFor(() => expect(secondUpdateLibrary).toHaveBeenCalled());
     expect(fetchMock).toHaveBeenCalledTimes(WHITEBOARD_LIBRARY_ASSETS.length);
     expect(excalidraw.loadLibraryFromBlob).toHaveBeenCalledTimes(WHITEBOARD_LIBRARY_ASSETS.length);
+  });
+
+  it("loads server-created library items for every signed-in user", async () => {
+    vi.useRealTimers();
+    const updateLibrary = vi.fn().mockResolvedValue([]);
+    const sharedItem = {
+      id: "shared-1",
+      status: "published" as const,
+      created: 456,
+      name: "全局流程",
+      elements: [{ id: "shape-1", type: "rectangle" }],
+    };
+    whiteboardApi.getWhiteboardLibrary.mockResolvedValue({ items: [sharedItem] });
+    const blob = new Blob([JSON.stringify({ type: "excalidrawlib", version: 2, libraryItems: [] })], { type: "application/json" });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, blob: () => Promise.resolve(blob) }));
+
+    render(<WhiteboardPanel userId="student-1" />);
+    const props = excalidraw.render.mock.calls.at(-1)?.[0] as { excalidrawAPI?: (api: { updateLibrary: typeof updateLibrary }) => void };
+    props.excalidrawAPI?.({ updateLibrary });
+
+    await waitFor(() => expect(updateLibrary).toHaveBeenCalledWith(expect.objectContaining({
+      libraryItems: [sharedItem],
+      merge: true,
+      defaultStatus: "published",
+    })));
   });
 
   it("keeps library installation active under StrictMode effect replay", async () => {

@@ -13,7 +13,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 
 from core.coordinator_runtime import CoordinatorRuntime
 from core.session_context import SessionContext
-from core.learning import ExerciseState, LearningContext, LearningProgress, TeachingMaterials
+from core.learning import ExerciseState, KnowledgeBookContext, LearningContext, LearningProgress, TeachingMaterials
 from core.observability.context import bind_telemetry_context, current_telemetry_context
 from core.observability.runtime import global_telemetry
 from core.task_manager import global_task_manager
@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 
 class AgentEngine(Protocol):
     async def start(self, event_sink: EngineEventSink) -> None: ...
-    async def run_turn(self, context: SessionContext, turn_id: str, content: str, *, learning_context: LearningContext | None = None, learning_progress: LearningProgress | None = None, exercise_state: ExerciseState | None = None, teaching_materials: TeachingMaterials | None = None, model_profile: str | None = None) -> str: ...
+    async def run_turn(self, context: SessionContext, turn_id: str, content: str, *, learning_context: LearningContext | None = None, learning_progress: LearningProgress | None = None, exercise_state: ExerciseState | None = None, teaching_materials: TeachingMaterials | None = None, knowledge_book_context: KnowledgeBookContext | None = None, model_profile: str | None = None) -> str: ...
     async def inject(self, context: SessionContext, content: str) -> str | None: ...
     async def cancel_turn(self, context: SessionContext, turn_id: str) -> None: ...
     async def delete_session(self, context: SessionContext) -> None: ...
@@ -91,6 +91,7 @@ class LangGraphAgentEngine:
         learning_progress: LearningProgress | None = None,
         exercise_state: ExerciseState | None = None,
         teaching_materials: TeachingMaterials | None = None,
+        knowledge_book_context: KnowledgeBookContext | None = None,
     ) -> None:
         if self._app is None:
             raise RuntimeError("Agent engine is not started")
@@ -108,6 +109,7 @@ class LangGraphAgentEngine:
                     learning_progress,
                     exercise_state,
                     teaching_materials,
+                    knowledge_book_context,
                 )
             return
         configurable = {
@@ -126,6 +128,7 @@ class LangGraphAgentEngine:
             "review_blueprint": teaching_materials.review_blueprint if teaching_materials else {},
             "guided_session": teaching_materials.guided_session if teaching_materials else {},
             "guided_blueprint": teaching_materials.guided_blueprint if teaching_materials else {},
+            "knowledge_book_context": knowledge_book_context.model_dump(mode="json") if knowledge_book_context else None,
         }
         telemetry = current_telemetry_context()
         if telemetry is None and self._runtime is not None:
@@ -269,6 +272,7 @@ class LangGraphAgentEngine:
         learning_progress: LearningProgress | None = None,
         exercise_state: ExerciseState | None = None,
         teaching_materials: TeachingMaterials | None = None,
+        knowledge_book_context: KnowledgeBookContext | None = None,
         model_profile: str | None = None,
     ) -> str:
         self._session_model_profiles[context.storage_key] = model_profile
@@ -283,17 +287,18 @@ class LangGraphAgentEngine:
                     learning_progress=learning_progress,
                     exercise_state=exercise_state,
                     teaching_materials=teaching_materials,
+                    knowledge_book_context=knowledge_book_context,
                 )
         finally:
             self._foreground_outputs.pop(turn_id, None)
 
-    async def _run_selected_turn(self, context: SessionContext, turn_id: str, content: str, *, learning_context: LearningContext | None = None, learning_progress: LearningProgress | None = None, exercise_state: ExerciseState | None = None, teaching_materials: TeachingMaterials | None = None) -> str:
+    async def _run_selected_turn(self, context: SessionContext, turn_id: str, content: str, *, learning_context: LearningContext | None = None, learning_progress: LearningProgress | None = None, exercise_state: ExerciseState | None = None, teaching_materials: TeachingMaterials | None = None, knowledge_book_context: KnowledgeBookContext | None = None) -> str:
         if self._runtime is None or self._app is None:
             raise RuntimeError("Agent engine is not started")
         message = HumanMessage(content=content, id=turn_id)
         await self._runtime.submit_user_turn(
             context, message, learning_context, learning_progress, exercise_state,
-            teaching_materials,
+            teaching_materials, knowledge_book_context,
         )
         config = {"configurable": {
             "thread_id": context.session_id,
