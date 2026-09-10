@@ -44,6 +44,7 @@ from utils.logger import get_logger
 
 
 _FINISH_USAGE_DRAIN_S = 0.25
+_STREAM_CANCEL_DRAIN_S = 0.25
 logger = get_logger("nlp_agent.model_runtime")
 
 
@@ -351,6 +352,7 @@ class ResilientChatModel:
         self.route = route
         self.reporter_slot = reporter_slot
         self.caller_include_raw = caller_include_raw
+        self._abandoned_stream_tasks: set[asyncio.Task[Any]] = set()
         self.model_name = candidates[0].definition.model_id
         self.context_window_tokens = min(
             candidate.definition.context_window_tokens for candidate in candidates
@@ -566,6 +568,70 @@ class ResilientChatModel:
             provider=candidate.provider_name,
             model=candidate.definition.model_id,
         )
+
+    async def _read_stream_chunk(
+        self, iterator: Any, timeout_s: float, *, task_name: str
+    ) -> Any:
+        read_task = asyncio.ensure_future(iterator.__anext__())
+        read_task.set_name(task_name)
+        timeout_task = asyncio.create_task(
+            asyncio.sleep(timeout_s), name=f"{task_name}:timeout"
+        )
+        try:
+            done, _pending = await asyncio.wait(
+                {read_task, timeout_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        except asyncio.CancelledError:
+            timeout_task.cancel()
+            await asyncio.gather(timeout_task, return_exceptions=True)
+            await self._cancel_stream_task(read_task)
+            raise
+
+        if read_task in done:
+            timeout_task.cancel()
+            await asyncio.gather(timeout_task, return_exceptions=True)
+            return await read_task
+
+        await self._cancel_stream_task(read_task)
+        raise asyncio.TimeoutError
+
+    async def _cancel_stream_task(self, task: asyncio.Task[Any]) -> None:
+        if task.done():
+            self._consume_stream_task(task)
+            return
+        task.cancel()
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(task), timeout=_STREAM_CANCEL_DRAIN_S
+            )
+        except asyncio.TimeoutError:
+            self._detach_stream_task(task)
+        except asyncio.CancelledError:
+            # A normally cancelled child task raises CancelledError through
+            # shield(); that is expected and must not abort the caller.  If
+            # the caller itself was cancelled while the child ignored its
+            # cancellation, detach it and preserve the caller cancellation.
+            if task.done():
+                self._consume_stream_task(task)
+                return
+            self._detach_stream_task(task)
+            raise
+        except BaseException:
+            self._consume_stream_task(task)
+
+    def _detach_stream_task(self, task: asyncio.Task[Any]) -> None:
+        self._abandoned_stream_tasks.add(task)
+        task.add_done_callback(self._consume_stream_task)
+
+    def _consume_stream_task(self, task: asyncio.Task[Any]) -> None:
+        self._abandoned_stream_tasks.discard(task)
+        if task.cancelled():
+            return
+        try:
+            task.exception()
+        except asyncio.CancelledError:
+            return
 
     async def ainvoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
         if self.normalize_response:
@@ -842,8 +908,13 @@ class ResilientChatModel:
                                 else candidate.preset.timeouts.stream_idle_s,
                             )
                             try:
-                                chunk = await asyncio.wait_for(
-                                    iterator.__anext__(), timeout=wait_s
+                                chunk = await self._read_stream_chunk(
+                                    iterator,
+                                    wait_s,
+                                    task_name=(
+                                        f"model-stream-read:{candidate.provider_name}:"
+                                        f"{candidate.definition.model_id}"
+                                    ),
                                 )
                             except StopAsyncIteration:
                                 break
