@@ -1,4 +1,10 @@
+import os
+import platform
 from pathlib import Path
+import shutil
+import subprocess
+import tempfile
+import textwrap
 
 import yaml
 
@@ -8,6 +14,7 @@ WORKFLOW_PATHS = (
     ROOT / ".github" / "workflows" / "publish-test-image.yml",
     ROOT / ".github" / "workflows" / "release-prod.yml",
 )
+RETRY_HELPER_PATH = ROOT / ".github" / "scripts" / "run-with-transient-registry-retry.sh"
 
 
 def test_deployment_workflows_update_and_check_worker() -> None:
@@ -36,6 +43,170 @@ def test_deployment_workflows_update_and_check_worker() -> None:
             'docker pull "$SANDBOX_CONFIGURED_REF"' in workflow
             or 'docker pull --quiet "$SANDBOX_CONFIGURED_REF"' in workflow
         )
+
+
+def test_deployment_workflows_retry_transient_registry_reads() -> None:
+    for workflow_path in WORKFLOW_PATHS:
+        workflow = workflow_path.read_text(encoding="utf-8")
+
+        assert (
+            'bash "$GITHUB_WORKSPACE/.github/scripts/'
+            'run-with-transient-registry-retry.sh"'
+        ) in workflow
+        assert (
+            "docker pull --quiet \"$SANDBOX_CONFIGURED_REF\""
+            in workflow
+        )
+        assert (
+            "pull --quiet " + "nova-migrate nova-web nova-worker nova-monitor "
+            "nova-sandbox-manager nginx mysql redis"
+            in workflow
+        )
+        assert "export NOVA_PULL_POLICY=never" in workflow
+
+
+def test_registry_retry_helper_retries_eof_and_preserves_success() -> None:
+    if platform.system() != "Linux" or shutil.which("bash") is None:
+        return
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        counter_path = temp_path / "attempts"
+        command_path = temp_path / "fake-registry-command"
+        command_path.write_text(
+            textwrap.dedent(
+                """
+                #!/usr/bin/env python3
+                import os
+                import pathlib
+                import sys
+
+                counter = pathlib.Path(os.environ["FAKE_COUNTER"])
+                attempt = int(counter.read_text()) if counter.exists() else 0
+                counter.write_text(str(attempt + 1))
+                if attempt < 2:
+                    print("failed to read manifest: EOF", file=sys.stderr)
+                    raise SystemExit(23)
+                print("pulled")
+                """
+            ).lstrip(),
+            encoding="utf-8",
+        )
+        command_path.chmod(0o755)
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "FAKE_COUNTER": str(counter_path),
+                "TRANSIENT_REGISTRY_MAX_ATTEMPTS": "3",
+                "TRANSIENT_REGISTRY_RETRY_DELAY_SECONDS": "0",
+            }
+        )
+
+        result = subprocess.run(
+            ["bash", str(RETRY_HELPER_PATH), str(command_path)],
+            capture_output=True,
+            text=True,
+            env=environment,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert counter_path.read_text(encoding="utf-8") == "3"
+        assert "retrying" in result.stderr
+
+
+def test_registry_retry_helper_fails_fast_for_non_transient_errors() -> None:
+    if platform.system() != "Linux" or shutil.which("bash") is None:
+        return
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        counter_path = temp_path / "attempts"
+        command_path = temp_path / "fake-registry-command"
+        command_path.write_text(
+            textwrap.dedent(
+                """
+                #!/usr/bin/env python3
+                import os
+                import pathlib
+                import sys
+
+                counter = pathlib.Path(os.environ["FAKE_COUNTER"])
+                attempt = int(counter.read_text()) if counter.exists() else 0
+                counter.write_text(str(attempt + 1))
+                print("manifest unknown", file=sys.stderr)
+                raise SystemExit(37)
+                """
+            ).lstrip(),
+            encoding="utf-8",
+        )
+        command_path.chmod(0o755)
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "FAKE_COUNTER": str(counter_path),
+                "TRANSIENT_REGISTRY_MAX_ATTEMPTS": "3",
+                "TRANSIENT_REGISTRY_RETRY_DELAY_SECONDS": "0",
+            }
+        )
+
+        result = subprocess.run(
+            ["bash", str(RETRY_HELPER_PATH), str(command_path)],
+            capture_output=True,
+            text=True,
+            env=environment,
+            check=False,
+        )
+
+        assert result.returncode == 37
+        assert counter_path.read_text(encoding="utf-8") == "1"
+
+
+def test_registry_retry_helper_preserves_exhausted_transient_exit_code() -> None:
+    if platform.system() != "Linux" or shutil.which("bash") is None:
+        return
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        counter_path = temp_path / "attempts"
+        command_path = temp_path / "fake-registry-command"
+        command_path.write_text(
+            textwrap.dedent(
+                """
+                #!/usr/bin/env python3
+                import os
+                import pathlib
+                import sys
+
+                counter = pathlib.Path(os.environ["FAKE_COUNTER"])
+                attempt = int(counter.read_text()) if counter.exists() else 0
+                counter.write_text(str(attempt + 1))
+                print("failed to read manifest: EOF", file=sys.stderr)
+                raise SystemExit(41)
+                """
+            ).lstrip(),
+            encoding="utf-8",
+        )
+        command_path.chmod(0o755)
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "FAKE_COUNTER": str(counter_path),
+                "TRANSIENT_REGISTRY_MAX_ATTEMPTS": "2",
+                "TRANSIENT_REGISTRY_RETRY_DELAY_SECONDS": "0",
+            }
+        )
+
+        result = subprocess.run(
+            ["bash", str(RETRY_HELPER_PATH), str(command_path)],
+            capture_output=True,
+            text=True,
+            env=environment,
+            check=False,
+        )
+
+        assert result.returncode == 41
+        assert counter_path.read_text(encoding="utf-8") == "2"
 
 
 def test_deployment_workflows_preflight_container_proxy_reachability() -> None:

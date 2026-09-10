@@ -118,7 +118,8 @@ jobs:
           export NOVA_ENV_FILE="$DEPLOY_ENV_FILE"
           SANDBOX_CONFIGURED_REF="$(awk -F= '$1 == "NLP_AGENT_SANDBOX_DOCKER_IMAGE_DIGEST" {sub(/^[^=]*=/, ""); gsub(/^"|"$/, ""); print; exit}' "$DEPLOY_ENV_FILE")"
           test "$SANDBOX_CONFIGURED_REF" = "$SANDBOX_RUNTIME_REF"
-          docker pull "$SANDBOX_CONFIGURED_REF"
+          bash "$GITHUB_WORKSPACE/.github/scripts/run-with-transient-registry-retry.sh" \
+            docker pull --quiet "$SANDBOX_CONFIGURED_REF"
           test "$NOVA_IMAGE_REF" = "ghcr.io/${{ github.repository_owner }}/nlp-agent@${{ needs.verify-and-publish.outputs.digest }}"
           resolved_images="$(docker compose --profile monitor -p "$COMPOSE_PROJECT_NAME" --env-file "$DEPLOY_ENV_FILE" -f compose.yaml config --images)"
           printf '%s\n' "$resolved_images"
@@ -126,7 +127,11 @@ jobs:
             echo "Compose did not resolve the expected published image: $NOVA_IMAGE_REF"
             exit 1
           }
-          docker compose --profile monitor -p "$COMPOSE_PROJECT_NAME" --env-file "$DEPLOY_ENV_FILE" -f compose.yaml pull nova-migrate nova-web nova-worker nova-monitor nova-sandbox-manager nginx
+          bash "$GITHUB_WORKSPACE/.github/scripts/run-with-transient-registry-retry.sh" \
+            docker compose --profile monitor -p "$COMPOSE_PROJECT_NAME" --env-file "$DEPLOY_ENV_FILE" -f compose.yaml pull --quiet nova-migrate nova-web nova-worker nova-monitor nova-sandbox-manager nginx mysql redis
+          # Every image needed by this `up` was pulled above. Prevent Compose
+          # from issuing a second registry request after a successful pull.
+          export NOVA_PULL_POLICY=never
           if ! docker compose --profile monitor -p "$COMPOSE_PROJECT_NAME" --env-file "$DEPLOY_ENV_FILE" -f compose.yaml up -d --force-recreate --no-build --remove-orphans nova-migrate nova-web nova-worker nova-monitor nova-sandbox-manager nginx; then
             echo "::error::Compose startup failed; collecting migration diagnostics."
             docker compose --profile monitor -p "$COMPOSE_PROJECT_NAME" --env-file "$DEPLOY_ENV_FILE" -f compose.yaml ps || true
