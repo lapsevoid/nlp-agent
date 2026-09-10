@@ -378,7 +378,7 @@ prompts:
 agent_runtime:
   coordinator:
     max_iterations: 12
-    max_duration_s: 600
+    max_duration_s: 120
     max_tokens: 128000
     max_tool_calls: 32
     max_injections: 15

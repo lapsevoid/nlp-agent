@@ -128,6 +128,36 @@ class RedisWorkerRuntime:
         self._cancel_waiters: dict[str, asyncio.Event] = {}
         self._command_cancelled: set[str] = set()
 
+    @classmethod
+    def for_fenced_mysql(
+        cls,
+        redis: Any,
+        config: RedisTransportConfig,
+        execute: Any,
+        *,
+        consumer_name: str,
+        inject: Any = None,
+        cancel_pending: Any = None,
+        is_terminal: Any = None,
+    ) -> "RedisWorkerRuntime":
+        """Build a fenced Worker that drains abandoned Redis deliveries.
+
+        MySQL claim generations remain authoritative for execution ownership;
+        Redis auto-claim is still required to ACK deliveries left pending by a
+        previous container identity.
+        """
+
+        return cls(
+            redis,
+            config,
+            execute,
+            consumer_name=consumer_name,
+            inject=inject,
+            cancel_pending=cancel_pending,
+            is_terminal=is_terminal,
+            reclaim_pending=True,
+        )
+
     async def _ensure_group(self) -> None:
         if self._group_ready:
             return

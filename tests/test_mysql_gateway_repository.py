@@ -6,7 +6,7 @@ import pytest
 from sqlalchemy.exc import OperationalError
 
 from core.learning import ExerciseState, LearningContext, LearningProgress
-from gateway.contracts import TurnStatus
+from gateway.contracts import GatewayEventType, TurnStatus
 from gateway.mysql_repository import MySQLGatewayRepository
 
 
@@ -97,6 +97,30 @@ def test_events_after_decodes_mysql_json_payloads() -> None:
     events = repository.events_after("turn-1")
 
     assert events[0].payload == {"delta": "hello"}
+
+
+def test_events_after_accepts_reliability_handover_events() -> None:
+    repository = object.__new__(MySQLGatewayRepository)
+    connection = MagicMock()
+    rows = MagicMock()
+    rows.mappings.return_value.all.return_value = [
+        {
+            "id": "event-handover",
+            "conversation_id": "session-1",
+            "sequence": 8,
+            "event_type": "turn.handover",
+            "created_at": "2026-09-10T00:00:00Z",
+            "payload_json": '{"reason":"lease_expired"}',
+        }
+    ]
+    connection.execute.return_value = rows
+    repository._engine = MagicMock()
+    repository._engine.connect.return_value.__enter__.return_value = connection
+
+    events = repository.events_after("turn-1")
+
+    assert events[0].type == GatewayEventType.TURN_HANDOVER
+    assert events[0].payload == {"reason": "lease_expired"}
 
 
 def test_guided_session_stats_qualifies_created_at_after_user_join() -> None:

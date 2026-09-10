@@ -222,7 +222,7 @@ async def run_worker() -> None:
         worker_id=worker_id,
         lease_s=int(gateway_config.get("mysql_turn_lease_s", 60)),
     )
-    worker = RedisWorkerRuntime(
+    worker = RedisWorkerRuntime.for_fenced_mysql(
         redis,
         config,
         fenced_executor,
@@ -230,7 +230,6 @@ async def run_worker() -> None:
         inject=engine.inject,
         cancel_pending=cancel_pending,
         is_terminal=is_terminal,
-        reclaim_pending=False,
     )
     quota_reaper = create_worker_quota_reaper(repository, gateway_config)
     if quota_reaper is not None:
