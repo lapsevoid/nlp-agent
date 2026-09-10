@@ -1,5 +1,6 @@
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
@@ -122,6 +123,33 @@ class DelayedFirstStreamModel(FakeStreamModel):
         await asyncio.sleep(self.delay_s)
         yield AIMessageChunk(content="first")
         yield AIMessageChunk(content="second")
+
+
+class FinishThenHangModel(FakeStreamModel):
+    async def astream(self, _input, config=None, **_kwargs):
+        self.calls += 1
+        yield AIMessageChunk(content="partial")
+        yield AIMessageChunk(
+            content="", response_metadata={"finish_reason": "stop"}
+        )
+        await asyncio.Event().wait()
+
+
+class FinishThenUsageModel(FakeStreamModel):
+    async def astream(self, _input, config=None, **_kwargs):
+        self.calls += 1
+        yield AIMessageChunk(content="partial")
+        yield AIMessageChunk(
+            content="", response_metadata={"finish_reason": "stop"}
+        )
+        yield AIMessageChunk(
+            content="",
+            usage_metadata={
+                "input_tokens": 3,
+                "output_tokens": 4,
+                "total_tokens": 7,
+            },
+        )
 
 
 @pytest.mark.asyncio
@@ -596,6 +624,39 @@ async def test_stream_never_replays_after_visible_delta():
     with pytest.raises(StreamInterruptedError):
         await anext(stream)
     assert fallback.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_stream_ends_when_provider_emits_finish_reason(monkeypatch):
+    monkeypatch.setattr(
+        model_runtime_module,
+        "global_telemetry",
+        SimpleNamespace(event=lambda *_args, **_kwargs: None),
+    )
+    runtime = ResilientChatModel(
+        [candidate("finish", FinishThenHangModel([]))]
+    )
+
+    async def consume():
+        return [chunk async for chunk in runtime.astream([HumanMessage(content="hello")])]
+
+    chunks = await asyncio.wait_for(consume(), timeout=1.5)
+    assert [chunk.content for chunk in chunks] == ["partial", ""]
+
+
+@pytest.mark.asyncio
+async def test_stream_keeps_usage_tail_after_finish_reason():
+    runtime = ResilientChatModel(
+        [candidate("finish-usage", FinishThenUsageModel([]))]
+    )
+
+    response = await runtime.ainvoke([HumanMessage(content="hello")])
+
+    assert response.content == "partial"
+    assert response.usage_metadata is not None
+    assert response.usage_metadata["input_tokens"] == 3
+    assert response.usage_metadata["output_tokens"] == 4
+    assert response.usage_metadata["total_tokens"] == 7
 
 
 def test_bind_tools_applies_to_every_fallback_candidate():

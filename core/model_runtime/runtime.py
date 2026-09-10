@@ -43,6 +43,7 @@ from core.observability.runtime import global_telemetry
 from utils.logger import get_logger
 
 
+_FINISH_USAGE_DRAIN_S = 0.25
 logger = get_logger("nlp_agent.model_runtime")
 
 
@@ -807,6 +808,7 @@ class ResilientChatModel:
                 )
                 delta_usage: CanonicalTokenUsage | None = None
                 finish_reason: str | None = None
+                finish_drain_deadline: float | None = None
                 provider_response_id: str | None = None
                 try:
                     async with _attempt_span(
@@ -824,8 +826,17 @@ class ResilientChatModel:
                                 raise asyncio.TimeoutError(
                                     "model stream total timeout"
                                 )
+                            if finish_drain_deadline is not None:
+                                remaining_finish_drain = (
+                                    finish_drain_deadline - time.monotonic()
+                                )
+                                if remaining_finish_drain <= 0:
+                                    break
+                            else:
+                                remaining_finish_drain = remaining_total
                             wait_s = min(
                                 remaining_total,
+                                remaining_finish_drain,
                                 candidate.preset.timeouts.first_token_s
                                 if first
                                 else candidate.preset.timeouts.stream_idle_s,
@@ -836,6 +847,10 @@ class ResilientChatModel:
                                 )
                             except StopAsyncIteration:
                                 break
+                            except asyncio.TimeoutError:
+                                if finish_drain_deadline is not None:
+                                    break
+                                raise
                             first = False
                             received = True
                             chunk_visible = self._visible_chunk(chunk)
@@ -880,6 +895,10 @@ class ResilientChatModel:
                                 if usage["total_tokens"]:
                                     span.set_usage(usage)
                             yield normalized
+                            if finish and finish_drain_deadline is None:
+                                finish_drain_deadline = (
+                                    time.monotonic() + _FINISH_USAGE_DRAIN_S
+                                )
                         if not received:
                             raise EmptyModelResponseError(
                                 "Provider stream completed without chunks"
