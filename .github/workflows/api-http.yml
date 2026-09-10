@@ -17,7 +17,10 @@ permissions:
   pull-requests: read
 
 concurrency:
-  group: api-http-${{ github.event_name == 'workflow_dispatch' && format('manual-{0}', github.ref_name) || format('branch-{0}', github.head_ref || github.ref_name) }}
+  # Keep push and pull_request validation in separate groups.  Both events
+  # fire for a feature branch with an open PR; sharing a group would cancel
+  # the push selector before it can deliberately skip duplicate validation.
+  group: api-http-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
