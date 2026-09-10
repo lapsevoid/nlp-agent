@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 import threading
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
@@ -24,6 +25,7 @@ from server.tools.web.contracts import (
 from server.tools.web.extractors import extract_html, extract_json, extract_text
 from server.tools.web.network_safety import (
     ParsedUrl,
+    check_literal_host,
     resolve_and_check,
     validate_url,
 )
@@ -139,14 +141,23 @@ class WebFetchService:
             write=network.connect_timeout_s,
             pool=network.connect_timeout_s,
         )
-        proxy = None if self.transport is not None else (self.config.proxy_url or None)
+        proxy = None if self.transport is not None else (self._proxy_url() or None)
         return httpx.AsyncClient(
             transport=self.transport,
             proxy=proxy,
             timeout=timeout,
             headers={"User-Agent": self.config.user_agent},
             follow_redirects=False,
+            trust_env=False,
         )
+
+    def _proxy_url(self) -> str:
+        configured = self.config.proxy_url.strip()
+        if configured:
+            return configured
+        if self.config.proxy_url_env:
+            return os.environ.get(self.config.proxy_url_env, "").strip()
+        return ""
 
     async def _download(self, entry: ParsedUrl, *, as_markdown: bool) -> dict[str, Any]:
         network = self.config.network
@@ -155,7 +166,10 @@ class WebFetchService:
         redirects = 0
         async with self._build_client() as client:
             while True:
-                await resolve_and_check(current, blocked_cidrs=blocked_cidrs)
+                if self._proxy_url():
+                    check_literal_host(current, blocked_cidrs=blocked_cidrs)
+                else:
+                    await resolve_and_check(current, blocked_cidrs=blocked_cidrs)
                 client.cookies.clear()
                 try:
                     response = await client.send(

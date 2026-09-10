@@ -444,6 +444,7 @@ tools:
   web:
     enabled: true
     proxy_url: ""                          # 只允许运维配置
+    proxy_url_env: "HTTPS_PROXY"           # 显式信任运维注入的出站代理
     user_agent: "Nova/1.0 (+web-fetch)"
     network:
       connect_timeout_s: 5
