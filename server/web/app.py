@@ -58,6 +58,7 @@ from server.quota.service import QuotaService
 from server.session.summary import summary_sweep_loop
 from server.web.contracts import (
     CreateSessionBody,
+    CreateWhiteboardLibraryBody,
     RenameSessionBody,
     LoginBody,
     ReplaceUserRolesBody,
@@ -3158,6 +3159,24 @@ def create_app(
             if item.get("status") == "enabled" and item.get("topic_id") in enabled_topic_ids
         ]
         return {"catalog": catalog}
+
+    @app.get("/api/v1/whiteboard/library", tags=["whiteboard"])
+    async def get_whiteboard_library(request: Request, principal: Principal):
+        return {"items": await request.app.state.gateway.list_whiteboard_library(principal)}
+
+    @app.post("/api/v1/whiteboard/library", status_code=status.HTTP_201_CREATED, tags=["whiteboard"])
+    async def create_whiteboard_library_item(
+        body: CreateWhiteboardLibraryBody,
+        request: Request,
+        principal: Principal,
+        _claims: WriteClaims,
+    ):
+        item = await request.app.state.gateway.create_whiteboard_library_item(
+            principal,
+            name=body.name,
+            elements=body.elements,
+        )
+        return {"item": item}
 
     @app.get("/api/v1/teacher/book/{workspace_id}/navigation", tags=["teacher"])
     async def get_teacher_book_navigation(workspace_id: str, request: Request, principal: Principal):

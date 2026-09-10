@@ -619,6 +619,46 @@ class MySQLGatewayRepository:
         current = self.get_user_settings(user_id); settings = {**current["settings"], **changes}; revision = current["revision"] + 1
         with self._runtime_begin() as c: c.execute(text("INSERT INTO nlp_user_preferences(user_id,preferences_json,revision) VALUES(:id,:settings,:revision) ON DUPLICATE KEY UPDATE preferences_json=VALUES(preferences_json),revision=VALUES(revision)"), {"id": user_id, "settings": json.dumps(settings, ensure_ascii=False), "revision": revision})
         return self.get_user_settings(user_id)
+
+    def list_whiteboard_library(self) -> list[dict[str, Any]]:
+        with self._engine.connect() as connection:
+            rows = connection.execute(
+                text(
+                    "SELECT item_json FROM nlp_whiteboard_library_items "
+                    "ORDER BY created_at ASC, id ASC"
+                )
+            ).mappings().all()
+        return [self._json(row["item_json"]) for row in rows]
+
+    def create_whiteboard_library_item(
+        self,
+        *,
+        name: str,
+        elements: list[dict[str, Any]],
+        created_by: str,
+    ) -> dict[str, Any]:
+        item = {
+            "id": str(uuid.uuid4()),
+            "status": "published",
+            "created": int(_now().timestamp() * 1000),
+            "name": name,
+            "elements": elements,
+        }
+        with self._runtime_begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO nlp_whiteboard_library_items "
+                    "(id,name,item_json,created_by) VALUES(:id,:name,:item_json,:created_by)"
+                ),
+                {
+                    "id": item["id"],
+                    "name": name,
+                    "item_json": json.dumps(item, ensure_ascii=False, separators=(",", ":"), allow_nan=False),
+                    "created_by": created_by,
+                },
+            )
+        return item
+
     def delete_session(self, session_id: str) -> None:
         with self._runtime_begin() as c:
             c.execute(text("DELETE FROM nlp_turn_events WHERE turn_id IN (SELECT id FROM nlp_turns WHERE conversation_id=:s)"), {"s": session_id})

@@ -63,6 +63,7 @@ from server.session.summary import schedule_summary
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_UPLOADS_ROOT = _PROJECT_ROOT / ".data" / "uploads"
 logger = logging.getLogger(__name__)
+_WHITEBOARD_LIBRARY_MANAGER_ROLES = frozenset({"teacher", "developer", "admin"})
 
 
 def _session_uploads_root(context: SessionContext) -> Path:
@@ -834,6 +835,27 @@ class BackendGateway:
             self.repository.update_user_settings,
             principal.user_id,
             changes,
+        )
+
+    async def list_whiteboard_library(self, principal: AuthenticatedPrincipal) -> list[dict[str, Any]]:
+        authorization_service.require(principal, Permission.LEARNING_CONTENT_READ_PUBLIC)
+        return await asyncio.to_thread(self.repository.list_whiteboard_library)
+
+    async def create_whiteboard_library_item(
+        self,
+        principal: AuthenticatedPrincipal,
+        *,
+        name: str,
+        elements: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        if not principal.roles.intersection(_WHITEBOARD_LIBRARY_MANAGER_ROLES):
+            raise AccessDeniedError("whiteboard library management requires teacher or developer role")
+        authorization_service.require(principal, Permission.LEARNING_CONTENT_MANAGE)
+        return await asyncio.to_thread(
+            self.repository.create_whiteboard_library_item,
+            name=name,
+            elements=elements,
+            created_by=principal.user_id,
         )
 
     async def get_teaching_catalog(self, principal: AuthenticatedPrincipal, workspace_id: str) -> dict[str, Any]:

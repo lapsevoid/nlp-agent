@@ -19,6 +19,14 @@ export interface AuthSession {
   permissions?: string[];
 }
 
+export interface WhiteboardLibraryItem {
+  id: string;
+  status: "published" | "unpublished";
+  elements: unknown[];
+  created: number;
+  name?: string;
+}
+
 export interface DeveloperSnapshot {
   runtime: Record<string, unknown>;
   features: Record<string, { available: boolean; reason: string }>;

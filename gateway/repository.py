@@ -96,6 +96,15 @@ class GatewayRepository:
                     settings_json TEXT NOT NULL DEFAULT '{}',
                     updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS gateway_whiteboard_library_items (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    item_json TEXT NOT NULL,
+                    created_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_gateway_whiteboard_library_created
+                    ON gateway_whiteboard_library_items(created_at, id);
                 -- Teaching assets are deliberately independent from chat sessions,
                 -- turns, and user UI settings.  Editing a course cannot mutate a
                 -- learner transcript or LangGraph checkpoint.
@@ -836,6 +845,42 @@ class GatewayRepository:
                 ),
             )
         return {"revision": revision, "settings": merged, "updated_at": updated_at}
+
+    def list_whiteboard_library(self) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT item_json FROM gateway_whiteboard_library_items "
+                "ORDER BY created_at ASC, id ASC"
+            ).fetchall()
+        return [json.loads(row["item_json"]) for row in rows]
+
+    def create_whiteboard_library_item(
+        self,
+        *,
+        name: str,
+        elements: list[dict[str, Any]],
+        created_by: str,
+    ) -> dict[str, Any]:
+        item = {
+            "id": str(uuid.uuid4()),
+            "status": "published",
+            "created": int(datetime.now(timezone.utc).timestamp() * 1000),
+            "name": name,
+            "elements": elements,
+        }
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO gateway_whiteboard_library_items "
+                "(id,name,item_json,created_by,created_at) VALUES (?,?,?,?,?)",
+                (
+                    item["id"],
+                    name,
+                    json.dumps(item, ensure_ascii=False, separators=(",", ":"), allow_nan=False),
+                    created_by,
+                    _now(),
+                ),
+            )
+        return item
 
     def get_teaching_catalog(self, workspace_id: str) -> dict[str, Any]:
         with self._lock:

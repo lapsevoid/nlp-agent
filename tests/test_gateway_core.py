@@ -7,6 +7,7 @@ import gateway.core as gateway_core
 from core.identity import AccessDeniedError, AuthenticatedPrincipal
 from core.learning import KnowledgeBookContext, LearningContext, TeachingMaterials
 from core.session_context import SessionContext
+from core.rbac import Permission
 from configs.settings import settings
 from gateway.contracts import (
     EvaluationContext,
@@ -297,6 +298,30 @@ async def test_gateway_rejects_student_teaching_catalog_updates(tmp_path, princi
                 "review_blueprints": [],
                 "guided_blueprints": [],
             },
+        )
+
+
+@pytest.mark.asyncio
+async def test_gateway_rejects_non_manager_role_even_with_content_manage_permission(tmp_path):
+    repository = GatewayRepository(tmp_path / "gateway.sqlite3")
+    gateway = BackendGateway(
+        engine=FakeEngine(),
+        repository=repository,
+        sessions=FakeSessions(),
+        dispatcher=RecordingTurnDispatcher(),
+    )
+    student_with_override = AuthenticatedPrincipal(
+        user_id="student-override",
+        workspace_ids=frozenset({"w1"}),
+        roles=frozenset({"student"}),
+        permissions=frozenset({Permission.LEARNING_CONTENT_MANAGE.value}),
+    )
+
+    with pytest.raises(AccessDeniedError, match="teacher or developer"):
+        await gateway.create_whiteboard_library_item(
+            student_with_override,
+            name="不应发布",
+            elements=[{"id": "shape-1", "type": "rectangle"}],
         )
 
 
