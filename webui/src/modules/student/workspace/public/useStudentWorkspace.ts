@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "@/platform/http/api";
 import { useOptionalAuth } from "@/platform/auth/AuthContext";
@@ -27,6 +27,12 @@ export function useStudentWorkspace() {
     deleteCategory,
   } = usePreferencesController();
   const { settings, settingsError, initializeSettings, patchSettings, resetSettings } = useSettingsController();
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [loadingMessages, setLoadingMessages] = useState(false);
+  const handleActiveSessionChange = useCallback((sessionId: string | null) => {
+    setMessages([]);
+    setLoadingMessages(Boolean(sessionId));
+  }, []);
   const [requestError, setRequestError] = useState("");
   const {
     sessions,
@@ -40,19 +46,24 @@ export function useStudentWorkspace() {
     activeSessionRef,
     freshSessionIdsRef,
     loadSessions,
+    invalidateSessionLoads,
     createBackendSession,
     startNewChat,
     deleteSession,
     renameSessionTitle,
-  } = useSessionController({ preferences, persistPreferences, updateSessionMeta, onRequestError: setRequestError });
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  } = useSessionController({
+    preferences,
+    persistPreferences,
+    updateSessionMeta,
+    onRequestError: setRequestError,
+    onActiveSessionChange: handleActiveSessionChange,
+  });
   const [modelProfiles, setModelProfiles] = useState<Record<string, RuntimeModelProfile>>({});
   const [authSession, setAuthSession] = useState<AuthSession | null>(null);
   const [bootStatus, setBootStatus] = useState<"loading" | "ready" | "unauthenticated" | "error">("loading");
   const [authRevision, setAuthRevision] = useState(0);
   const [error, setError] = useState("");
   const [socketStatus, setSocketStatus] = useState<"connecting" | "connected" | "reconnecting" | "offline">("connecting");
-  const [loadingMessages, setLoadingMessages] = useState(false);
   const socketRef = useRef<StudentSocket | null>(null);
   const pendingRequests = useRef(new Map<string, string>());
   const inFlightTurnIds = useRef(new Set<string>());
@@ -69,6 +80,30 @@ export function useStudentWorkspace() {
     setLoadingMessages,
     updateSessionMeta,
   });
+  const authenticatedUserId = globalAuth !== null
+    ? globalAuth.user?.user_id ?? null
+    : authSession?.user_id ?? null;
+  const previousAuthenticatedUserIdRef = useRef<string | null>(null);
+  useLayoutEffect(() => {
+    const previousUserId = previousAuthenticatedUserIdRef.current;
+    if (previousUserId !== null && previousUserId !== authenticatedUserId) {
+      invalidateSessionLoads();
+      loadGenerationRef.current += 1;
+      pendingRequests.current.clear();
+      inFlightTurnIds.current.clear();
+      cancelledTurnIds.current.clear();
+      freshSessionIdsRef.current.clear();
+      socketRef.current?.close();
+      socketRef.current = null;
+      startNewChat();
+      setSessions([]);
+      setAuthSession(null);
+      setRequestError("");
+      setError("");
+      setBootStatus("loading");
+    }
+    previousAuthenticatedUserIdRef.current = authenticatedUserId;
+  }, [authenticatedUserId, cancelledTurnIds, freshSessionIdsRef, inFlightTurnIds, invalidateSessionLoads, pendingRequests, setSessions, startNewChat]);
   const handleEvent = useMemo(
     // The factory stores refs for the socket callback; it does not read them during render.
     // eslint-disable-next-line react-hooks/refs
@@ -119,13 +154,15 @@ export function useStudentWorkspace() {
   useEffect(() => {
     loadGenerationRef.current += 1;
     cancelledTurnIds.current.clear();
+    const freshSession = activeSessionId ? freshSessionIdsRef.current.has(activeSessionId) : false;
+    if (!freshSession) setMessages([]);
+    setLoadingMessages(Boolean(activeSessionId && !freshSession));
     socketRef.current?.setSession(activeSessionId);
     queueMicrotask(() => {
       if (activeSessionId && freshSessionIdsRef.current.delete(activeSessionId)) {
         setLoadingMessages(false);
       } else if (activeSessionId) void loadTurns(activeSessionId).catch((reason) => setError(String(reason)));
       else {
-        setMessages([]);
         setLoadingMessages(false);
       }
     });
