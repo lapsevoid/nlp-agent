@@ -27,6 +27,12 @@ export function useStudentWorkspace() {
     deleteCategory,
   } = usePreferencesController();
   const { settings, settingsError, initializeSettings, patchSettings, resetSettings } = useSettingsController();
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [loadingMessages, setLoadingMessages] = useState(false);
+  const handleActiveSessionChange = useCallback((sessionId: string | null) => {
+    setMessages([]);
+    setLoadingMessages(Boolean(sessionId));
+  }, []);
   const [requestError, setRequestError] = useState("");
   const {
     sessions,
@@ -36,23 +42,28 @@ export function useStudentWorkspace() {
     activeSessionId,
     composerRevision,
     setActiveSessionId,
-    selectSession: selectSessionInternal,
+    selectSession,
     activeSessionRef,
     freshSessionIdsRef,
     loadSessions,
+    invalidateSessionLoads,
     createBackendSession,
-    startNewChat: startNewChatInternal,
+    startNewChat,
     deleteSession,
     renameSessionTitle,
-  } = useSessionController({ preferences, persistPreferences, updateSessionMeta, onRequestError: setRequestError });
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  } = useSessionController({
+    preferences,
+    persistPreferences,
+    updateSessionMeta,
+    onRequestError: setRequestError,
+    onActiveSessionChange: handleActiveSessionChange,
+  });
   const [modelProfiles, setModelProfiles] = useState<Record<string, RuntimeModelProfile>>({});
   const [authSession, setAuthSession] = useState<AuthSession | null>(null);
   const [bootStatus, setBootStatus] = useState<"loading" | "ready" | "unauthenticated" | "error">("loading");
   const [authRevision, setAuthRevision] = useState(0);
   const [error, setError] = useState("");
   const [socketStatus, setSocketStatus] = useState<"connecting" | "connected" | "reconnecting" | "offline">("connecting");
-  const [loadingMessages, setLoadingMessages] = useState(false);
   const socketRef = useRef<StudentSocket | null>(null);
   const pendingRequests = useRef(new Map<string, string>());
   const inFlightTurnIds = useRef(new Set<string>());
@@ -69,17 +80,6 @@ export function useStudentWorkspace() {
     setLoadingMessages,
     updateSessionMeta,
   });
-  const selectSession = useCallback((sessionId: string) => {
-    if (activeSessionRef.current === sessionId) return;
-    setMessages([]);
-    setLoadingMessages(true);
-    selectSessionInternal(sessionId);
-  }, [activeSessionRef, selectSessionInternal]);
-  const startNewChat = useCallback(() => {
-    setMessages([]);
-    setLoadingMessages(false);
-    startNewChatInternal();
-  }, [startNewChatInternal]);
   const authenticatedUserId = globalAuth !== null
     ? globalAuth.user?.user_id ?? null
     : authSession?.user_id ?? null;
@@ -87,6 +87,7 @@ export function useStudentWorkspace() {
   useLayoutEffect(() => {
     const previousUserId = previousAuthenticatedUserIdRef.current;
     if (previousUserId !== null && previousUserId !== authenticatedUserId) {
+      invalidateSessionLoads();
       loadGenerationRef.current += 1;
       pendingRequests.current.clear();
       inFlightTurnIds.current.clear();
@@ -102,7 +103,7 @@ export function useStudentWorkspace() {
       setBootStatus("loading");
     }
     previousAuthenticatedUserIdRef.current = authenticatedUserId;
-  }, [authenticatedUserId, cancelledTurnIds, freshSessionIdsRef, inFlightTurnIds, pendingRequests, setSessions, startNewChat]);
+  }, [authenticatedUserId, cancelledTurnIds, freshSessionIdsRef, inFlightTurnIds, invalidateSessionLoads, pendingRequests, setSessions, startNewChat]);
   const handleEvent = useMemo(
     // The factory stores refs for the socket callback; it does not read them during render.
     // eslint-disable-next-line react-hooks/refs
