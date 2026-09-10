@@ -129,6 +129,11 @@ class FailingTurnDispatcher(RecordingTurnDispatcher):
         raise ConnectionError("redis unavailable")
 
 
+class FailingCancelTurnDispatcher(RecordingTurnDispatcher):
+    async def cancel(self, turn_id):
+        raise ConnectionError("redis unavailable")
+
+
 @pytest.mark.asyncio
 async def test_in_process_cancel_does_not_wait_for_slow_executor_cleanup():
     started = asyncio.Event()
@@ -316,6 +321,30 @@ async def test_gateway_submits_persisted_turn_to_dispatcher(tmp_path, principal)
     assert task.context == session
     assert task.content == "dispatch me"
     assert repository.get_turn(accepted.turn_id).status == TurnStatus.ACCEPTED
+    await gateway.close()
+
+
+@pytest.mark.asyncio
+async def test_gateway_returns_cancelled_when_dispatcher_cancel_is_unavailable(
+    tmp_path, principal
+):
+    dispatcher = FailingCancelTurnDispatcher()
+    gateway = BackendGateway(
+        engine=FakeEngine(),
+        repository=GatewayRepository(tmp_path / "gateway.sqlite3"),
+        sessions=FakeSessions(),
+        dispatcher=dispatcher,
+    )
+    await gateway.start()
+    session = await gateway.create_session(principal, workspace_id="w1")
+    accepted = await gateway.submit_turn(
+        principal,
+        SubmitTurnRequest(session_id=session.session_id, content="cancel me"),
+    )
+
+    cancelled = await gateway.cancel_turn(principal, accepted.turn_id)
+
+    assert cancelled.status == TurnStatus.CANCELLED
     await gateway.close()
 
 

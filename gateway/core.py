@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import re
 import uuid
 from collections import defaultdict
@@ -61,6 +62,7 @@ from server.session.summary import schedule_summary
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_UPLOADS_ROOT = _PROJECT_ROOT / ".data" / "uploads"
+logger = logging.getLogger(__name__)
 
 
 def _session_uploads_root(context: SessionContext) -> Path:
@@ -702,7 +704,17 @@ class BackendGateway:
             payload={"status": TurnStatus.CANCELLED.value},
         )
         self.events.publish(event)
-        await self.dispatcher.cancel(turn_id)
+        try:
+            await self.dispatcher.cancel(turn_id)
+        except Exception:
+            # Cancellation is already durable in the repository and its event
+            # has been published. A transient Redis control-plane failure must
+            # not turn the user-facing cancel request into HTTP 500.
+            logger.warning(
+                "Turn cancellation dispatch failed after durable cancellation",
+                exc_info=True,
+                extra={"turn_id": turn_id},
+            )
         updated = await asyncio.to_thread(self.repository.get_turn, turn_id)
         return updated or turn
 

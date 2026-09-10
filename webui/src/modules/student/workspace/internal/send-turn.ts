@@ -5,6 +5,8 @@ import { StudentSocket } from "@/platform/realtime/client";
 import type { ChatAttachment, ChatMessage, LearningPreferences, SessionLearningMeta, UserSettings } from "@/shared/types";
 import { createUuid } from "@/shared/utils/uuid";
 
+const CANCEL_FALLBACK_SETTLE_MS = 2_000;
+
 interface TurnSenderOptions {
   activeSessionRef: MutableRefObject<string | null>;
   socketRef: MutableRefObject<StudentSocket | null>;
@@ -95,7 +97,17 @@ export function useTurnSender({
         ? { ...message, status: "cancelled", completedAt: new Date().toISOString() }
         : message));
     };
-    const fallbackToSocket = () => socketRef.current?.cancel(running.turnId);
+    const fallbackToSocket = () => {
+      socketRef.current?.cancel(running.turnId);
+      window.setTimeout(() => {
+        inFlightTurnIds.current.delete(running.turnId);
+        setMessages((current) => current.map((message) => message.turnId === running.turnId
+          && message.role === "assistant"
+          && message.status === "cancelling"
+          ? { ...message, status: "interrupted", completedAt: new Date().toISOString() }
+          : message));
+      }, CANCEL_FALLBACK_SETTLE_MS);
+    };
     void Promise.race([
       api.cancelTurn(running.turnId),
       new Promise<never>((_, reject) => window.setTimeout(() => reject(new Error("cancel request timed out")), 1000)),
