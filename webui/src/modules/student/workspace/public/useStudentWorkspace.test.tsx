@@ -495,6 +495,37 @@ describe("useStudentWorkspace settings", () => {
     expect(result.current.isCancelling).toBe(true);
   });
 
+  it("releases the composer when cancellation has no transport acknowledgement", async () => {
+    cancelTurnMock.mockRejectedValueOnce(new Error("HTTP 500"));
+    const { result } = renderHook(() => useStudentWorkspace());
+    await waitFor(() => expect(result.current.bootStatus).toBe("ready"));
+
+    await act(async () => { await result.current.send("搜索测试"); });
+    const requestId = sendChatMock.mock.calls[0][2] as string;
+    act(() => socketEventHandlerRef.current?.({
+      v: "1",
+      type: "command.ack",
+      request_id: requestId,
+      session_id: "session-new",
+      turn_id: "turn-cancel-unconfirmed",
+      timestamp: "2026-09-10T00:00:00Z",
+      payload: { command: "chat.send" },
+    }));
+    act(() => socketEventHandlerRef.current?.({
+      v: "1",
+      type: "chat.started",
+      session_id: "session-new",
+      turn_id: "turn-cancel-unconfirmed",
+      timestamp: "2026-09-10T00:00:01Z",
+      payload: {},
+    }));
+
+    act(() => result.current.cancel());
+    await waitFor(() => expect(socketCancelMock).toHaveBeenCalledWith("turn-cancel-unconfirmed"));
+
+    await waitFor(() => expect(result.current.isRunning).toBe(false), { timeout: 4_000 });
+  });
+
   it("preserves the student WebSocket while expired authentication is restored", async () => {
   ensureAuthMock.mockResolvedValue({
     user_id: "user-1",
