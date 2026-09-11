@@ -6,15 +6,32 @@ completed turn.
 
 Design notes
 ------------
-* **Single anchor message.**  Following the GPT/Gemini convention, the prompt
-  uses only whoever spoke first (the opening user question, or the assistant's
-  first message when the turn is assistant-initiated).  Later turns never
-  change the topic, so a title is generated once and never recomputed.
+* **Whole dialogue, recomputed per turn.**  The prompt renders the opening turn
+  plus as many of the newest turns as fit in ``MAX_INPUT_CHARS``, so the title
+  summarises what the conversation actually covered -- both sides of the
+  exchange -- instead of only the user's opening question.  Generation re-arms
+  whenever a completed turn is newer than the standing ``title_updated_at``; an
+  unchanged dialogue is never re-summarised, so a settled conversation costs
+  nothing.
+* **Bounded work per turn.**  Only the newest ``SUMMARY_TURN_WINDOW`` completed
+  turns are read, so regeneration costs the same on turn 500 as on turn 5
+  instead of re-reading and re-cleaning the whole history every time.
+* **The newest turn always reaches the prompt.**  ``MAX_MESSAGE_CHARS`` is sized
+  against ``MAX_INPUT_CHARS`` so that a fully capped opening turn plus a fully
+  capped newest turn fit with room to spare.  That is what makes per-turn
+  regeneration worth its cost: whenever the basis advances, the prompt has really
+  gained a turn, so no call is spent re-deriving a title from unchanged input.
 * **Manual titles win.**  A manual rename sets ``title_is_manual``; the
   summarizer refuses to write over it.
 * **Lease-fenced.**  Before calling the LLM a worker takes a short lease
   (``summary_lease_expires_at``) with a conditional UPDATE, so two workers that
-  both observed an unsummarised session do not pay for the same LLM call.
+  both observed the same due basis do not pay for the same LLM call.
+* **Basis-fenced writes.**  Both the claim and the title write require the
+  stored basis to be older than the one being written, so a worker overtaken by
+  a newer turn cannot roll the title back.
+* **Retries are rate-bounded, not count-bounded.**  A failure extends the lease
+  with exponential backoff capped at ``MAX_BACKOFF_S``, so an unavailable model
+  cannot storm the sweep and a session recovers by itself once the model does.
 * **Durable via sweep.**  The fire-and-forget ``schedule_summary`` is a fast
   path; a periodic ``summary_sweep_loop`` backfills anything that was lost to a
   restart, container rebuild or event-loop failure.
@@ -28,7 +45,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from langchain_core.messages import HumanMessage
-from sqlalchemy import exists, or_, select, text
+from sqlalchemy import Select, case, exists, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from core.model_runtime.usage import UsageAttributionContext, bind_usage_attribution
@@ -50,25 +67,51 @@ MAX_OUTPUT_TOKENS = 40
 # Bound the prompt: a single turn can still contain a very long answer, tool
 # output or attachment dump.
 MAX_INPUT_CHARS = 2_000
+# Per-message cap so one huge reply cannot crowd every other turn out of the
+# budget.  Sized against MAX_INPUT_CHARS rather than in isolation: a fully
+# capped turn costs ~423 chars with both role prefixes, so the anchor plus three
+# of the newest turns always fit.  A larger cap would let a verbose opening
+# exchange consume the whole budget and starve exactly the recent turns the title
+# is supposed to track.
+MAX_MESSAGE_CHARS = 200
 
 # How long a worker keeps the summary lease before another may retry.
 SUMMARY_LEASE_S = 60
 # Sweep batch size / cadence for the durable backfill.
 SWEEP_BATCH = 25
 SWEEP_INTERVAL_S = 5
-# Retry budget for the first summary.  On LLM failure the lease is extended
-# (exponential backoff) rather than cleared, so an unavailable model cannot
-# trigger a retry storm across the 5-second sweep cadence.
+# How many completed turns one title generation loads.  The prompt budget can
+# only ever hold a few dozen turns, so reading the whole history would make
+# per-turn regeneration cost O(N^2) over a session.  Shorter conversations are
+# rendered from their full history exactly as before; longer ones are titled from
+# their most recent window, which is what a title tracking the latest state wants
+# anyway.
+SUMMARY_TURN_WINDOW = 80
+# On LLM failure the lease is extended (exponential backoff) rather than cleared,
+# so an unavailable model cannot trigger a retry storm across the 5-second sweep
+# cadence.  The backoff -- not a cap on the attempt count -- is what bounds the
+# cost: it tops out at MAX_BACKOFF_S, so a session that cannot be titled spends
+# at most one utility call per hour and starts succeeding again by itself once the
+# model recovers.  A hard attempts cap would instead disable titling for that
+# session permanently, which stopped making sense once every turn re-arms
+# generation.  The lease bound also lets a crashed task self-heal instead of
+# wedging the row until process restart.
 BASE_BACKOFF_S = 60
 MAX_BACKOFF_S = 3600
-MAX_SUMMARY_ATTEMPTS = 10
+
+
+# Titling reads only a handful of turn columns, so ``_load_state`` projects them
+# instead of hydrating whole ``TurnModel`` rows (which also carry
+# ``learning_state_json`` and error text).  Consumers treat a turn as a
+# duck-typed row exposing exactly those columns.
+TurnRow = Any
 
 
 @dataclass(frozen=True, slots=True)
 class _SummaryState:
     title_updated_at: datetime | None
     title_is_manual: bool
-    turns: list[TurnModel]
+    turns: list[TurnRow]
     summary_attempts: int
     workspace_id: str | None
     owner_user_id: str | None
@@ -85,53 +128,86 @@ def _clean_input(text: str) -> str:
 def _clean_result(text: str) -> str:
     # ``result_text`` is already free of tool JSON / thinking (those live in
     # transcripts), but drop any residual markers and light markdown noise.
-    return normalize_whitespace(strip_markdown_noise(text))
+    # Assistant text reaches the prompt as well now, so strip the same learning
+    # context / uploaded attachment preamble the user side strips: a reply that
+    # echoes one would otherwise spend prompt budget on upload metadata.
+    return normalize_whitespace(strip_markdown_noise(strip_learning_preamble(text)))
 
 
 def _clean_title(title: str) -> str:
     return clean_title(title, max_chars=MAX_TITLE_CHARS) or ""
 
 
-def _truncate(text: str) -> str:
-    return text[:MAX_INPUT_CHARS] if len(text) > MAX_INPUT_CHARS else text
+def _truncate(text: str, limit: int = MAX_INPUT_CHARS) -> str:
+    return text[:limit] if len(text) > limit else text
 
 
-def _select_turns(turns: list[TurnModel]) -> list[TurnModel]:
-    """Return the single anchor turn (whoever spoke first), if any."""
-    for turn in turns:
-        if _clean_input(turn.input_text) or _clean_result(turn.result_text or ""):
-            return [turn]
-    return []
+def _select_turns(turns: list[TurnRow]) -> list[TurnRow]:
+    """Return every turn that contributes readable dialogue, oldest first."""
+    return [
+        turn
+        for turn in turns
+        if _clean_input(turn.input_text) or _clean_result(turn.result_text or "")
+    ]
 
 
-def _render_turns(turns: list[TurnModel]) -> str:
-    """Render the anchor turn's opening message, bounded to ``MAX_INPUT_CHARS``."""
-    for turn in turns:
-        user = _clean_input(turn.input_text)
-        if user:
-            return f"[user]: {_truncate(user)}"
-        assistant = _clean_result(turn.result_text or "")
-        if assistant:
-            return f"[assistant]: {_truncate(assistant)}"
-    return ""
+def _turn_lines(turn: TurnRow) -> list[str]:
+    """Render one turn as ``[user]:`` / ``[assistant]:`` prompt lines."""
+    lines: list[str] = []
+    user = _clean_input(turn.input_text)
+    if user:
+        lines.append(f"[user]: {_truncate(user, MAX_MESSAGE_CHARS)}")
+    assistant = _clean_result(turn.result_text or "")
+    if assistant:
+        lines.append(f"[assistant]: {_truncate(assistant, MAX_MESSAGE_CHARS)}")
+    return lines
+
+
+def _render_turns(turns: list[TurnRow]) -> str:
+    """Render the dialogue within ``MAX_INPUT_CHARS``, in chronological order.
+
+    The opening turn is always kept because it anchors the topic; the remaining
+    budget is filled newest-first so the title also reflects where the
+    conversation has got to.  A turn is added whole (question before answer) or
+    not at all, so the rendering never ends mid-exchange.
+    """
+    rendered = [lines for lines in (_turn_lines(turn) for turn in turns) if lines]
+    if not rendered:
+        return ""
+    anchor = rendered[0]
+    used = sum(len(line) + 1 for line in anchor)
+    tail: list[str] = []
+    for lines in reversed(rendered[1:]):
+        cost = sum(len(line) + 1 for line in lines)
+        if used + cost > MAX_INPUT_CHARS:
+            break
+        tail = lines + tail
+        used += cost
+    return _truncate("\n".join(anchor + tail))
 
 
 def _decide(
-    turns: list[TurnModel],
+    turns: list[TurnRow],
     title_updated_at: datetime | None,
     title_is_manual: bool,
 ) -> datetime | None:
     """Return the summary basis (newest completed turn) if generation is due.
 
-    A title is generated exactly once: only while no summary has been written
-    yet (``title_updated_at IS NULL``) and the user has not renamed the session
-    by hand.  The anchor message is fixed, so there is nothing to recompute.
+    Generation is due while the user has not renamed the session by hand and the
+    dialogue has advanced past whatever the standing title was built from, so
+    every newly completed turn re-titles the session while an unchanged dialogue
+    is left alone.
     """
-    if title_is_manual or title_updated_at is not None:
+    if title_is_manual:
         return None
-    return max(
+    basis = max(
         (t.completed_at for t in turns if t.completed_at is not None), default=None
     )
+    if basis is None:
+        return None
+    if title_updated_at is not None and basis <= title_updated_at:
+        return None
+    return basis
 
 
 async def _load_state(
@@ -157,18 +233,28 @@ async def _load_state(
     owner_user_id = (
         str(row.owner_user_id) if row is not None and row.owner_user_id else None
     )
-    turns = list(
-        (
-            await session.execute(
-                select(TurnModel)
-                .where(
-                    TurnModel.conversation_id == session_id,
-                    TurnModel.status == "completed",
-                )
-                .order_by(TurnModel.created_at, TurnModel.id)
+    # The newest SUMMARY_TURN_WINDOW completed turns, projected to just the
+    # columns titling reads, then reversed back into chronological order.
+    # Bounding the window is what stops per-turn regeneration from re-reading and
+    # re-cleaning the whole history on every single turn.
+    rows = (
+        await session.execute(
+            select(
+                TurnModel.id,
+                TurnModel.created_at,
+                TurnModel.completed_at,
+                TurnModel.input_text,
+                TurnModel.result_text,
             )
-        ).scalars().all()
-    )
+            .where(
+                TurnModel.conversation_id == session_id,
+                TurnModel.status == "completed",
+            )
+            .order_by(TurnModel.created_at.desc(), TurnModel.id.desc())
+            .limit(SUMMARY_TURN_WINDOW)
+        )
+    ).all()
+    turns = list(reversed(rows))
     return _SummaryState(
         title_updated_at=title_updated_at,
         title_is_manual=title_is_manual,
@@ -188,21 +274,32 @@ async def _generate_title(text: str, llm: Any) -> str | None:
 
 
 async def _claim_summary(
-    session: AsyncSession, session_id: str, *, now: datetime, lease_s: int
+    session: AsyncSession,
+    session_id: str,
+    *,
+    now: datetime,
+    lease_s: int,
+    basis: datetime,
 ) -> bool:
-    """Atomically take the summary lease, re-validating the due conditions."""
+    """Atomically take the summary lease for one basis.
+
+    The basis fence (``title_updated_at < :basis``) replaces the old write-once
+    ``title_updated_at IS NULL`` gate: a session is re-titled as its dialogue
+    grows, but never for a basis another worker has already covered.
+    """
     result = await session.execute(
         text(
             "UPDATE nlp_conversations "
             "SET summary_lease_expires_at=:lease_until "
             "WHERE id=:id AND status='active' AND title_is_manual=0 "
-            "AND title_updated_at IS NULL "
+            "AND (title_updated_at IS NULL OR title_updated_at < :basis) "
             "AND (summary_lease_expires_at IS NULL OR summary_lease_expires_at < :now)"
         ),
         {
             "id": session_id,
             "lease_until": now + timedelta(seconds=lease_s),
             "now": now,
+            "basis": basis,
         },
     )
     return result.rowcount == 1
@@ -239,13 +336,19 @@ async def _backoff_summary(
 async def _write_title(
     session: AsyncSession, session_id: str, title: str, basis: datetime
 ) -> bool:
-    """Store the title once, releasing the lease; manual/raced writes lose."""
+    """Store the title for one basis, releasing the lease.
+
+    Manual renames always win, and a basis that is no longer newer than the
+    stored one loses -- so a worker overtaken by a newer turn cannot roll the
+    title back.
+    """
     result = await session.execute(
         text(
             "UPDATE nlp_conversations "
             "SET title=:title, title_updated_at=:basis, "
             "summary_lease_expires_at=NULL, summary_attempts=0 "
-            "WHERE id=:id AND title_is_manual=0 AND title_updated_at IS NULL"
+            "WHERE id=:id AND title_is_manual=0 "
+            "AND (title_updated_at IS NULL OR title_updated_at < :basis)"
         ),
         {"title": title, "basis": basis, "id": session_id},
     )
@@ -255,7 +358,7 @@ async def _write_title(
 async def build_conversation_text(
     session_id: str, session_factory: async_sessionmaker[AsyncSession]
 ) -> str:
-    """Render the anchor turn of a session as prompt text."""
+    """Render a session's dialogue as prompt text."""
     async with session_factory() as session:
         state = await _load_state(session, session_id)
     return _render_turns(_select_turns(state.turns))
@@ -275,23 +378,14 @@ async def generate_and_store_summary(
         )
         if basis is None:
             return False
-        text = _render_turns(_select_turns(state.turns))
+        selected = _select_turns(state.turns)
+        text = _render_turns(selected)
         if not text:
-            return False
-        if state.summary_attempts >= MAX_SUMMARY_ATTEMPTS:
-            # Exhausted the retry budget; leave the row alone until a manual
-            # rename or a future migration resets it.  Logging at info level
-            # keeps the operator aware without screaming into error channels.
-            logger.info(
-                "session summary gave up after %s attempts",
-                state.summary_attempts,
-                extra={"session_id": session_id},
-            )
             return False
         now = _utcnow()
         async with session_factory.begin() as session:
             if not await _claim_summary(
-                session, session_id, now=now, lease_s=SUMMARY_LEASE_S
+                session, session_id, now=now, lease_s=SUMMARY_LEASE_S, basis=basis
             ):
                 return False
 
@@ -344,7 +438,21 @@ async def generate_and_store_summary(
             return False
 
         async with session_factory.begin() as session:
-            return await _write_title(session, session_id, title, basis)
+            wrote = await _write_title(session, session_id, title, basis)
+        if wrote:
+            logger.info(
+                "session title regenerated from %s turn(s)",
+                len(selected),
+                extra={"session_id": session_id, "basis": basis.isoformat()},
+            )
+        else:
+            # Lost the race to another worker, or the learner renamed the session
+            # mid-flight.  Both are expected now that every turn re-arms.
+            logger.debug(
+                "session title write was fenced; keeping the newer title",
+                extra={"session_id": session_id},
+            )
+        return wrote
     except asyncio.CancelledError:
         raise
     except Exception:
@@ -352,32 +460,53 @@ async def generate_and_store_summary(
         return False
 
 
+def _due_sessions_statement(*, now: datetime, batch: int) -> Select[Any]:
+    """Build the sweep query: conversations whose dialogue outran their title.
+
+    A session is due when some completed turn is newer than the basis the standing
+    title was built from (or no title has been written yet).  Ordering puts
+    never-titled sessions first -- those are the ones a learner still sees as an
+    empty or first-question fallback -- then most recent activity, so the
+    conversations in front of a user are retitled before idle ones.  Recency alone
+    would let a quiet but genuinely due session starve whenever the due rate
+    exceeds one batch per cadence, which the per-turn refill now makes possible.
+    """
+    newer_turn = exists().where(
+        TurnModel.conversation_id == ConversationModel.id,
+        TurnModel.status == "completed",
+        TurnModel.completed_at.isnot(None),
+        or_(
+            ConversationModel.title_updated_at.is_(None),
+            TurnModel.completed_at > ConversationModel.title_updated_at,
+        ),
+    )
+    never_titled = case((ConversationModel.title_updated_at.is_(None), 0), else_=1)
+    return (
+        select(ConversationModel.id)
+        .where(
+            ConversationModel.status == "active",
+            ConversationModel.title_is_manual.is_(False),
+            or_(
+                ConversationModel.summary_lease_expires_at.is_(None),
+                ConversationModel.summary_lease_expires_at < now,
+            ),
+            newer_turn,
+        )
+        .order_by(
+            never_titled,
+            ConversationModel.last_message_at.desc(),
+            ConversationModel.id,
+        )
+        .limit(batch)
+    )
+
+
 async def _find_due_sessions(
     session: AsyncSession, *, now: datetime, batch: int
 ) -> list[str]:
-    """Return conversation ids that are due for a first summary."""
+    """Return conversation ids whose dialogue advanced past their title."""
     return list(
-        (
-            await session.scalars(
-                select(ConversationModel.id)
-                .where(
-                    ConversationModel.status == "active",
-                    ConversationModel.title_is_manual.is_(False),
-                    ConversationModel.title_updated_at.is_(None),
-                    ConversationModel.summary_attempts < MAX_SUMMARY_ATTEMPTS,
-                    or_(
-                        ConversationModel.summary_lease_expires_at.is_(None),
-                        ConversationModel.summary_lease_expires_at < now,
-                    ),
-                    exists().where(
-                        TurnModel.conversation_id == ConversationModel.id,
-                        TurnModel.status == "completed",
-                    ),
-                )
-                .order_by(ConversationModel.created_at, ConversationModel.id)
-                .limit(batch)
-            )
-        ).all()
+        (await session.scalars(_due_sessions_statement(now=now, batch=batch))).all()
     )
 
 

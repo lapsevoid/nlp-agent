@@ -1,12 +1,14 @@
 """Session title summarization tests (DB-free; LLM mocked).
 
-The summarizer's correctness rests on four properties exercised here: it
-generates at most once (first message anchors the topic, manual titles are
-never overwritten), it never raises on model failure, the lease claim keeps a
-second worker from paying for a duplicate LLM call, and every write is a
-single-row conditional UPDATE scoped to the exact conversation id (the id
-already arrived from an authorized turn context, so there is no cross-tenant
-write path).
+The summarizer's correctness rests on the properties exercised here: the prompt
+renders the whole dialogue (both speakers -- the anchor turn plus as many of the
+newest turns as fit the budget), a title is regenerated whenever the dialogue
+advances past the basis it was built from but never for an unchanged dialogue,
+manual titles are never overwritten, it never raises on model failure, the lease
+claim keeps a second worker from paying for a duplicate LLM call, and every
+write is a single-row conditional UPDATE scoped to the exact conversation id
+(the id already arrived from an authorized turn context, so there is no
+cross-tenant write path).
 """
 
 from __future__ import annotations
@@ -17,14 +19,19 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from sqlalchemy.dialects import mysql
 
 from core.model_runtime.usage import current_usage_attribution
 from server.session.summary import (
-    MAX_SUMMARY_ATTEMPTS,
+    MAX_INPUT_CHARS,
+    MAX_MESSAGE_CHARS,
+    SUMMARY_TURN_WINDOW,
     _backoff_summary,
     _clean_input,
+    _clean_result,
     _clean_title,
     _decide,
+    _due_sessions_statement,
     _render_turns,
     _select_turns,
     _SummaryState,
@@ -67,22 +74,48 @@ def test_clean_input_strips_learning_context_preamble():
     assert _clean_input(raw) == "什么是注意力机制？"
 
 
+def test_clean_result_strips_an_echoed_learning_preamble():
+    # Assistant text is rendered into the prompt as well now, so a reply that
+    # echoes the learning context must not spend prompt budget on that metadata.
+    raw = (
+        '<!-- nlp-learning-context:{"topic_name":"Transformer"} -->\n'
+        "[学习设置：主题=Transformer；难度=入门；教学方式=讲解]\n"
+        "注意力机制通过权重聚焦相关信息。"
+    )
+    assert _clean_result(raw) == "注意力机制通过权重聚焦相关信息。"
+
+
 def test_clean_title_strips_quotes_and_markdown():
     assert _clean_title('"## 注意力机制入门"') == "注意力机制入门"
     assert _clean_title("**Transformer 编码器**") == "Transformer 编码器"
 
 
-def test_select_turns_keeps_only_first():
+def test_select_turns_keeps_every_readable_turn():
     turns = _make_turns(6, datetime(2026, 1, 1))
-    assert [t.id for t in _select_turns(turns)] == ["turn-0"]
+    assert [t.id for t in _select_turns(turns)] == [f"turn-{i}" for i in range(6)]
 
 
-def test_render_turns_uses_first_speaker_only():
+def test_select_turns_drops_turns_without_readable_content():
+    turns = [
+        _turn("t1", "", None, datetime(2026, 1, 1)),
+        _turn("t2", "有内容", "有回答", datetime(2026, 1, 1, 0, 0, 10)),
+    ]
+    assert [t.id for t in _select_turns(turns)] == ["t2"]
+
+
+def test_render_turns_renders_both_sides_of_every_turn():
     turns = [
         _turn("t1", "什么是 BERT？", "BERT 是预训练模型", datetime(2026, 1, 1)),
         _turn("t2", "后续追问", "后续回答", datetime(2026, 1, 1, 0, 0, 10)),
     ]
-    assert _render_turns(turns) == "[user]: 什么是 BERT？"
+    assert _render_turns(turns) == "\n".join(
+        [
+            "[user]: 什么是 BERT？",
+            "[assistant]: BERT 是预训练模型",
+            "[user]: 后续追问",
+            "[assistant]: 后续回答",
+        ]
+    )
 
 
 def test_render_turns_falls_back_to_assistant_when_user_empty():
@@ -90,16 +123,78 @@ def test_render_turns_falls_back_to_assistant_when_user_empty():
     assert _render_turns(turns) == "[assistant]: 我先来问一句"
 
 
-def test_render_turns_truncates_long_messages():
+def test_render_turns_caps_a_single_long_message():
     turns = [_turn("t1", "长" * 5000, None, datetime(2026, 1, 1))]
     text = _render_turns(turns)
     assert text.startswith("[user]: ")
-    assert len(text) <= len("[user]: ") + 2000
+    # One message is capped well below the whole-prompt budget so other turns
+    # still fit alongside it.
+    assert len(text) == len("[user]: ") + MAX_MESSAGE_CHARS
+    assert len(text) <= MAX_INPUT_CHARS
+
+
+def test_render_turns_keeps_the_anchor_and_the_newest_turns():
+    # 40 substantive turns cannot all fit MAX_INPUT_CHARS, so the budget keeps
+    # the opening turn (the topic anchor) plus the newest ones, in order.
+    turns = [
+        _turn(
+            f"t{i}",
+            f"问题{i}" * 20,
+            f"答案{i}" * 20,
+            datetime(2026, 1, 1) + timedelta(seconds=i),
+        )
+        for i in range(40)
+    ]
+    text = _render_turns(turns)
+    assert len(text) <= MAX_INPUT_CHARS
+    lines = text.split("\n")
+    assert lines[0].startswith("[user]: 问题0")
+    assert "答案39" in lines[-1]
+    # The middle of a long conversation is dropped rather than squeezing every
+    # turn into a truncated rendering.
+    assert len(lines) < len(turns) * 2
+
+
+def test_a_capped_anchor_and_newest_turn_always_fit_the_budget():
+    # Invariant the whole per-turn cadence rests on: even with the opening
+    # exchange and the newest turn both at the per-message cap, they fit inside
+    # MAX_INPUT_CHARS together.  If that ever stops holding, the budget would drop
+    # the newest turn and regeneration would burn a utility call to rewrite the
+    # title from a prompt identical to the previous one.
+    turns = [
+        _turn(
+            f"t{i}",
+            "问" * (MAX_MESSAGE_CHARS * 3),
+            "答" * (MAX_MESSAGE_CHARS * 3),
+            datetime(2026, 1, 1) + timedelta(seconds=i),
+        )
+        for i in range(4)
+    ]
+    text = _render_turns(turns)
+    lines = text.split("\n")
+    assert len(text) <= MAX_INPUT_CHARS
+    assert lines[0] == f"[user]: {'问' * MAX_MESSAGE_CHARS}"
+    assert lines[-1] == f"[assistant]: {'答' * MAX_MESSAGE_CHARS}"
+    # Anchor plus at least the newest turn, i.e. more than one exchange.
+    assert len(lines) >= 4
+
+
+def test_turn_window_covers_everything_the_budget_could_render():
+    # ``_load_state`` reads at most SUMMARY_TURN_WINDOW turns.  The window must be
+    # at least the number of turns the prompt budget could ever hold, so that the
+    # budget -- not the window -- is always what limits the recent turns a title
+    # tracks.  (For a conversation longer than the window the anchor becomes the
+    # oldest turn inside it rather than the conversation opener; that is a
+    # deliberate trade-off, and the right one for a title meant to follow the
+    # latest state of a long-running session.)
+    # Smallest realistic turn: a one-character question and answer.
+    smallest_turn = len("[user]: x") + 1 + len("[assistant]: x") + 1
+    assert MAX_INPUT_CHARS // smallest_turn <= SUMMARY_TURN_WINDOW
 
 
 @pytest.mark.asyncio
-async def test_build_conversation_text_uses_first_turn(monkeypatch):
-    turns = _make_turns(6, datetime(2026, 1, 1))
+async def test_build_conversation_text_renders_the_dialogue(monkeypatch):
+    turns = _make_turns(2, datetime(2026, 1, 1))
     factory = _SessionFactory()
 
     async def fake_load_state(session, session_id):
@@ -108,7 +203,14 @@ async def test_build_conversation_text_uses_first_turn(monkeypatch):
     monkeypatch.setattr("server.session.summary._load_state", fake_load_state)
 
     text = await build_conversation_text("session-1", factory)
-    assert text == "[user]: 问题 0"
+    assert text == "\n".join(
+        [
+            "[user]: 问题 0",
+            "[assistant]: 答案 0",
+            "[user]: 问题 1",
+            "[assistant]: 答案 1",
+        ]
+    )
 
 
 # --- decide / recompute threshold ------------------------------------------
@@ -119,14 +221,36 @@ def test_decide_generates_on_first_turn():
     assert _decide(turns, None, False) == turns[-1].completed_at
 
 
-def test_decide_skips_after_first_summary():
+def test_decide_regenerates_when_the_dialogue_advanced():
     turns = _make_turns(3, datetime(2026, 1, 1))
-    assert _decide(turns, turns[0].completed_at, False) is None
+    # The standing title was built from the first turn; two newer turns exist.
+    assert _decide(turns, turns[0].completed_at, False) == turns[-1].completed_at
+
+
+def test_decide_skips_when_nothing_is_newer_than_the_title():
+    turns = _make_turns(3, datetime(2026, 1, 1))
+    assert _decide(turns, turns[-1].completed_at, False) is None
+
+
+def test_decide_skips_when_the_title_is_newer_than_every_turn():
+    turns = _make_turns(2, datetime(2026, 1, 1))
+    future = turns[-1].completed_at + timedelta(seconds=1)
+    assert _decide(turns, future, False) is None
+
+
+def test_decide_skips_when_no_turn_completed():
+    turns = [_turn("t1", "问题", "答案", None)]
+    assert _decide(turns, None, False) is None
 
 
 def test_decide_skips_manual_title():
     turns = _make_turns(1, datetime(2026, 1, 1))
     assert _decide(turns, None, True) is None
+
+
+def test_decide_skips_manual_title_even_when_the_dialogue_advanced():
+    turns = _make_turns(3, datetime(2026, 1, 1))
+    assert _decide(turns, turns[0].completed_at, True) is None
 
 
 # --- orchestration with mocked LLM + DB ------------------------------------
@@ -259,14 +383,35 @@ async def test_generate_skips_when_usage_identity_is_missing(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_generate_skips_already_summarized(monkeypatch):
+async def test_generate_skips_when_the_dialogue_has_not_advanced(monkeypatch):
     turns = _make_turns(3, datetime(2026, 1, 1))
     llm = _FakeLLM()
-    factory = _patch_env(monkeypatch, turns, turns[0].completed_at, llm)
+    # The standing title already covers the newest completed turn.
+    factory = _patch_env(monkeypatch, turns, turns[-1].completed_at, llm)
 
     assert await generate_and_store_summary("session-1", factory) is False
     assert llm.invocations == []
     assert factory.session.writes == []
+
+
+@pytest.mark.asyncio
+async def test_generate_regenerates_for_a_newer_turn(monkeypatch):
+    turns = _make_turns(3, datetime(2026, 1, 1))
+    llm = _FakeLLM("最新主题")
+    # The title was built from the first turn; two newer turns have since landed.
+    factory = _patch_env(monkeypatch, turns, turns[0].completed_at, llm)
+
+    assert await generate_and_store_summary("session-1", factory) is True
+
+    params = _title_writes(factory)[0]
+    assert params["title"] == "最新主题"
+    # The stored basis advances to the newest completed turn, so the next
+    # regeneration only becomes due after yet another turn completes.
+    assert params["basis"] == turns[-1].completed_at
+    # The prompt saw the whole dialogue, not only the opening question.
+    prompt = llm.invocations[0][0][0].content
+    assert "[user]: 问题 0" in prompt
+    assert "[assistant]: 答案 2" in prompt
 
 
 @pytest.mark.asyncio
@@ -330,17 +475,22 @@ async def test_generate_backs_off_longer_with_each_failure(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_generate_gives_up_after_max_attempts(monkeypatch):
-    turns = _make_turns(1, datetime(2026, 1, 1))
-    llm = _FakeLLM()
-    factory = _patch_env(
-        monkeypatch, turns, None, llm, summary_attempts=MAX_SUMMARY_ATTEMPTS
-    )
+async def test_generate_still_runs_after_a_long_outage(monkeypatch):
+    # ``summary_attempts`` drives the exponential-backoff lease; it is not a
+    # lifetime cap.  A session that kept failing through a model outage must start
+    # titling again by itself once the model recovers, so a high counter still
+    # generates instead of being skipped forever.
+    turns = _make_turns(2, datetime(2026, 1, 1))
+    llm = _FakeLLM("恢复后的标题")
+    factory = _patch_env(monkeypatch, turns, None, llm, summary_attempts=99)
 
-    assert await generate_and_store_summary("session-1", factory) is False
-    # LLM must not even be called once the budget is exhausted.
-    assert llm.invocations == []
-    assert factory.session.writes == []
+    assert await generate_and_store_summary("session-1", factory) is True
+    assert len(llm.invocations) == 1
+    assert _title_writes(factory)[0]["title"] == "恢复后的标题"
+    # The successful write clears the counter, so the next turn's failure starts
+    # backing off from BASE_BACKOFF_S again.
+    statement = next(s for s, p in factory.session.writes if p and "title" in p)
+    assert "summary_attempts=0" in str(statement)
 
 
 @pytest.mark.asyncio
@@ -365,11 +515,30 @@ async def test_write_is_scoped_to_target_session(monkeypatch):
         (s, p) for s, p in factory.session.writes if "title" in (p or {})
     )
     assert params["id"] == "session-A"
-    # Single-row conditional UPDATE keyed only by the conversation id; manual
-    # titles and already-summarized rows are never overwritten.
+    # Single-row conditional UPDATE keyed only by the conversation id.  Manual
+    # titles are never overwritten, and neither is a title whose basis is
+    # already at or newer than this one -- so a late worker cannot roll back a
+    # fresher title.
     assert "WHERE id=:id" in str(statement)
     assert "title_is_manual=0" in str(statement)
-    assert "title_updated_at IS NULL" in str(statement)
+    assert "(title_updated_at IS NULL OR title_updated_at < :basis)" in str(statement)
+    assert params["basis"] == turns[0].completed_at
+
+
+@pytest.mark.asyncio
+async def test_claim_is_basis_fenced(monkeypatch):
+    turns = _make_turns(2, datetime(2026, 1, 1))
+    factory = _patch_env(monkeypatch, turns, turns[0].completed_at, _FakeLLM("主题"))
+
+    await generate_and_store_summary("session-1", factory)
+
+    statement, params = next(
+        (s, p) for s, p in factory.session.writes if p and "lease_until" in p
+    )
+    # The lease claim re-validates the basis, so two workers racing on the same
+    # newly completed turn cannot both pay for an LLM call.
+    assert "(title_updated_at IS NULL OR title_updated_at < :basis)" in str(statement)
+    assert params["basis"] == turns[-1].completed_at
 
 
 # --- read-path permission boundary ----------------------------------------
@@ -560,3 +729,52 @@ def test_session_rename_rejects_empty_title(monkeypatch):
 
     with pytest.raises(ValueError):
         asyncio.run(service.rename(principal, "s1", "   "))
+
+
+# --- sweep query (compiled against the MySQL dialect, no DB needed) ----------
+
+
+def _compiled_sql(statement) -> str:
+    return str(statement.compile(dialect=mysql.dialect()))
+
+
+def test_due_sessions_selects_on_a_newer_completed_turn():
+    sql = _compiled_sql(_due_sessions_statement(now=datetime(2026, 1, 1), batch=25))
+    # The due condition is a correlated EXISTS over turns newer than the basis the
+    # standing title was built from, replacing the old write-once filter that only
+    # ever matched sessions with no title at all.
+    assert "EXISTS" in sql
+    assert "nlp_turns.conversation_id = nlp_conversations.id" in sql
+    assert "nlp_turns.completed_at > nlp_conversations.title_updated_at" in sql
+    assert "nlp_conversations.title_updated_at IS NULL" in sql
+
+
+def test_due_sessions_never_filters_on_the_attempt_counter():
+    # ``summary_attempts`` drives the backoff lease only.  Filtering on it here is
+    # what used to disable titling permanently once a session had failed enough
+    # times, which no longer makes sense now that every turn re-arms generation.
+    sql = _compiled_sql(_due_sessions_statement(now=datetime(2026, 1, 1), batch=25))
+    assert "summary_attempts" not in sql
+
+
+def test_due_sessions_prioritises_untitled_then_recent_activity():
+    sql = _compiled_sql(_due_sessions_statement(now=datetime(2026, 1, 1), batch=25))
+    order_by = sql.split("ORDER BY", 1)[1]
+    # Never-titled sessions first -- those are the ones a learner still sees as an
+    # empty or first-question fallback -- then most recent activity.  Recency
+    # alone would starve a quiet but genuinely due session whenever the due rate
+    # exceeds one batch per cadence.
+    assert "CASE WHEN" in order_by
+    assert order_by.index("title_updated_at IS NULL") < order_by.index(
+        "last_message_at DESC"
+    )
+    assert "LIMIT" in sql
+
+
+def test_due_sessions_still_respects_manual_titles_and_leases():
+    sql = _compiled_sql(_due_sessions_statement(now=datetime(2026, 1, 1), batch=25))
+    assert "nlp_conversations.title_is_manual IS false" in sql or (
+        "nlp_conversations.title_is_manual = " in sql
+    )
+    assert "summary_lease_expires_at" in sql
+    assert "nlp_conversations.status = " in sql
