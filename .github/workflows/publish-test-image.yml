@@ -173,10 +173,15 @@ jobs:
           DEPLOY_ENV_FILE="$(mktemp)"
           trap 'rm -f "$DEPLOY_ENV_FILE"' EXIT
           awk -v nova_image_ref="$NOVA_IMAGE_REF" -v sandbox_runtime_ref="$SANDBOX_RUNTIME_REF" '
-            BEGIN { nova_found = 0; sandbox_found = 0 }
+            BEGIN { nova_found = 0; sandbox_found = 0; monitor_bind_found = 0 }
             /^NOVA_IMAGE_REF=/ {
               print "NOVA_IMAGE_REF=\"" nova_image_ref "\""
               nova_found = 1
+              next
+            }
+            /^NOVA_MONITOR_BIND_ADDRESS=/ {
+              print "NOVA_MONITOR_BIND_ADDRESS=\"0.0.0.0\""
+              monitor_bind_found = 1
               next
             }
             /^NLP_AGENT_SANDBOX_DOCKER_IMAGE_DIGEST=/ {
@@ -188,6 +193,7 @@ jobs:
             END {
               if (!nova_found) print "NOVA_IMAGE_REF=\"" nova_image_ref "\""
               if (!sandbox_found) print "NLP_AGENT_SANDBOX_DOCKER_IMAGE_DIGEST=\"" sandbox_runtime_ref "\""
+              if (!monitor_bind_found) print "NOVA_MONITOR_BIND_ADDRESS=\"0.0.0.0\""
             }
           ' "$DEPLOY_DIR/.env" > "$DEPLOY_ENV_FILE"
           chmod 600 "$DEPLOY_ENV_FILE"

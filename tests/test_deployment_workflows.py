@@ -315,3 +315,15 @@ def test_ci_workflow_can_be_dispatched_after_a_skip_ci_metadata_commit() -> None
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
 
     assert "  workflow_dispatch:" in workflow
+
+
+def test_test_deploy_workflow_exposes_the_monitor_on_the_test_host_port() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "publish-test-image.yml").read_text(
+        encoding="utf-8"
+    )
+    test_env = (ROOT / "deploy" / "env" / "test.env.example").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'NOVA_MONITOR_BIND_ADDRESS=\\"0.0.0.0\\"' in workflow
+    assert 'NOVA_MONITOR_BIND_ADDRESS="0.0.0.0"' in test_env
