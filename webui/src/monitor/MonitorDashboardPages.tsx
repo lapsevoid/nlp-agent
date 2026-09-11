@@ -251,6 +251,41 @@ function catalogModel(catalog: SystemUsageCatalog | undefined, name: string) {
   return catalog?.models[name] ?? Object.values(catalog?.models ?? {}).find((model) => model.model_id === name);
 }
 
+const PURPOSE_LABELS: Record<string, string> = {
+  coordinator: "Coordinator",
+  worker: "Worker",
+  compact: "上下文压缩",
+  memory: "记忆整理",
+  vision: "视觉处理",
+  evaluation: "教学评测",
+  other: "其他",
+};
+
+function UsagePurposeStrip({ rows, roleModels }: { rows: SystemUsageDimension[]; roleModels: SystemUsageDimension[] }) {
+  const byPurpose = new Map(rows.map((row) => [row.purpose ?? "other", row]));
+  const purposes = [
+    "coordinator",
+    "worker",
+    ...rows
+      .map((row) => row.purpose ?? "other")
+      .filter((purpose, index, values) => !["coordinator", "worker"].includes(purpose) && values.indexOf(purpose) === index),
+  ];
+
+  return <section className="mon-usage-role-strip" aria-label="模型调用角色分布">
+    <header><span>模型调用角色</span><small>核对 Pro / Flash 是否按 Coordinator / Worker 路由</small></header>
+    <div>{purposes.map((purpose) => {
+      const row = byPurpose.get(purpose);
+      const models = roleModels.filter((model) => model.purpose === purpose).map((model) => model.provider_model).filter(Boolean);
+      return <article key={purpose} className={purpose === "worker" ? "is-worker" : ""}>
+        <span>{PURPOSE_LABELS[purpose] ?? purpose}</span>
+        <strong>{fmt(row?.events ?? 0)} 次</strong>
+        <small>{fmt(row?.tokens?.total_tokens ?? 0)} Token · 缓存 {percentage(row?.cache_hit_rate)}</small>
+        <em title={models.join(" / ")}>{models.length ? models.join(" / ") : "暂无模型记录"}</em>
+      </article>;
+    })}</div>
+  </section>;
+}
+
 function UsageDimensionTable({ title, description, rows: fallbackRows, label, catalog, kind, dimension, days }: { title: string; description: string; rows: SystemUsageDimension[]; label: (row: SystemUsageDimension) => string; catalog?: SystemUsageCatalog; kind: "provider" | "model"; dimension: "providers" | "models"; days: number }) {
   const [rows, setRows] = useState<SystemUsageDimension[]>(() => fallbackRows.slice(0, USAGE_DIMENSION_PAGE_SIZE));
   const [total, setTotal] = useState(fallbackRows.length);
@@ -280,7 +315,23 @@ function UsageDimensionTable({ title, description, rows: fallbackRows, label, ca
     }
   }, [days, dimension, fallbackRows]);
   useEffect(() => { queueMicrotask(() => void loadPage(0, false)); }, [loadPage]);
-  return <section className="mon-panel mon-usage-dimension-panel"><header><div><span className="mon-panel-kicker">{kind === "provider" ? "PROVIDER REGISTRY" : "MODEL CATALOG"}</span><h2>{title}</h2><p>{description}</p></div><span className="mon-usage-panel-count">{fmt(total)} 个</span></header>{rows.length ? <div className="mon-table mon-table-scroll"><table><thead><tr><th>维度</th><th>调用</th><th>计价</th><th>总 Token</th><th>Credits</th></tr></thead><tbody>{rows.map((row, index) => { const name = label(row); const providerLinked = kind === "provider" ? catalog?.providers[name] : undefined; const modelLinked = kind === "model" ? catalogModel(catalog, name) : undefined; return <tr key={`${name}-${index}`}><td><strong>{name}</strong>{row.provider && kind === "model" ? <small>{row.provider}</small> : null}{providerLinked ? <small className="mon-usage-linked">{providerLinked.adapter ?? "未标注适配器"} · {providerLinked.api_key_configured ? "已配置" : "待配置"}</small> : null}{modelLinked ? <small className="mon-usage-linked">{modelLinked.model_id ?? name}{modelLinked.profile_names?.length ? ` · ${modelLinked.profile_names.join(" / ")}` : ""}</small> : null}</td><td>{fmt(row.events)}</td><td>{row.credits_complete ? `${fmt(row.priced_events)} 完整` : `${fmt(row.unpriced_events)} 待补`}</td><td>{fmt(row.tokens?.total_tokens)}</td><td>{credits(row.credits_micro)}</td></tr>; })}</tbody></table>{hasMore ? <button className="mon-usage-load-more" type="button" onClick={() => void loadPage(offset, true)} disabled={loading}>{loading ? <><RefreshCw className="spin" size={13} />正在加载</> : <>加载更多 <small>已显示 {rows.length} / {total}</small></>}</button> : <div className="mon-usage-load-complete">已显示 {rows.length} 个</div>}</div> : <Empty text={loadError || "暂无详细用量"} />}{loadError && rows.length ? <footer className="mon-usage-panel-footer">明细加载失败，当前显示已成功读取的数据</footer> : null}</section>;
+  return <section className="mon-panel mon-usage-dimension-panel">
+    <header><div><span className="mon-panel-kicker">{kind === "provider" ? "PROVIDER REGISTRY" : "MODEL CATALOG"}</span><h2>{title}</h2><p>{description}</p></div><span className="mon-usage-panel-count">{fmt(total)} 个</span></header>
+    {rows.length ? <div className="mon-table mon-table-scroll"><table><thead><tr><th>维度</th><th>调用</th><th>总 Token</th><th>KV Cache</th><th>Credits</th></tr></thead><tbody>{rows.map((row, index) => {
+      const name = label(row);
+      const providerLinked = kind === "provider" ? catalog?.providers[name] : undefined;
+      const modelLinked = kind === "model" ? catalogModel(catalog, name) : undefined;
+      const hasCacheMeasurement = row.cache_hit_rate != null && row.cache_input_tokens != null && row.cache_cached_input_tokens != null;
+      return <tr key={`${name}-${index}`}>
+        <td><strong>{name}</strong>{row.provider && kind === "model" ? <small>{row.provider}</small> : null}{providerLinked ? <small className="mon-usage-linked">{providerLinked.adapter ?? "未标注适配器"} · {providerLinked.api_key_configured ? "已配置" : "待配置"}</small> : null}{modelLinked ? <small className="mon-usage-linked">{modelLinked.model_id ?? name}{modelLinked.profile_names?.length ? ` · ${modelLinked.profile_names.join(" / ")}` : ""}</small> : null}</td>
+        <td>{fmt(row.events)}<small>{row.credits_complete ? `${fmt(row.priced_events)} 已计价` : `${fmt(row.unpriced_events)} 待补`}</small></td>
+        <td>{fmt(row.tokens?.total_tokens)}</td>
+        <td className={hasCacheMeasurement ? "mon-cache-cell" : ""}>{percentage(row.cache_hit_rate)}{hasCacheMeasurement ? <small>{fmt(row.cache_cached_input_tokens)} / {fmt(row.cache_input_tokens)}</small> : <small>无实测</small>}</td>
+        <td>{credits(row.credits_micro)}</td>
+      </tr>;
+    })}</tbody></table>{hasMore ? <button className="mon-usage-load-more" type="button" onClick={() => void loadPage(offset, true)} disabled={loading}>{loading ? <><RefreshCw className="spin" size={13} />正在加载</> : <>加载更多 <small>已显示 {rows.length} / {total}</small></>}</button> : <div className="mon-usage-load-complete">已显示 {rows.length} 个</div>}</div> : <Empty text={loadError || "暂无详细用量"} />}
+    {loadError && rows.length ? <footer className="mon-usage-panel-footer">明细加载失败，当前显示已成功读取的数据</footer> : null}
+  </section>;
 }
 
 function PagedUsageUsers({ days, fallbackRows }: { days: number; fallbackRows: SystemUsageDimension[] }) {
@@ -335,10 +386,11 @@ function PagedUsageUsers({ days, fallbackRows }: { days: number; fallbackRows: S
 export function MonitorUsagePage({ data, usage, systemUsage }: { data: Overview; usage: UsageRow[]; systemUsage: SystemUsageSnapshot | null }) {
   const [trend, setTrend] = useState<SystemUsageSnapshot | null>(null);
   const tokenValues = systemUsage && Object.keys(systemUsage.tokens).length ? systemUsage.tokens : data.tokens ?? {};
-  const measuredCacheHitRate = systemUsage?.cache_hit_rate ?? null;
-  const measuredCacheInputTokens = systemUsage?.cache_input_tokens;
-  const measuredCacheCachedTokens = systemUsage?.cache_cached_input_tokens;
-  const hasMeasuredCacheRate = measuredCacheHitRate != null && measuredCacheInputTokens != null && measuredCacheCachedTokens != null;
+  const workerUsage = systemUsage?.purposes?.find((row) => row.purpose === "worker");
+  const measuredWorkerCacheHitRate = systemUsage?.worker_cache_hit_rate ?? workerUsage?.cache_hit_rate ?? null;
+  const measuredWorkerCacheInputTokens = systemUsage?.worker_cache_input_tokens ?? workerUsage?.cache_input_tokens;
+  const measuredWorkerCacheCachedTokens = systemUsage?.worker_cache_cached_input_tokens ?? workerUsage?.cache_cached_input_tokens;
+  const hasMeasuredWorkerCacheRate = measuredWorkerCacheHitRate != null && measuredWorkerCacheInputTokens != null && measuredWorkerCacheCachedTokens != null;
   const fallbackBreakdown = systemUsage?.breakdown?.length ? systemUsage.breakdown : usage.map((row) => ({ ...row, tokens: { total_tokens: row.total_tokens } }));
   const fallbackUsers = systemUsage?.users ?? EMPTY_USAGE_ROWS;
   const catalog = systemUsage?.catalog;
@@ -354,9 +406,9 @@ export function MonitorUsagePage({ data, usage, systemUsage }: { data: Overview;
   return <div className="mon-page mon-usage-page">
     <PageIntro eyebrow="USAGE LEDGER · ALL USERS" title="Token 用量中心" description="按全用户的 canonical UsageEvent 账本查看 Token、Provider 与模型；明细按需加载，趋势保持最近窗口。" meta={systemUsage ? `${fmt(systemUsage.events)} 次事件 · ${systemUsage.credits_complete ? "计价完整" : "部分待补"}` : "兼容 Trace 用量"} />
     <div className="mon-usage-catalog-link"><LineChart size={14} /><span>{catalog ? "来自多模型厂商管理" : "模型目录暂未同步"}</span><small>{catalog ? `Provider 连接、真实模型 ID 与用量账本已同步 · ${Object.values(catalog.providers).map((provider) => provider.adapter).filter(Boolean).join(" / ") || "暂无 Provider"} · ${Object.values(catalog.models).map((model) => model.profile_names?.join(" / ")).filter(Boolean).join(" / ") || "模型目录已同步"}` : "当前只显示账本中的 Provider 与模型标识"}</small></div>
-    <section className="mon-usage-summary" aria-label="用量中心摘要"><div className="mon-usage-summary-lead"><span>全用户总 Token</span><strong>{fmt(tokenValues.total_tokens)}</strong><small>{fmt(systemUsage?.events ?? data.requests)} 次事件 · {fmt(data.active_users)} 位活跃用户</small></div><div><span>输入</span><strong>{fmt(tokenValues.input_tokens)}</strong><small>含缓存读取 {fmt(tokenValues.cached_input_tokens)}</small></div><div><span>KV Cache 命中率</span><strong>{percentage(measuredCacheHitRate)}</strong><small>{hasMeasuredCacheRate ? `${fmt(measuredCacheCachedTokens)} / ${fmt(measuredCacheInputTokens)} Provider 输入 Token` : "无 Provider 测量数据"}</small></div><div><span>输出</span><strong>{fmt(tokenValues.output_tokens)}</strong><small>含推理 {fmt(tokenValues.reasoning_output_tokens)}</small></div><div><span>计价状态</span><strong className={systemUsage?.credits_complete === false ? "danger-text" : "success-text"}>{systemUsage ? (systemUsage.credits_complete ? "完整" : "部分") : "—"}</strong><small>{fmt(systemUsage?.priced_events)} 已计价 · {fmt(systemUsage?.unpriced_events)} 待补</small></div></section>
-    <div className="mon-page-grid mon-usage-top-grid"><section className="mon-panel mon-fixed-panel mon-usage-token-panel"><header><div><span className="mon-panel-kicker">CANONICAL TOKEN LEDGER</span><h2>Token 与缓存</h2><p>所有用户的输入、输出、缓存与推理 Token 汇总。</p></div><span className={`mon-coverage-badge ${systemUsage?.credits_complete === false ? "warning" : ""}`}>{systemUsage ? (systemUsage.credits_complete ? "计价完整" : "部分待补") : "账本未连接"}</span></header><div className="mon-usage-token-list">{Object.entries(tokenValues).map(([key, value]) => <article key={key}><span>{tokenLabel(key)}</span><strong>{fmt(value)}</strong></article>)}{!Object.keys(tokenValues).length && <Empty text="暂无 Token 汇总" />}</div><div className="mon-usage-ledger-footer"><span>{systemUsage ? `${fmt(systemUsage.priced_events)} 次已计价 · ${fmt(systemUsage.unpriced_events)} 次待补` : "当前显示观测 Trace 的兼容 Token 汇总"}</span><strong>{credits(systemUsage?.credits_micro)}</strong></div></section><section className="mon-panel mon-fixed-panel mon-usage-trend-panel"><header><div><span className="mon-panel-kicker">USAGE WINDOW</span><h2>实时用量趋势</h2><p>同一份全用户账本按 5 分钟聚合，自动刷新并保持滑动窗口。</p></div><div className="mon-usage-refresh-state"><Activity size={15} /><span>5 min</span></div></header><UsageTrendChart breakdown={trendBreakdown} fallback={fallbackBreakdown} to={trend?.to} windowMinutes={trend?.window_minutes ?? USAGE_WINDOW_MINUTES} bucketMinutes={trend?.bucket_minutes ?? USAGE_BUCKET_MINUTES} /></section></div>
-    <div className="mon-usage-dimensions"><PagedUsageUsers days={data.period_days || 30} fallbackRows={fallbackUsers} /><UsageDimensionTable title="按 Provider" description="与多模型厂商管理中的连接配置同步，展示适配器与密钥状态。" rows={systemUsage?.providers ?? EMPTY_USAGE_ROWS} label={(row) => row.provider ?? "unknown"} catalog={catalog} kind="provider" dimension="providers" days={data.period_days || 30} /><UsageDimensionTable title="按模型" description="与模型目录使用相同的 Provider 和真实模型 ID。" rows={systemUsage?.models ?? EMPTY_USAGE_ROWS} label={(row) => row.provider_model ?? "unknown"} catalog={catalog} kind="model" dimension="models" days={data.period_days || 30} /></div>
+    <section className="mon-usage-summary" aria-label="用量中心摘要"><div className="mon-usage-summary-lead"><span>全用户总 Token</span><strong>{fmt(tokenValues.total_tokens)}</strong><small>{fmt(systemUsage?.events ?? data.requests)} 次事件 · {fmt(data.active_users)} 位活跃用户</small></div><div><span>输入</span><strong>{fmt(tokenValues.input_tokens)}</strong><small>含缓存读取 {fmt(tokenValues.cached_input_tokens)}</small></div><div className="mon-usage-summary-cache"><span>Worker KV Cache</span><strong>{percentage(measuredWorkerCacheHitRate)}</strong><small>{hasMeasuredWorkerCacheRate ? `${fmt(measuredWorkerCacheCachedTokens)} / ${fmt(measuredWorkerCacheInputTokens)} Worker 输入 Token` : "暂无 Worker Provider 实测"}</small><i aria-hidden="true"><b style={{ width: `${Math.min(100, Math.max(0, (measuredWorkerCacheHitRate ?? 0) * 100))}%` }} /></i></div><div><span>输出</span><strong>{fmt(tokenValues.output_tokens)}</strong><small>含推理 {fmt(tokenValues.reasoning_output_tokens)}</small></div><div><span>计价状态</span><strong className={systemUsage?.credits_complete === false ? "danger-text" : "success-text"}>{systemUsage ? (systemUsage.credits_complete ? "完整" : "部分") : "—"}</strong><small>{fmt(systemUsage?.priced_events)} 已计价 · {fmt(systemUsage?.unpriced_events)} 待补</small></div></section>
+    <div className="mon-page-grid mon-usage-top-grid"><section className="mon-panel mon-fixed-panel mon-usage-token-panel"><header><div><span className="mon-panel-kicker">CANONICAL TOKEN LEDGER</span><h2>Token 与缓存</h2><p>先核对 Coordinator / Worker 调用，再查看真实模型 Token。</p></div><span className={`mon-coverage-badge ${systemUsage?.credits_complete === false ? "warning" : ""}`}>{systemUsage ? (systemUsage.credits_complete ? "计价完整" : "部分待补") : "账本未连接"}</span></header><UsagePurposeStrip rows={systemUsage?.purposes ?? EMPTY_USAGE_ROWS} roleModels={systemUsage?.role_models ?? EMPTY_USAGE_ROWS} /><div className="mon-usage-token-list">{Object.entries(tokenValues).map(([key, value]) => <article key={key}><span>{tokenLabel(key)}</span><strong>{fmt(value)}</strong></article>)}{!Object.keys(tokenValues).length && <Empty text="暂无 Token 汇总" />}</div><div className="mon-usage-ledger-footer"><span>{systemUsage ? `${fmt(systemUsage.priced_events)} 次已计价 · ${fmt(systemUsage.unpriced_events)} 次待补` : "当前显示观测 Trace 的兼容 Token 汇总"}</span><strong>{credits(systemUsage?.credits_micro)}</strong></div></section><section className="mon-panel mon-fixed-panel mon-usage-trend-panel"><header><div><span className="mon-panel-kicker">USAGE WINDOW</span><h2>实时用量趋势</h2><p>同一份全用户账本按 5 分钟聚合，自动刷新并保持滑动窗口。</p></div><div className="mon-usage-refresh-state"><Activity size={15} /><span>5 min</span></div></header><UsageTrendChart breakdown={trendBreakdown} fallback={fallbackBreakdown} to={trend?.to} windowMinutes={trend?.window_minutes ?? USAGE_WINDOW_MINUTES} bucketMinutes={trend?.bucket_minutes ?? USAGE_BUCKET_MINUTES} /></section></div>
+    <div className="mon-usage-dimensions"><PagedUsageUsers days={data.period_days || 30} fallbackRows={fallbackUsers} /><UsageDimensionTable title="按 Provider" description="Provider 的调用、Token 与实测缓存命中率。" rows={systemUsage?.providers ?? EMPTY_USAGE_ROWS} label={(row) => row.provider ?? "unknown"} catalog={catalog} kind="provider" dimension="providers" days={data.period_days || 30} /><UsageDimensionTable title="按模型" description="直接核对 Pro / Flash 的调用、Token 与缓存表现。" rows={systemUsage?.models ?? EMPTY_USAGE_ROWS} label={(row) => row.provider_model ?? "unknown"} catalog={catalog} kind="model" dimension="models" days={data.period_days || 30} /></div>
   </div>;
 }
 

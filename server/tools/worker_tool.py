@@ -98,6 +98,10 @@ from core.agent_runtime import (
 from core.observability.context import current_telemetry_context
 from core.observability.models import SpanKind, SpanStatus
 from core.observability.runtime import global_telemetry
+from core.model_runtime.usage import (
+    bind_usage_attribution,
+    worker_usage_attribution,
+)
 from core.prompt_runtime import global_prompt_runtime
 from server.agent.compression.context_manager import global_context_manager
 from utils.tokens import build_context_budget
@@ -848,7 +852,12 @@ async def _background_task_wrapper(
                         )
                 return result
 
-        execution = await _execute_with_retries(worker_id, execute)
+        worker_attribution = worker_usage_attribution(worker_id)
+        if worker_attribution is None:
+            execution = await _execute_with_retries(worker_id, execute)
+        else:
+            with bind_usage_attribution(worker_attribution):
+                execution = await _execute_with_retries(worker_id, execute)
     except asyncio.CancelledError:
         now = time.time()
         reason = task.cancellation_reason if task and task.cancellation_reason else "cancelled"

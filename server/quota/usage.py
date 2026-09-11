@@ -39,9 +39,18 @@ def _cache_metrics(input_tokens: Any, cached_input_tokens: Any) -> dict[str, Any
     }
 
 
-def _provider_cache_tokens(rows: list[Mapping[str, Any]]) -> dict[str, int]:
+def _provider_cache_tokens(
+    rows: list[Mapping[str, Any]],
+    *,
+    purpose: str | None = None,
+) -> dict[str, int]:
     """Return cache-rate inputs from Provider-measured UsageEvents only."""
-    provider_rows = [row for row in rows if row.get("usage_source") == "provider"]
+    provider_rows = [
+        row
+        for row in rows
+        if row.get("usage_source") == "provider"
+        and (purpose is None or row.get("purpose") == purpose)
+    ]
     return {
         "input_tokens": sum(
             int(row.get("input_tokens") or 0) for row in provider_rows
@@ -50,6 +59,12 @@ def _provider_cache_tokens(rows: list[Mapping[str, Any]]) -> dict[str, int]:
             int(row.get("cached_input_tokens") or 0) for row in provider_rows
         ),
     }
+
+
+def _worker_cache_metrics(rows: list[Mapping[str, Any]]) -> dict[str, Any]:
+    """Return Worker-only Provider measurements with explicit response keys."""
+    metrics = _cache_metrics(**_provider_cache_tokens(rows, purpose="worker"))
+    return {f"worker_{key}": value for key, value in metrics.items()}
 
 
 def _utc_now() -> datetime:
@@ -160,6 +175,9 @@ class UsageReadService:
                 "models": self._dimension_snapshots(
                     rows, "provider_model", secondary_key="provider"
                 ),
+                "role_models": self._dimension_snapshots(
+                    rows, "purpose", secondary_key="provider_model"
+                ),
             }
         )
         return snapshot
@@ -236,6 +254,13 @@ class UsageReadService:
         }
         if secondary_key is not None:
             item[secondary_key] = str(row[secondary_key] or "unknown")
+        if "_provider_input_tokens" in row:
+            item.update(
+                _cache_metrics(
+                    row.get("_provider_input_tokens", 0),
+                    row.get("_provider_cached_input_tokens", 0),
+                )
+            )
         return item
 
     def _system_snapshot_sql(
@@ -277,6 +302,7 @@ class UsageReadService:
             "providers": ("provider", None),
             "purposes": ("purpose", None),
             "models": ("provider_model", "provider"),
+            "role_models": ("purpose", "provider_model"),
         }
         if include_users:
             dimensions["users"] = ("user_id", None)
@@ -290,7 +316,12 @@ class UsageReadService:
                 if secondary_key is not None:
                     columns.append(table.c[secondary_key])
                 query = (
-                    select(*columns, *self._aggregate_expressions(table))
+                    select(
+                        *columns,
+                        *self._aggregate_expressions(
+                            table, include_provider_cache=True
+                        ),
+                    )
                     .where(*conditions)
                     .group_by(*columns)
                     .order_by(func.count().desc(), *columns)
@@ -349,7 +380,39 @@ class UsageReadService:
                 self._dimension_item(row, key, secondary_key=secondary_key)
                 for row in dimension_rows[name]
             ]
-        for name in ("users", "workspaces", "providers", "purposes", "models"):
+        worker_usage = next(
+            (
+                row
+                for row in output.get("purposes", [])
+                if row.get("purpose") == "worker"
+            ),
+            None,
+        )
+        output.update(
+            {
+                "worker_cache_input_tokens": (
+                    worker_usage.get("cache_input_tokens", 0)
+                    if worker_usage
+                    else 0
+                ),
+                "worker_cache_cached_input_tokens": (
+                    worker_usage.get("cache_cached_input_tokens", 0)
+                    if worker_usage
+                    else 0
+                ),
+                "worker_cache_hit_rate": (
+                    worker_usage.get("cache_hit_rate") if worker_usage else None
+                ),
+            }
+        )
+        for name in (
+            "users",
+            "workspaces",
+            "providers",
+            "purposes",
+            "models",
+            "role_models",
+        ):
             output.setdefault(name, [])
         return output
 
@@ -395,7 +458,10 @@ class UsageReadService:
             .subquery()
         )
         page_query = (
-            select(*columns, *self._aggregate_expressions(table))
+            select(
+                *columns,
+                *self._aggregate_expressions(table, include_provider_cache=True),
+            )
             .where(*conditions)
             .group_by(*columns)
             .order_by(func.count().desc(), *columns)
@@ -810,6 +876,7 @@ class UsageReadService:
             "priced_credits_micro": priced_credits_micro,
             "tokens": tokens,
             **_cache_metrics(**_provider_cache_tokens(rows)),
+            **_worker_cache_metrics(rows),
             "breakdown": [
                 breakdown[key] for key in sorted(breakdown)
             ],
@@ -857,6 +924,7 @@ class UsageReadService:
             }
             if secondary_key is not None:
                 item[secondary_key] = values[1]
+            item.update(_cache_metrics(**_provider_cache_tokens(grouped_rows)))
             result.append(item)
         return sorted(
             result,

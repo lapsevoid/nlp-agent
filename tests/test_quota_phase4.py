@@ -853,6 +853,113 @@ def test_system_snapshot_reports_provider_measured_kv_cache_hit_rate():
     assert trend["cache_hit_rate"] == pytest.approx(0.8)
 
 
+def test_system_snapshot_separates_worker_and_model_cache_measurements():
+    engine = _engine()
+    coordinator = _usage_event(
+        operation_id="op-cache-coordinator",
+        occurred_at=NOW - timedelta(hours=2),
+    )
+    coordinator.update(
+        purpose="coordinator",
+        provider_model="deepseek-v4-pro",
+        input_tokens=100,
+        cached_input_tokens=20,
+        output_tokens=2,
+        total_tokens=102,
+    )
+    worker = _usage_event(
+        operation_id="op-cache-worker",
+        occurred_at=NOW - timedelta(hours=1),
+    )
+    worker.update(
+        purpose="worker",
+        worker_id="worker-1",
+        provider_model="deepseek-v4-flash",
+        input_tokens=200,
+        cached_input_tokens=150,
+        output_tokens=2,
+        total_tokens=202,
+    )
+    estimated_worker = _usage_event(
+        operation_id="op-cache-worker-estimated",
+        occurred_at=NOW - timedelta(minutes=45),
+    )
+    estimated_worker.update(
+        purpose="worker",
+        worker_id="worker-2",
+        provider_model="deepseek-v4-flash",
+        usage_source="estimated",
+        input_tokens=100,
+        cached_input_tokens=0,
+        output_tokens=2,
+        total_tokens=102,
+    )
+    utility = _usage_event(
+        operation_id="op-cache-utility",
+        occurred_at=NOW - timedelta(minutes=30),
+    )
+    utility.update(
+        purpose="memory",
+        provider_model="deepseek-v4-flash",
+        input_tokens=100,
+        cached_input_tokens=50,
+        output_tokens=2,
+        total_tokens=102,
+    )
+    with engine.begin() as connection:
+        connection.execute(
+            insert(UsageEventModel),
+            [coordinator, worker, estimated_worker, utility],
+        )
+
+    reader = UsageReadService(engine)
+    snapshot = reader.system_snapshot(days=7, now=NOW)
+    weekly = reader.system_snapshot(days=7, granularity="week", now=NOW)
+    model_page = reader.system_dimension_page(
+        dimension="models", days=7, now=NOW
+    )
+
+    assert snapshot["cache_hit_rate"] == pytest.approx(0.55)
+    assert snapshot["worker_cache_input_tokens"] == 200
+    assert snapshot["worker_cache_cached_input_tokens"] == 150
+    assert snapshot["worker_cache_hit_rate"] == pytest.approx(0.75)
+    assert weekly["worker_cache_hit_rate"] == pytest.approx(0.75)
+
+    worker_row = next(
+        row for row in snapshot["purposes"] if row["purpose"] == "worker"
+    )
+    assert worker_row["events"] == 2
+    assert worker_row["cache_input_tokens"] == 200
+    assert worker_row["cache_cached_input_tokens"] == 150
+    assert worker_row["cache_hit_rate"] == pytest.approx(0.75)
+
+    worker_model_row = next(
+        row
+        for row in snapshot["role_models"]
+        if row["purpose"] == "worker"
+    )
+    assert worker_model_row["provider_model"] == "deepseek-v4-flash"
+    assert worker_model_row["cache_hit_rate"] == pytest.approx(0.75)
+    assert {
+        (row["purpose"], row["provider_model"])
+        for row in weekly["role_models"]
+    } == {
+        ("coordinator", "deepseek-v4-pro"),
+        ("worker", "deepseek-v4-flash"),
+        ("memory", "deepseek-v4-flash"),
+    }
+
+    flash_row = next(
+        row
+        for row in model_page["items"]
+        if row["provider_model"] == "deepseek-v4-flash"
+    )
+    assert flash_row["events"] == 3
+    assert flash_row["cache_input_tokens"] == 300
+    assert flash_row["cache_cached_input_tokens"] == 200
+    assert flash_row["cache_hit_rate"] == pytest.approx(2 / 3)
+
+
 def test_system_usage_exposes_bounded_user_pages_and_five_minute_trend():
     engine = _engine()
     with engine.begin() as connection:
