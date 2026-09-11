@@ -63,18 +63,21 @@ describe("MarkdownContent LaTeX delimiters", () => {
     expect(screen.queryByText(/guided-result/)).not.toBeInTheDocument();
   });
 
-  it("renders model-provided external links as inert text while keeping same-origin links", () => {
+  it("renders safe external links while keeping unsafe links inert", () => {
     render(
-      <MarkdownContent>{String.raw`[外部资料](https://evil.example/phishing) [反斜杠绕过](/\evil.example/phishing) [课程目录](/teacher) [本节](#attention)`}</MarkdownContent>,
+      <MarkdownContent>{String.raw`[外部资料](https://docs.example.com/guide) [反斜杠绕过](/\evil.example/phishing) [危险协议](javascript:alert(1)) [课程目录](/teacher) [本节](#attention)`}</MarkdownContent>,
     );
 
-    expect(screen.getByText("外部资料")).not.toHaveAttribute("href");
+    expect(screen.getByRole("link", { name: "外部资料" })).toHaveAttribute("href", "https://docs.example.com/guide");
+    expect(screen.getByRole("link", { name: "外部资料" })).toHaveAttribute("target", "_blank");
+    expect(screen.getByRole("link", { name: "外部资料" })).toHaveAttribute("rel", "noopener noreferrer");
     expect(screen.getByText("反斜杠绕过")).not.toHaveAttribute("href");
+    expect(screen.getByText("危险协议")).not.toHaveAttribute("href");
     expect(screen.getByRole("link", { name: "课程目录" })).toHaveAttribute("href", "/teacher");
     expect(screen.getByRole("link", { name: "本节" })).toHaveAttribute("href", "#attention");
   });
 
-  it("renders trusted academic links with target blank and rel while sanitizing untrusted external links", () => {
+  it("renders safe HTTP(S) links while rejecting credentialed and non-default-port URLs", () => {
     render(
       <MarkdownContent>{String.raw`
 [arXiv 论文](https://arxiv.org/abs/1706.03762)
@@ -115,10 +118,9 @@ describe("MarkdownContent LaTeX delimiters", () => {
     expect(scholarLink).toHaveAttribute("target", "_blank");
     expect(scholarLink).toHaveAttribute("rel", "noopener noreferrer");
 
-    // Untrusted/unsafe links should NOT have href attribute
-    expect(screen.getByText("明文 HTTP")).not.toHaveAttribute("href");
-    expect(screen.getByText("子域名伪装")).not.toHaveAttribute("href");
-    expect(screen.getByText("参数诱导")).not.toHaveAttribute("href");
+    expect(screen.getByRole("link", { name: "明文 HTTP" })).toHaveAttribute("href", "http://arxiv.org/abs/1706.03762");
+    expect(screen.getByRole("link", { name: "子域名伪装" })).toHaveAttribute("href", "https://arxiv.org.evil.example/phish");
+    expect(screen.getByRole("link", { name: "参数诱导" })).toHaveAttribute("href", "https://evil.example/?next=arxiv.org");
     expect(screen.getByText("包含凭据")).not.toHaveAttribute("href");
     expect(screen.getByText("非默认端口")).not.toHaveAttribute("href");
   });

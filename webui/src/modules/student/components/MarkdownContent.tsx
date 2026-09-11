@@ -462,13 +462,23 @@ function normalizeLatexDelimiters(markdown: string): string {
   return result + normalizeTextOutsideCode(markdown.slice(cursor));
 }
 
-function isSameOriginMarkdownLink(href: string | undefined): href is string {
+function isSafeMarkdownLink(href: string | undefined): href is string {
   if (!href) return false;
   if (href.startsWith("#")) return true;
-  if (!href.startsWith("/")) return false;
   if (/\\|%5c/i.test(href)) return false;
   try {
-    return new URL(href, window.location.href).origin === window.location.origin;
+    const url = new URL(href, window.location.href);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return false;
+    if (href.startsWith("/")) return url.origin === window.location.origin;
+    return /^https?:\/\//i.test(href) && !url.username && !url.password && !url.port;
+  } catch {
+    return false;
+  }
+}
+
+function isExternalMarkdownLink(href: string): boolean {
+  try {
+    return /^https?:\/\//i.test(href) && new URL(href, window.location.href).origin !== window.location.origin;
   } catch {
     return false;
   }
@@ -582,7 +592,11 @@ export function MarkdownContent({ children, streaming = false, streamRenderInter
             return <LessonCodeBlock language={match[1]} code={content} actions={codeActions} streaming={streaming} />;
           },
           a: ({ children: value, href, ...props }) => {
-            if (isSameOriginMarkdownLink(href)) {
+            if (isSafeMarkdownLink(href)) {
+              if (isExternalMarkdownLink(href)) {
+                const academicHref = normalizeTrustedAcademicLink(href) ?? href;
+                return <a {...props} href={academicHref} target="_blank" rel="noopener noreferrer">{value}</a>;
+              }
               return <a {...props} href={href}>{value}</a>;
             }
             const academicHref = normalizeTrustedAcademicLink(href);
