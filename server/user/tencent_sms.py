@@ -155,6 +155,17 @@ class TencentSmsProvider:
             return False
 
 
+class DeterministicSmsProvider:
+    """Explicit local provider used only by the real HTTP test environment."""
+
+    def __init__(self, *, failure_prefix: str = "") -> None:
+        self.failure_prefix = failure_prefix
+
+    async def send_verification_code(self, phone: str, code: str) -> bool:
+        del code
+        return not self.failure_prefix or not phone.strip().startswith(self.failure_prefix)
+
+
 class SmsConfigurationError(RuntimeError):
     """Raised when production SMS delivery has not been configured."""
 
@@ -165,6 +176,11 @@ def create_tencent_sms_provider_from_env() -> Optional[TencentSmsProvider]:
     Returns:
         TencentSmsProvider instance if all required env vars are set, None otherwise.
     """
+    if os.getenv("NLP_AGENT_API_HTTP_SMS_PROVIDER", "").strip().lower() == "stub":
+        return DeterministicSmsProvider(
+            failure_prefix=os.getenv("NLP_AGENT_API_HTTP_SMS_FAILURE_PREFIX", "").strip()
+        )
+
     secret_id = os.getenv("TENCENT_SMS_SECRET_ID")
     secret_key = os.getenv("TENCENT_SMS_SECRET_KEY")
     app_id = os.getenv("TENCENT_SMS_APP_ID")

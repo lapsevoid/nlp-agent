@@ -137,6 +137,7 @@ from server.teacher.models import (
 )
 from server.teacher.service import teacher_service
 from server.rbac.service import (
+    ClassroomNotFoundError,
     LastDeveloperForbiddenError,
     UnknownRoleError,
     rbac_service,
@@ -884,6 +885,7 @@ def create_app(
             title="Access forbidden",
         )
 
+    @app.exception_handler(ClassroomNotFoundError)
     @app.exception_handler(ResourceNotFoundError)
     @app.exception_handler(FileNotFoundError)
     async def not_found_error(request: Request, _error: Exception):
@@ -3099,11 +3101,20 @@ def create_app(
         principal: Principal,
         _claims: WriteClaims,
     ):
+        model_factory = getattr(request.app.state, "teacher_ai_model_factory", None)
+        if model_factory is None:
+            return await teacher_service.ai_analysis(
+                principal,
+                request.app.state.gateway,
+                body.workspace_id,
+                body,
+            )
         return await teacher_service.ai_analysis(
             principal,
             request.app.state.gateway,
             body.workspace_id,
             body,
+            model_factory=model_factory,
         )
 
     @app.get("/api/v1/teacher/goals/{workspace_id}", tags=["teacher"])
