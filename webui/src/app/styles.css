@@ -3178,9 +3178,9 @@ button { color: inherit; }
 .teacher-nav.collapsed { width: 68px; flex-basis: 68px; }
 .teacher-brand-mark { display: grid !important; width: 28px; height: 28px; flex: 0 0 28px !important; place-items: center; padding: 0 !important; border: 0 !important; background: transparent !important; color: var(--teacher-accent) !important; }
 .teacher-brand-mark:hover { background: var(--teacher-soft) !important; }
-.teacher-nav-collapse,.teacher-nav-expand { display: grid !important; width: 28px; height: 28px; place-items: center; padding: 0 !important; }
+.teacher-nav-collapse { display: grid !important; width: 28px; height: 28px; place-items: center; padding: 0 !important; }
 .teacher-nav.collapsed .teacher-brand { justify-content: center; gap: 5px; padding-inline: 8px; }
-.teacher-nav.collapsed .teacher-brand span,.teacher-nav.collapsed .teacher-nav-refresh,.teacher-nav.collapsed .teacher-nav-expand { display: none !important; }
+.teacher-nav.collapsed .teacher-brand span,.teacher-nav.collapsed .teacher-nav-refresh { display: none !important; }
 .teacher-nav.collapsed .teacher-brand-mark { display: grid !important; }
 .teacher-nav.collapsed nav button { justify-content: center; padding-inline: 0; font-size: 0; }
 .teacher-nav.collapsed nav button svg { flex: 0 0 auto; }

@@ -319,12 +319,15 @@ def test_test_deploy_cleans_before_and_after_pull_without_removing_volumes() -> 
 
 
 def test_compose_limits_container_stdout_log_growth() -> None:
-    compose = (ROOT / "compose.yaml").read_text(encoding="utf-8")
+    compose = yaml.safe_load(
+        (ROOT / "compose.yaml").read_text(encoding="utf-8")
+    )
+    expected_logging = {
+        "driver": "json-file",
+        "options": {"max-size": "20m", "max-file": "3"},
+    }
 
-    assert "x-default-logging:" in compose
-    assert "driver: json-file" in compose
-    assert 'max-size: "20m"' in compose
-    assert 'max-file: "3"' in compose
+    assert compose["x-default-logging"] == expected_logging
     for service in (
         "nginx",
         "mysql",
@@ -335,8 +338,7 @@ def test_compose_limits_container_stdout_log_growth() -> None:
         "nova-sandbox-manager",
         "nova-monitor",
     ):
-        service_block = compose.split(f"  {service}:\n", 1)[1].split("\n  ", 1)[0]
-        assert "logging: *default-logging" in service_block
+        assert compose["services"][service]["logging"] == expected_logging
 
 
 def test_ci_workflow_can_be_dispatched_after_a_skip_ci_metadata_commit() -> None:

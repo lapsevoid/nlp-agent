@@ -152,7 +152,7 @@ describe("TeacherWorkspace catalog CRUD", () => {
 
   it("closes an open directory menu when clicking outside and restores the directory after collapsing", async () => {
     history.replaceState({}, "", "/teacher/topics"); render(<TeacherWorkspace />);
-    await screen.findByRole("heading", { name: "主题与知识点", level: 2 });
+    await screen.findByRole("heading", { name: "主题与知识点" });
 
     const user = userEvent.setup();
     const summary = screen.getByRole("button", { name: "Transformer目录选项" });
@@ -212,13 +212,13 @@ describe("TeacherWorkspace catalog CRUD", () => {
   it("warns before leaving a teacher page with unsaved edits", async () => {
     history.replaceState({}, "", "/teacher/topics");
     render(<TeacherWorkspace />);
-    await screen.findByRole("heading", { name: "主题与知识点", level: 2 });
+    await screen.findByRole("heading", { name: "主题与知识点" });
     fireEvent.change(screen.getByLabelText("主题名称"), { target: { value: "未保存主题" } });
 
     fireEvent.click(screen.getByRole("button", { name: "出题蓝图" }));
     expect(screen.getByRole("alertdialog", { name: "有未保存的修改" })).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "留在当前页面" }));
-    expect(screen.getByRole("heading", { name: "主题与知识点", level: 2 })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "主题与知识点" })).toBeVisible();
 
     const unload = new Event("beforeunload", { cancelable: true });
     window.dispatchEvent(unload);
@@ -328,7 +328,7 @@ describe("TeacherWorkspace catalog CRUD", () => {
 
   it("presents manual catalog creation without a preset import action", async () => {
     history.replaceState({}, "", "/teacher/topics"); render(<TeacherWorkspace />);
-    await screen.findByRole("heading", { name: "主题与知识点", level: 2 });
+    await screen.findByRole("heading", { name: "主题与知识点" });
     const createMenu = screen.getByRole("button", { name: "主题与知识点目录选项" }).closest("details"); expect(createMenu).not.toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "主题与知识点目录选项" }));
     expect(within(createMenu as HTMLElement).getByRole("button", { name: "新建主题" })).toBeVisible();
