@@ -307,7 +307,7 @@ describe("TeacherWorkspace catalog CRUD", () => {
 
   it("creates an editable guided blueprint with a Markdown direction", async () => {
     history.replaceState({}, "", "/teacher/guided"); render(<TeacherWorkspace />);
-    await screen.findByRole("heading", { name: "引导蓝图" });
+    await screen.findByRole("heading", { name: "引导模式" });
     fireEvent.click(screen.getByRole("button", { name: "展开主题 Transformer" }));
     const pointCreateMenu = screen.getByRole("button", { name: "注意力引导蓝图选项" }).closest("details"); expect(pointCreateMenu).not.toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "注意力引导蓝图选项" }));
