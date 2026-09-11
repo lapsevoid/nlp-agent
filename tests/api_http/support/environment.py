@@ -73,6 +73,7 @@ class ManagedHttpEnvironment:
     log_handles: list[Any]
     users: dict[str, SeededUser]
     observed_http_operations: set[tuple[str, str, str]] = field(default_factory=set)
+    full_probe_operations: set[tuple[str, str, str]] = field(default_factory=set)
     observed_websocket_routes: set[str] = field(default_factory=set)
     worker_process: subprocess.Popen[str] | None = None
 
@@ -304,6 +305,9 @@ class ManagedHttpEnvironment:
         service = "monitor" if port == self.monitor_port else "web"
         self.observed_http_operations.add((service, method.upper(), path))
 
+    def record_full_probe(self, key: tuple[str, str, str]) -> None:
+        self.full_probe_operations.add(key)
+
     def record_websocket_route(self, path: str) -> None:
         self.observed_websocket_routes.add(path)
 
@@ -314,7 +318,7 @@ class ManagedHttpEnvironment:
         try:
             import httpx
 
-            from .inventory import fetch_openapi, operation_matches
+            from .inventory import fetch_openapi, observed_operation_keys
 
             with httpx.Client(timeout=5) as client:
                 _, web = fetch_openapi(
@@ -325,15 +329,10 @@ class ManagedHttpEnvironment:
                 )
             all_operations = (*web, *monitor)
             inventory = {item.key for item in all_operations}
-            covered = {
-                operation.key
-                for operation in all_operations
-                if any(
-                    service == operation.service
-                    and operation_matches(operation, method=method, path=path)
-                    for service, method, path in self.observed_http_operations
-                )
-            }
+            covered = observed_operation_keys(
+                all_operations,
+                self.observed_http_operations,
+            )
             missing = sorted(inventory - covered)
             print(
                 "\nAPI HTTP reachability inventory (observed requests):\n"
