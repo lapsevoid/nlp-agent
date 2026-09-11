@@ -177,7 +177,12 @@ from server.user.service import (
     UserService,
     generate_sms_code,
 )
-from server.user.tencent_sms import SmsConfigurationError, create_tencent_sms_provider_from_env
+from server.user.tencent_sms import (
+    SmsConfigurationError,
+    create_tencent_sms_provider_from_env,
+    development_sms_code_logging_enabled,
+    mask_phone_for_logging,
+)
 from server.user.phone import InvalidPhoneNumberError, normalize_phone_number
 
 DbSession = Annotated[AsyncSession, Depends(get_db_session)]
@@ -1001,7 +1006,17 @@ def create_app(
                         await code_store.record_sms_send(db, phone=phone, client_ip=client_ip, outcome="failed")
                         return JSONResponse({"detail": "SMS gateway failed to deliver the code"}, status_code=status.HTTP_502_BAD_GATEWAY)
                 else:
-                    print(f"[SMS] Verification code for {phone}: {code}")
+                    if development_sms_code_logging_enabled():
+                        logger.warning(
+                            "[SMS] Development verification code for %s: %s",
+                            mask_phone_for_logging(phone),
+                            code,
+                        )
+                    else:
+                        logger.warning(
+                            "[SMS] Development verification code generated for %s; code omitted from logs",
+                            mask_phone_for_logging(phone),
+                        )
                 await code_store.record_sms_send(db, phone=phone, client_ip=client_ip, outcome="sent")
                 await code_store.put_code(db, kind="sms", subject=phone, code=code, ttl_s=code_store.SMS_CODE_TTL_S, client_ip=client_ip)
         except TimeoutError as error:

@@ -171,8 +171,11 @@ docker compose --profile monitor up -d
 
 ```powershell
 docker compose ps
-docker compose logs -f nova-web
+docker compose logs -f --tail=200 nova-web
+docker compose exec nova-web .venv/bin/python scripts/logs.py --log-dir /app/logs --level error
 ```
+
+应用日志会同时写入 Docker 标准输出和持久化的 `nova-logs` 卷；按服务、Trace、级别和时间查询的完整说明见 [`docs/logging.md`](docs/logging.md)。`8766` 的 Observability Monitor 用于查看 Trace/Span 和实时 Telemetry Event。
 
 ## 项目定位
 
