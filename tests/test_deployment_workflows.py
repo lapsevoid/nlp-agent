@@ -284,7 +284,7 @@ def test_deploy_workflows_overlay_published_digests_without_mutating_server_env(
         assert "The deployment directory" in workflow
 
 
-def test_test_deploy_cleans_before_pull_and_has_no_workflow_timeout() -> None:
+def test_test_deploy_cleans_before_and_after_pull_without_removing_volumes() -> None:
     workflow = yaml.safe_load(
         (ROOT / ".github" / "workflows" / "publish-test-image.yml").read_text(
             encoding="utf-8"
@@ -298,17 +298,45 @@ def test_test_deploy_cleans_before_pull_and_has_no_workflow_timeout() -> None:
     }
     cleanup_index, cleanup = named_steps["Cleanup unused Docker resources"]
     deploy_index, deploy = named_steps["Deploy the published GHCR image"]
+    post_cleanup_index, post_cleanup = named_steps["Cleanup Docker resources after deployment"]
 
-    # Keep recent image layers so routine deploys can reuse the cache, while
-    # still bounding disk growth on the long-lived self-hosted runner.
+    # The runner keeps the database/Redis/application volumes, but old image
+    # layers, networks, containers, and builder cache have no deployment value.
     assert cleanup_index < deploy_index
+    assert deploy_index < post_cleanup_index
     assert cleanup.get("if") != "always()"
-    assert 'docker image prune -af --filter "until=168h"' in cleanup["run"]
-    assert 'docker builder prune -af --filter "until=168h"' in cleanup["run"]
+    assert post_cleanup.get("if") == "always()"
+    for step in (cleanup, post_cleanup):
+        assert "docker system prune -af" in step["run"]
+        assert "docker builder prune -af" in step["run"]
+        assert "--volumes" not in step["run"]
+        assert "docker volume prune" not in step["run"]
+    assert "docker system df" in post_cleanup["run"]
     assert 'docker pull --quiet "$SANDBOX_CONFIGURED_REF"' in deploy["run"]
     assert "pull --quiet nova-migrate nova-web nova-worker nova-monitor nova-sandbox-manager nginx" in deploy["run"]
     assert 'docker image inspect "$SANDBOX_CONFIGURED_REF"' in deploy["run"]
     assert "timeout-minutes" not in workflow["jobs"]["deploy"]
+
+
+def test_compose_limits_container_stdout_log_growth() -> None:
+    compose = (ROOT / "compose.yaml").read_text(encoding="utf-8")
+
+    assert "x-default-logging:" in compose
+    assert "driver: json-file" in compose
+    assert 'max-size: "20m"' in compose
+    assert 'max-file: "3"' in compose
+    for service in (
+        "nginx",
+        "mysql",
+        "redis",
+        "nova-migrate",
+        "nova-web",
+        "nova-worker",
+        "nova-sandbox-manager",
+        "nova-monitor",
+    ):
+        service_block = compose.split(f"  {service}:\n", 1)[1].split("\n  ", 1)[0]
+        assert "logging: *default-logging" in service_block
 
 
 def test_ci_workflow_can_be_dispatched_after_a_skip_ci_metadata_commit() -> None:

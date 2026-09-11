@@ -1,8 +1,15 @@
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "3"
+
 services:
   # The only public edge. Nova Web stays on the Compose network and is
   # accessed through this same-origin reverse proxy.
   nginx:
     image: nginx:1.27-alpine
+    logging: *default-logging
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
     ports:
@@ -14,6 +21,7 @@ services:
 
   mysql:
     image: mysql:8.4
+    logging: *default-logging
     environment:
       MYSQL_DATABASE: ${NLP_AGENT_MYSQL_DATABASE:-nlp_agent}
       MYSQL_USER: ${NLP_AGENT_MYSQL_USER:-nlp_agent}
@@ -31,6 +39,7 @@ services:
 
   redis:
     image: redis:7.4-alpine
+    logging: *default-logging
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - redis-data:/data
@@ -44,6 +53,7 @@ services:
   # One-shot deployment bootstrap owns schema upgrades and built-in pricing.
   nova-migrate:
     image: ${NOVA_IMAGE_REF:-nova-agent:local}
+    logging: *default-logging
     pull_policy: ${NOVA_PULL_POLICY:-build}
     command: [".venv/bin/python", "main.py", "bootstrap-db"]
     env_file:
@@ -65,6 +75,7 @@ services:
       context: .
       dockerfile: Dockerfile
     image: ${NOVA_IMAGE_REF:-nova-agent:local}
+    logging: *default-logging
     pull_policy: ${NOVA_PULL_POLICY:-build}
     command: [".venv/bin/python", "main.py", "serve"]
     env_file:
@@ -106,6 +117,7 @@ services:
 
   nova-worker:
     image: ${NOVA_IMAGE_REF:-nova-agent:local}
+    logging: *default-logging
     pull_policy: ${NOVA_PULL_POLICY:-build}
     command: [".venv/bin/python", "main.py", "worker"]
     env_file:
@@ -141,6 +153,7 @@ services:
   # it through the signed Redis Manager RPC stream and never mounts the socket.
   nova-sandbox-manager:
     image: ${NOVA_IMAGE_REF:-nova-agent:local}
+    logging: *default-logging
     pull_policy: ${NOVA_PULL_POLICY:-build}
     command: [".venv/bin/python", "main.py", "sandbox-manager"]
     env_file:
@@ -165,6 +178,7 @@ services:
 
   nova-monitor:
     image: ${NOVA_IMAGE_REF:-nova-agent:local}
+    logging: *default-logging
     pull_policy: ${NOVA_PULL_POLICY:-build}
     command: [".venv/bin/python", "main.py", "monitor"]
     env_file:

@@ -1695,10 +1695,6 @@ button { color: inherit; }
 .teacher-content-catalog { display:flex; width:100%; max-width:none; height:100%; min-height:0; margin:0; box-sizing:border-box; flex-direction:column; overflow:hidden; padding:18px 22px 22px; }
 .teacher-content-catalog .teacher-catalog-page { min-height:0; flex:1 1 auto; }
 .teacher-catalog-page { display:flex; gap:14px; min-height:660px; flex-direction:column; }
-.teacher-catalog-page-summary { display:flex; min-height:86px; box-sizing:border-box; align-items:center; justify-content:space-between; padding:18px 24px; overflow:hidden; border:1px solid #ded9ff; border-radius:16px; background:radial-gradient(circle at 90% 20%,rgb(103 88 201 / 18%),transparent 38%),linear-gradient(135deg,#fff,#f5f2ff); }
-.teacher-catalog-page-summary h2 { margin:6px 0 4px; color:#292b38; font-size:21px; letter-spacing:-.025em; }
-.teacher-catalog-page-summary p { max-width:850px; margin:0; color:var(--teacher-muted); font-size:12px; line-height:1.6; }
-.teacher-catalog-page-summary > svg { flex:0 0 auto; margin-right:8px; color:var(--teacher-accent); opacity:.68; }
 .teacher-catalog-layout { display:grid; min-height:0; flex:1 1 auto; grid-template-columns:290px minmax(0,1fr); overflow:hidden; border:1px solid #dedff0; border-radius:15px; background:#fff; box-shadow:0 7px 24px rgb(46 42 98 / 6%); transition:grid-template-columns .2s ease; }
 .teacher-catalog-layout.directory-collapsed { grid-template-columns:48px minmax(0,1fr); }
 .teacher-catalog-directory { position:relative; display:flex; min-width:0; min-height:0; flex-direction:column; border-right:1px solid #e3e3ed; background:#fcfcff; }
@@ -1804,14 +1800,13 @@ button { color: inherit; }
 .teacher-catalog-empty strong { color:#626576; font-size:14px; }
 .teacher-catalog-empty p { margin:0; font-size:11px; }
 @media (max-width:1000px) { .teacher-catalog-layout { grid-template-columns:240px minmax(0,1fr); }.teacher-catalog-breadcrumb > small { display:none; }.teacher-catalog-editor-content { padding-inline:28px; } }
-@media (max-width:760px) { .teacher-content-catalog { height:auto; min-height:calc(100vh - 58px); overflow:visible; }.teacher-main.teacher-catalog-main { display:block; height:auto; overflow:visible; }.teacher-catalog-page { min-height:calc(100vh - 94px); }.teacher-catalog-layout { min-height:680px; grid-template-columns:1fr; grid-template-rows:260px minmax(420px,1fr); overflow:visible; }.teacher-catalog-layout.directory-collapsed { grid-template-columns:1fr; grid-template-rows:48px minmax(420px,1fr); }.teacher-catalog-directory { border-right:0; border-bottom:1px solid #e3e3ed; }.teacher-catalog-workspace-header { align-items:flex-start; flex-direction:column; }.teacher-catalog-workspace-actions { width:100%; flex-wrap:wrap; }.teacher-catalog-field-grid { grid-template-columns:1fr; }.teacher-catalog-editor-content { padding:20px 16px 34px; }.teacher-catalog-page-summary { min-height:100px; padding-inline:17px; }.teacher-catalog-page-summary > svg { display:none; } }
+@media (max-width:760px) { .teacher-content-catalog { height:auto; min-height:calc(100vh - 58px); overflow:visible; }.teacher-main.teacher-catalog-main { display:block; height:auto; overflow:visible; }.teacher-catalog-page { min-height:calc(100vh - 94px); }.teacher-catalog-layout { min-height:680px; grid-template-columns:1fr; grid-template-rows:260px minmax(420px,1fr); overflow:visible; }.teacher-catalog-layout.directory-collapsed { grid-template-columns:1fr; grid-template-rows:48px minmax(420px,1fr); }.teacher-catalog-directory { border-right:0; border-bottom:1px solid #e3e3ed; }.teacher-catalog-workspace-header { align-items:flex-start; flex-direction:column; }.teacher-catalog-workspace-actions { width:100%; flex-wrap:wrap; }.teacher-catalog-field-grid { grid-template-columns:1fr; }.teacher-catalog-editor-content { padding:20px 16px 34px; } }
 
 /* Catalog pages use the same viewport workbench geometry as the knowledge book.
    Keep the directory fixed and let the Markdown pane consume every remaining
    pixel instead of sizing itself from the amount of content. */
 .teacher-main.teacher-catalog-main .teacher-content-catalog { display: flex; min-height: 0; }
 .teacher-content-catalog .teacher-catalog-page { height: 100%; min-height: 0; }
-.teacher-content-catalog .teacher-catalog-page-summary { flex: 0 0 auto; }
 .teacher-content-catalog .teacher-catalog-layout { height: 100%; min-height: 0; }
 .teacher-content-catalog .teacher-catalog-directory { overflow: hidden; }
 .teacher-content-catalog .teacher-book-tree-groups { min-height: 0; flex: 1 1 auto; overflow: auto; }
@@ -3176,4 +3171,23 @@ button { color: inherit; }
   .developer-permission-search { min-width: 0; }
   .developer-role-permission-scroll { padding-right: 14px; padding-left: 14px; }
   .developer-permission-grid { grid-template-columns: 1fr; }
+}
+
+/* Teacher navigation mirrors the student sidebar's compact rail. */
+.teacher-nav { transition: width .22s ease, flex-basis .22s ease; }
+.teacher-nav.collapsed { width: 68px; flex-basis: 68px; }
+.teacher-brand-mark { display: grid !important; width: 28px; height: 28px; flex: 0 0 28px !important; place-items: center; padding: 0 !important; border: 0 !important; background: transparent !important; color: var(--teacher-accent) !important; }
+.teacher-brand-mark:hover { background: var(--teacher-soft) !important; }
+.teacher-nav-collapse,.teacher-nav-expand { display: grid !important; width: 28px; height: 28px; place-items: center; padding: 0 !important; }
+.teacher-nav.collapsed .teacher-brand { justify-content: center; gap: 5px; padding-inline: 8px; }
+.teacher-nav.collapsed .teacher-brand span,.teacher-nav.collapsed .teacher-nav-refresh,.teacher-nav.collapsed .teacher-nav-expand { display: none !important; }
+.teacher-nav.collapsed .teacher-brand-mark { display: grid !important; }
+.teacher-nav.collapsed nav button { justify-content: center; padding-inline: 0; font-size: 0; }
+.teacher-nav.collapsed nav button svg { flex: 0 0 auto; }
+.teacher-nav.collapsed > a { justify-content: center; padding-inline: 0; }
+.teacher-nav.collapsed > a span { display: none; }
+
+/* The late desktop workbench sizing must not reopen the collapsed catalog. */
+@media (min-width: 761px) {
+  .teacher-content-book .teacher-book-layout.directory-collapsed { grid-template-columns: 46px minmax(0, 1fr); }
 }

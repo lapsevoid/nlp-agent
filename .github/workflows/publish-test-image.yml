@@ -144,11 +144,11 @@ jobs:
           COMPOSE_PROJECT_NAME: nova-test
         run: |
           set -euo pipefail
-          docker container prune -f --filter "label=com.docker.compose.project=$COMPOSE_PROJECT_NAME"
-          # Keep recent image layers so a normal deploy only downloads changed layers.
-          # The deploy host is long-lived; unbounded -a pruning defeats Docker's cache.
-          docker image prune -af --filter "until=168h"
-          docker builder prune -af --filter "until=168h"
+          # The runner is a long-lived single-purpose deploy host. Keep named
+          # data volumes, but reclaim every unused container, network, image,
+          # and local build cache before pulling the next release.
+          docker system prune -af
+          docker builder prune -af
           df -h /
       - name: Deploy the published GHCR image
         env:
@@ -279,3 +279,14 @@ jobs:
             sleep 5
           done
           exit 1
+      - name: Cleanup Docker resources after deployment
+        if: always()
+        run: |
+          set -euo pipefail
+          # Run even when health checks fail so a bad release cannot strand
+          # old image layers on the runner. Named MySQL, Redis, app, and log
+          # data volumes are intentionally preserved.
+          docker system prune -af
+          docker builder prune -af
+          docker system df
+          df -h /

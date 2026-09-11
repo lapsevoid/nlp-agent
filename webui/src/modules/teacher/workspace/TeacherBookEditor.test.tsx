@@ -216,8 +216,11 @@ describe("TeacherBookEditor Markdown authoring", () => {
 
     expect(await screen.findByRole("button", { name: "收起教材目录" })).toBeVisible();
     expect(await screen.findByRole("textbox", { name: "教材正文 Markdown" })).toBeVisible();
+    const layout = screen.getByRole("complementary", { name: "教材目录" }).parentElement;
+    expect(layout).not.toHaveClass("directory-collapsed");
     fireEvent.click(screen.getByRole("button", { name: "收起教材目录" }));
     expect(screen.getByRole("button", { name: "展开教材目录" })).toBeVisible();
+    expect(layout).toHaveClass("directory-collapsed");
     expect(screen.getByRole("textbox", { name: "教材正文 Markdown" })).toBeVisible();
   });
 

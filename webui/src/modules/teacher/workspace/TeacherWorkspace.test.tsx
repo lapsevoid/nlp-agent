@@ -53,6 +53,20 @@ describe("TeacherWorkspace catalog CRUD", () => {
     expect(screen.getByRole("button", { name: "刷新" }).closest(".teacher-brand")).toBeVisible();
   });
 
+  it("collapses and expands the teacher navigation like the student sidebar", async () => {
+    history.replaceState({}, "", "/teacher");
+    render(<TeacherWorkspace />);
+
+    expect(await screen.findByRole("button", { name: "教师首页" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "折叠教师侧栏" }));
+
+    expect(screen.getByRole("button", { name: "展开教师侧栏" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "教师首页" })).toHaveAttribute("title", "教师首页");
+
+    fireEvent.click(screen.getByRole("button", { name: "展开教师侧栏" }));
+    expect(screen.getByText("NLP 教师空间")).toBeVisible();
+  });
+
   it("renders learning metrics and weak topics on the overview homepage", async () => {
     history.replaceState({}, "", "/teacher"); render(<TeacherWorkspace />);
 
@@ -92,6 +106,16 @@ describe("TeacherWorkspace catalog CRUD", () => {
 
     expect(await screen.findByRole("heading", { name: "主题与知识点" })).toBeVisible();
     expect(getTeacherOverviewMock).not.toHaveBeenCalled();
+  });
+
+  it("removes the redundant catalog page summary", async () => {
+    history.replaceState({}, "", "/teacher/topics");
+    render(<TeacherWorkspace />);
+
+    expect(await screen.findByRole("heading", { name: "主题与知识点" })).toBeVisible();
+    expect(document.querySelector(".teacher-catalog-page-summary")).not.toBeInTheDocument();
+    expect(screen.queryByText("维护学生学习范围与智能体可引用的知识边界。所有修改先保存在当前目录草稿，点击右上角保存后通过教师接口同步。"))
+      .not.toBeInTheDocument();
   });
 
   it("creates a topic in the shared editor and persists the catalog through FastAPI", async () => {
@@ -309,7 +333,7 @@ describe("TeacherWorkspace catalog CRUD", () => {
     fireEvent.click(screen.getByRole("button", { name: "主题与知识点目录选项" }));
     expect(within(createMenu as HTMLElement).getByRole("button", { name: "新建主题" })).toBeVisible();
     expect(screen.queryByRole("button", { name: "导入 NLP 课件" })).not.toBeInTheDocument();
-    expect(screen.getByText(/维护学生学习范围与智能体可引用的知识边界/)).toBeVisible();
+    expect(screen.queryByText(/维护学生学习范围与智能体可引用的知识边界/)).not.toBeInTheDocument();
   });
 
   it("renders question statistics without raw question text", async () => {
