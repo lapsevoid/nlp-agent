@@ -21,6 +21,29 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
+def mask_phone_for_logging(phone: str) -> str:
+    """Keep the country code and last four digits for operational logs."""
+    value = phone.strip()
+    digits = "".join(ch for ch in value if ch.isdigit())
+    if not digits:
+        return "<invalid-phone>"
+
+    prefix = f"+{digits[:2]}" if value.startswith("+") and len(digits) > 2 else ""
+    prefix_digits = len(prefix.lstrip("+"))
+    hidden_length = max(0, len(digits) - prefix_digits - 4)
+    return prefix + ("*" * hidden_length) + digits[-4:]
+
+
+def development_sms_code_logging_enabled() -> bool:
+    """Return whether a local developer explicitly opted into code logging."""
+    return os.getenv("NLP_AGENT_SMS_EXPOSE_CODE", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def normalize_phone_for_tencent(phone: str) -> str:
     """Tencent Cloud requires E.164 numbers (``+8613800138000``).
 
@@ -109,19 +132,26 @@ class TencentSmsProvider:
             send_status = resp.SendStatusSet[0]
 
             if send_status.Code == "Ok":
-                logger.info("[TencentSMS] Successfully sent code to %s", phone)
+                logger.info(
+                    "[TencentSMS] Successfully sent verification code to %s",
+                    mask_phone_for_logging(phone),
+                )
                 return True
             else:
                 logger.error(
                     "[TencentSMS] Failed to send code to %s: %s - %s",
-                    phone,
+                    mask_phone_for_logging(phone),
                     send_status.Code,
                     send_status.Message,
                 )
                 return False
 
         except Exception as e:
-            logger.error("[TencentSMS] Exception sending code to %s: %s", phone, e)
+            logger.error(
+                "[TencentSMS] Exception sending code to %s: %s",
+                mask_phone_for_logging(phone),
+                e,
+            )
             return False
 
 

@@ -48,6 +48,13 @@ services:
     command: [".venv/bin/python", "main.py", "bootstrap-db"]
     env_file:
       - ${NOVA_ENV_FILE:-.env}
+    environment:
+      NLP_AGENT_LOG_DIR: /app/logs
+      NLP_AGENT_LOG_SERVICE: nova-migrate
+      NLP_AGENT_LOG_STDOUT: "${NLP_AGENT_LOG_STDOUT:-true}"
+      NLP_AGENT_LOG_RETENTION_DAYS: "${NLP_AGENT_LOG_RETENTION_DAYS:-14}"
+    volumes:
+      - nova-logs:/app/logs
     restart: "no"
     depends_on:
       mysql:
@@ -77,8 +84,13 @@ services:
       https_proxy: ${NOVA_OUTBOUND_PROXY_URL:-}
       NO_PROXY: "localhost,127.0.0.1,::1,redis,mysql,nova-web,nova-worker,nova-monitor,nova-sandbox-manager,host.docker.internal,${NOVA_DIRECT_DOMAINS:-.cn,.中国,api.deepseek.com,dashscope.aliyuncs.com,api.moonshot.cn,open.bigmodel.cn}"
       no_proxy: "localhost,127.0.0.1,::1,redis,mysql,nova-web,nova-worker,nova-monitor,nova-sandbox-manager,host.docker.internal,${NOVA_DIRECT_DOMAINS:-.cn,.中国,api.deepseek.com,dashscope.aliyuncs.com,api.moonshot.cn,open.bigmodel.cn}"
+      NLP_AGENT_LOG_DIR: /app/logs
+      NLP_AGENT_LOG_SERVICE: nova-web
+      NLP_AGENT_LOG_STDOUT: "${NLP_AGENT_LOG_STDOUT:-true}"
+      NLP_AGENT_LOG_RETENTION_DAYS: "${NLP_AGENT_LOG_RETENTION_DAYS:-14}"
     volumes:
       - nova-data:/app/.data
+      - nova-logs:/app/logs
     restart: unless-stopped
     depends_on:
       nova-migrate:
@@ -111,8 +123,13 @@ services:
       https_proxy: ${NOVA_OUTBOUND_PROXY_URL:-}
       NO_PROXY: "localhost,127.0.0.1,::1,redis,mysql,nova-web,nova-worker,nova-monitor,nova-sandbox-manager,host.docker.internal,${NOVA_DIRECT_DOMAINS:-.cn,.中国,api.deepseek.com,dashscope.aliyuncs.com,api.moonshot.cn,open.bigmodel.cn}"
       no_proxy: "localhost,127.0.0.1,::1,redis,mysql,nova-web,nova-worker,nova-monitor,nova-sandbox-manager,host.docker.internal,${NOVA_DIRECT_DOMAINS:-.cn,.中国,api.deepseek.com,dashscope.aliyuncs.com,api.moonshot.cn,open.bigmodel.cn}"
+      NLP_AGENT_LOG_DIR: /app/logs
+      NLP_AGENT_LOG_SERVICE: nova-worker
+      NLP_AGENT_LOG_STDOUT: "${NLP_AGENT_LOG_STDOUT:-true}"
+      NLP_AGENT_LOG_RETENTION_DAYS: "${NLP_AGENT_LOG_RETENTION_DAYS:-14}"
     volumes:
       - nova-data:/app/.data
+      - nova-logs:/app/logs
     restart: unless-stopped
     depends_on:
       nova-migrate:
@@ -132,8 +149,13 @@ services:
       NLP_AGENT_REDIS_URL: redis://redis:6379/0
       NLP_AGENT_GATEWAY_TRANSPORT: redis
       NLP_AGENT_SANDBOX_RUNTIME_MODE: docker
+      NLP_AGENT_LOG_DIR: /app/logs
+      NLP_AGENT_LOG_SERVICE: nova-sandbox-manager
+      NLP_AGENT_LOG_STDOUT: "${NLP_AGENT_LOG_STDOUT:-true}"
+      NLP_AGENT_LOG_RETENTION_DAYS: "${NLP_AGENT_LOG_RETENTION_DAYS:-14}"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - nova-logs:/app/logs
     restart: unless-stopped
     depends_on:
       nova-migrate:
@@ -150,10 +172,16 @@ services:
     environment:
       NLP_AGENT_MONITOR_HOST: 0.0.0.0
       NLP_AGENT_MONITOR_PORT: 8766
+      NLP_AGENT_LOG_DIR: /app/logs
+      NLP_AGENT_LOG_SERVICE: nova-monitor
+      NLP_AGENT_LOG_STDOUT: "${NLP_AGENT_LOG_STDOUT:-true}"
+      NLP_AGENT_LOG_RETENTION_DAYS: "${NLP_AGENT_LOG_RETENTION_DAYS:-14}"
     ports:
       # Bind to loopback by default.  Set NOVA_MONITOR_BIND_ADDRESS explicitly
       # when an internal reverse proxy/VPN should expose the monitor.
       - "${NOVA_MONITOR_BIND_ADDRESS:-127.0.0.1}:${NOVA_MONITOR_HOST_PORT:-8766}:8766"
+    volumes:
+      - nova-logs:/app/logs
     restart: unless-stopped
     profiles: ["monitor"]
     depends_on:
@@ -164,3 +192,4 @@ volumes:
   mysql-data:
   redis-data:
   nova-data:
+  nova-logs:

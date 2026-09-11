@@ -141,3 +141,27 @@ def test_deployment_and_example_env_templates_include_kimi_and_glm_api_keys():
         content = local_env.read_text(encoding="utf-8")
         assert "KIMI_API_KEY" in content, f"Missing KIMI_API_KEY in {local_env}"
         assert "GLM_API_KEY" in content, f"Missing GLM_API_KEY in {local_env}"
+
+
+def test_compose_persists_and_exposes_structured_service_logs():
+    compose = yaml.safe_load(
+        (Path(__file__).resolve().parents[1] / "compose.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    for service_name in (
+        "nova-migrate",
+        "nova-web",
+        "nova-worker",
+        "nova-monitor",
+        "nova-sandbox-manager",
+    ):
+        service = compose["services"][service_name]
+        assert "nova-logs:/app/logs" in service["volumes"]
+        environment = service["environment"]
+        assert environment["NLP_AGENT_LOG_DIR"] == "/app/logs"
+        assert environment["NLP_AGENT_LOG_SERVICE"] == service_name
+        assert environment["NLP_AGENT_LOG_STDOUT"] == "${NLP_AGENT_LOG_STDOUT:-true}"
+
+    assert "nova-logs" in compose["volumes"]
