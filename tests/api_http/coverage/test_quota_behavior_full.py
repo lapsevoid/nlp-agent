@@ -277,6 +277,19 @@ def test_quota_grant_adjustment_credit_and_read_models_are_consistent(
         )["items"]
     )
 
+    # A reset intentionally expires every other active grant in the same
+    # owner-period scope.  Revoke this standalone grant before exercising that
+    # replacement behavior so the revoke contract is tested against an active
+    # grant rather than against the reset state.
+    revoked = json_response(
+        client.post(
+            f"/api/v1/developer/quota/grants/{grant_id}/revoke",
+            json={"idempotency_key": f"api-http-revoke-{uuid.uuid4().hex}"},
+        ),
+        200,
+    )
+    assert revoked["status"] == "revoked"
+
     operation_key = f"api-http-credit-{uuid.uuid4().hex}"
     gift = json_response(
         client.post(
@@ -346,15 +359,6 @@ def test_quota_grant_adjustment_credit_and_read_models_are_consistent(
             200,
         )["items"]
     )
-
-    revoked = json_response(
-        client.post(
-            f"/api/v1/developer/quota/grants/{grant_id}/revoke",
-            json={"idempotency_key": f"api-http-revoke-{uuid.uuid4().hex}"},
-        ),
-        200,
-    )
-    assert revoked["status"] == "revoked"
 
     rollups = json_response(
         client.get("/api/v1/developer/quota/daily-rollups?start=2026-01-01&end=2026-01-02"),

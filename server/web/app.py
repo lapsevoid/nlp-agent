@@ -2347,9 +2347,12 @@ def create_app(
     @app.put("/api/v1/system/roles/{role_code}/menus", tags=["rbac"])
     async def put_role_menus(role_code: str, body: ReplaceRoleMenusBody, request: Request, principal: Principal, _claims: WriteClaims):
         authorization_service.require(principal, Permission.SYSTEM_ROLE_MANAGE)
-        async with authorization_session_factory(request)() as session:
-            async with session.begin():
-                await rbac_service.replace_role_menus(session, role_code=role_code, menu_ids=body.menu_ids, actor_user_id=principal.user_id)
+        try:
+            async with authorization_session_factory(request)() as session:
+                async with session.begin():
+                    await rbac_service.replace_role_menus(session, role_code=role_code, menu_ids=body.menu_ids, actor_user_id=principal.user_id)
+        except (KeyError, PermissionError, ValueError) as error:
+            raise _rbac_http_error(error) from error
         return {"role_code": role_code, "menu_ids": sorted(body.menu_ids)}
 
     @app.get("/api/v1/system/roles/{role_code}/menus", tags=["rbac"])

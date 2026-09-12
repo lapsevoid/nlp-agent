@@ -7,6 +7,7 @@ import uuid
 import pytest
 
 from ..support.environment import SeededUser
+from ..support.database import MySqlProbe
 from ..support.http import json_response, problem_response
 from ..support.resources import create_classroom, create_workspace
 
@@ -87,6 +88,7 @@ def test_system_catalogs_and_role_projection_round_trip(
 
 def test_classroom_listing_and_membership_are_persisted_and_scoped(
     authenticated_client_for,
+    mysql_probe: MySqlProbe,
     teacher_user: SeededUser,
     student_user: SeededUser,
     developer_user: SeededUser,
@@ -115,12 +117,24 @@ def test_classroom_listing_and_membership_are_persisted_and_scoped(
         "member_role": "student",
         "status": "active",
     }
+    assert mysql_probe.scalar(
+        """
+        SELECT COUNT(*)
+        FROM nlp_classroom_members
+        WHERE classroom_id = :classroom_id
+          AND user_id = :user_id
+          AND member_role = 'student'
+          AND status = 'active'
+        """,
+        classroom_id=classroom["id"],
+        user_id=student_user.user_id,
+    ) == 1
 
-    # Membership changes fence existing database sessions by authorization
-    # version.  Re-login is part of the real lifecycle, not a fixture bypass.
+    # The classroom listing is the teacher progress-management surface.  A
+    # student membership is persisted, but the student role does not grant
+    # LEARNING_PROGRESS_READ_CLASSROOM for this route.
     student = authenticated_client_for(student_user)
-    student_classrooms = json_response(student.get("/api/v1/classrooms"), 200)
-    assert any(item["id"] == classroom["id"] for item in student_classrooms["items"])
+    assert student.get("/api/v1/classrooms").status_code == 403
 
     other_workspace = create_workspace(
         developer,
@@ -208,7 +222,7 @@ def test_whiteboard_library_is_shared_read_only_to_students_and_validated(
             "/api/v1/whiteboard/library",
             json={
                 "name": name,
-                "elements": [{"type": "text", "text": "Full HTTP"}],
+                "elements": [{"id": "text-1", "type": "text", "text": "Full HTTP"}],
             },
         ),
         201,
@@ -224,6 +238,9 @@ def test_whiteboard_library_is_shared_read_only_to_students_and_validated(
     assert invalid.status_code == 422
     assert student.post(
         "/api/v1/whiteboard/library",
-        json={"name": "student-denied", "elements": [{"type": "text"}]},
+        json={
+            "name": "student-denied",
+            "elements": [{"id": "text-2", "type": "text"}],
+        },
     ).status_code == 403
     assert developer.get("/api/v1/whiteboard/library").status_code == 200

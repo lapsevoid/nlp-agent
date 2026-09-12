@@ -10,6 +10,7 @@ does not treat an arbitrary 401/403 probe as a successful business test.
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import replace
 from typing import Any
 
 import httpx
@@ -32,12 +33,14 @@ _PUBLIC_WEB = {
     ("POST", "/api/v1/auth/login"),
     ("POST", "/api/v1/auth/register"),
     ("POST", "/api/v1/auth/sms/send"),
+    ("POST", "/api/v1/auth/guest"),
 }
 _PUBLIC_MONITOR = {
     ("GET", "/health/live"),
     ("GET", "/health/ready"),
     ("GET", "/api/openapi.json"),
     ("POST", "/api/v1/auth/login"),
+    ("POST", "/api/v1/auth/session"),
 }
 def _request_kwargs(request: ProbeRequest) -> dict[str, Any]:
     kwargs: dict[str, Any] = {
@@ -91,6 +94,10 @@ def _is_write(operation: Operation) -> bool:
 
 
 def _is_developer_control_plane(operation: Operation) -> bool:
+    # This endpoint is intentionally role-projected and available to any
+    # authenticated principal; it is not a developer administration route.
+    if operation.path == "/api/v1/system/menus/visible":
+        return False
     return operation.path.startswith(
         (
             "/api/v1/developer/",
@@ -100,6 +107,22 @@ def _is_developer_control_plane(operation: Operation) -> bool:
             "/api/v1/system/",
         )
     )
+
+
+def _role_boundary_request(
+    operation: Operation,
+    document: dict[str, Any],
+    context: FullProbeContext,
+) -> ProbeRequest:
+    request = _operation_request(operation, document, context)
+    if (
+        operation.method == "PATCH"
+        and operation.path == "/api/v1/developer/feedback/{thread_id}"
+    ):
+        # FeedbackUpdateBody has an application-level "at least one field"
+        # validator, so an empty generic object would fail before auth runs.
+        return replace(request, json_body={"status": "in_progress"})
+    return request
 
 
 def _assert_response_envelope(
@@ -455,7 +478,7 @@ def test_developer_operations_reject_lower_roles(
     ):
         client = authenticated_client_for(user)
         for operation in operations:
-            request = _operation_request(operation, web_document, context)
+            request = _role_boundary_request(operation, web_document, context)
             headers = _replace_csrf(request, client.headers.get("X-CSRF-Token", ""))
             headers["Origin"] = api_http_environment.web_origin
             try:
