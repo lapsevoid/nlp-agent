@@ -35,6 +35,9 @@ _PUBLIC_WEB = {
     ("POST", "/api/v1/auth/sms/send"),
     ("POST", "/api/v1/auth/guest"),
 }
+_COOKIE_EXEMPT_WEB = {
+    ("GET", "/api/v1/sandbox/artifacts/{artifact_id}/content"),
+}
 _PUBLIC_MONITOR = {
     ("GET", "/health/live"),
     ("GET", "/health/ready"),
@@ -86,6 +89,8 @@ def _all_operations(
 
 def _requires_auth(operation: Operation) -> bool:
     public = _PUBLIC_WEB if operation.service == "web" else _PUBLIC_MONITOR
+    if operation.service == "web" and (operation.method, operation.path) in _COOKIE_EXEMPT_WEB:
+        return False
     return (operation.method, operation.path) not in public
 
 
@@ -356,9 +361,8 @@ def test_every_live_operation_has_http_behavior_contract(
         if model_config is not None:
             request = replace(request, json_body=model_config)
         request_client = client
-        public = (
-            _PUBLIC_WEB if operation.service == "web" else _PUBLIC_MONITOR
-        )
+        public = _PUBLIC_WEB if operation.service == "web" else _PUBLIC_MONITOR
+        public = public | _COOKIE_EXEMPT_WEB if operation.service == "web" else public
         if (operation.method, operation.path) in public:
             # Login and guest-session endpoints mutate cookies.  Keep their
             # cookie jar separate from the authenticated probe client so a
