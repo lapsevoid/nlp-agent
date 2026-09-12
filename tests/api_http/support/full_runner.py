@@ -363,6 +363,10 @@ def _parameter_value(
         return "0"
     if normalized in {"days", "window_minutes", "bucket_minutes", "since_seconds"}:
         return "1"
+    if normalized in {"period_start", "period_end", "effective_from", "effective_until", "expires_at", "released_at", "billed_at", "occurred_at", "before"}:
+        return "2026-01-01T00:00:00Z"
+    if normalized in {"start_date", "end_date"}:
+        return "2026-01-01" if normalized == "start_date" else "2026-01-02"
     if normalized in {"start", "end"}:
         return "2026-01-01" if normalized == "start" else "2026-01-02"
     if normalized in {"include_deleted", "include_users"}:
@@ -377,6 +381,8 @@ def _parameter_value(
         return "student"
     if normalized in {"name", "code", "pricing_key"}:
         return f"api-full-{context.nonce[:12]}"
+    if normalized == "version":
+        return "1.0.0"
     if normalized in {"ticket", "after_event_id", "trace_id", "chain_id", "checkpoint_id"}:
         return context.nonce
     if normalized in {"resource"}:
