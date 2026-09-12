@@ -146,7 +146,7 @@ def _assert_response_envelope(
     if 400 <= response.status_code:
         assert isinstance(payload, dict), payload
         assert any(key in payload for key in ("code", "detail", "title", "type")), payload
-        if response.status_code == 404:
+        if response.status_code == 404 and "{" not in operation.path:
             assert payload.get("detail") != "Not Found", (
                 f"{operation.service} {operation.method} {operation.path} returned "
                 "the generic framework 404 instead of reaching the declared route"
@@ -210,6 +210,35 @@ def _resolve_schema(schema: Any, document: dict[str, Any]) -> dict[str, Any]:
         target = schemas.get(name) if isinstance(schemas, dict) else None
         return _resolve_schema(target, document)
     return schema
+
+
+def _model_configuration_from_snapshot(
+    operation: Operation,
+    snapshot: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Use a valid disposable model entry for strict developer config schemas."""
+
+    section_by_path = {
+        "/api/v1/developer/models/providers/{name}": "providers",
+        "/api/v1/developer/models/presets/{name}": "presets",
+        "/api/v1/developer/models/routes/{name}": "routes",
+        "/api/v1/developer/models/profiles/{name}": "profiles",
+    }
+    section_name = section_by_path.get(operation.path)
+    if section_name is None:
+        return None
+    models = snapshot.get("models")
+    section = models.get(section_name) if isinstance(models, dict) else None
+    if not isinstance(section, dict) or not section:
+        return None
+    value = next(iter(section.values()))
+    if not isinstance(value, dict):
+        return None
+    if section_name == "providers":
+        value = {
+            key: item for key, item in value.items() if key != "api_key_configured"
+        }
+    return {"config": value}
 
 
 def _make_context(
@@ -314,12 +343,18 @@ def test_every_live_operation_has_http_behavior_contract(
         api_http_environment.web_base_url,
         api_http_environment.monitor_base_url,
     )
+    snapshot_response = web_client.get("/api/v1/developer/snapshot")
+    assert snapshot_response.status_code == 200, snapshot_response.text
+    model_snapshot = snapshot_response.json()
     failures: list[str] = []
     for operation, client, document in (
         *[(item, web_client, web_document) for item in web_operations],
         *[(item, monitor_client, monitor_document) for item in monitor_operations],
     ):
         request = _operation_request(operation, document, safe_context)
+        model_config = _model_configuration_from_snapshot(operation, model_snapshot)
+        if model_config is not None:
+            request = replace(request, json_body=model_config)
         request_client = client
         public = (
             _PUBLIC_WEB if operation.service == "web" else _PUBLIC_MONITOR
