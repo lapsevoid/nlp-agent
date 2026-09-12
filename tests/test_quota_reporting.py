@@ -143,6 +143,7 @@ async def test_durable_reporter_persists_exact_attempt_and_shadow_credits(quota_
         reasoning_output_tokens=2_000,
         total_tokens=1_010_000,
         source="provider",
+        cache_status="measured",
         provider_response_id="provider-response-1",
     )
 
@@ -157,6 +158,7 @@ async def test_durable_reporter_persists_exact_attempt_and_shadow_credits(quota_
     assert row["fallback_index"] == 1
     assert row["usage_status"] == "exact"
     assert row["cache_miss_input_tokens"] == 900_000
+    assert row["cache_status"] == "measured"
     assert row["raw_usage_json"]["usage"]["cache_miss_input_tokens"] == 900_000
     assert row["pricing_version"] == "2026-08-29"
     assert row["credits_micro"] == 2_798_000

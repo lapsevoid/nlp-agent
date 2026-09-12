@@ -171,6 +171,51 @@ async def test_turn_state_mutations_are_fenced_by_claim_generation():
 
 
 @pytest.mark.asyncio
+async def test_queue_consumer_id_does_not_reclassify_coordinator_usage():
+    from core.model_runtime.usage import resolve_usage_attribution
+
+    observed = []
+
+    class AttributionCapturingEngine(SuccessfulEngine):
+        async def run_turn(self, _context, _turn_id, _content):
+            observed.append(resolve_usage_attribution())
+            return "answer"
+
+    async def emit(_turn_id, _session_id, _event_type, _payload):
+        return None
+
+    executor = InProcessTurnExecutor(
+        AttributionCapturingEngine(), ClaimAwareRepository(), emit
+    )
+    task = TurnTask(
+        context=SessionContext(
+            session_id="session-1",
+            user_id="user-1",
+            workspace_id="workspace-1",
+        ),
+        turn_id="turn-1",
+        content="hello",
+        learning_context=None,
+        learning_progress=None,
+        exercise_state=None,
+        teaching_materials=TeachingMaterials(),
+        guided_session_id=None,
+        exercise_session_id=None,
+    )
+
+    await executor.run(
+        task,
+        SimpleNamespace(worker_id="queue-consumer-1", claim_generation=7),
+    )
+
+    assert len(observed) == 1
+    assert observed[0].purpose == "coordinator"
+    assert observed[0].worker_id is None
+    assert observed[0].user_id == "user-1"
+    assert observed[0].workspace_id == "workspace-1"
+
+
+@pytest.mark.asyncio
 async def test_learning_finalization_failure_moves_running_turn_to_failed():
     repository = FailingLearningRepository()
     events = []

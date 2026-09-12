@@ -53,10 +53,30 @@ def _extract_usage_details(metadata: Mapping[str, Any] | None) -> dict[str, Any]
         ).items()
         if v is not None
     }
+    cache_reported = any(
+        key in raw and raw[key] is not None
+        for key in (
+            "prompt_cache_hit_tokens",
+            "cached_tokens",
+            "cache_read_input_tokens",
+            "prompt_cache_miss_tokens",
+            "cache_write_input_tokens",
+        )
+    ) or any(
+        key in input_details
+        for key in (
+            "cache_read",
+            "cached_tokens",
+            "cache_miss",
+            "cache_write",
+            "cache_creation_input_tokens",
+        )
+    )
     return {
         "raw": raw,
         "input_details": input_details,
         "output_details": output_details,
+        "cache_reported": cache_reported,
         "raw_input": raw.get("input_tokens", raw.get("prompt_tokens", 0)),
         "raw_output": raw.get("output_tokens", raw.get("completion_tokens", 0)),
         "raw_cache_read": raw.get(
@@ -119,6 +139,9 @@ def normalize_usage(
         "prompt_cache_hit_tokens": max(0, cache_read),
         "prompt_cache_miss_tokens": max(0, cache_miss),
         "cache_write_input_tokens": max(0, cache_write),
+        "cache_status": (
+            "measured" if extracted["cache_reported"] else "unavailable"
+        ),
         "usage_semantics": _usage_semantics(
             extracted["raw"].get("usage_semantics")
             or extracted["raw"].get("semantics"),
@@ -194,6 +217,11 @@ def canonical_usage(
         reasoning_output_tokens=reasoning_output_tokens,
         total_tokens=total_tokens,
         source=resolved_source,
+        cache_status=(
+            "measured"
+            if resolved_source == "provider" and extracted["cache_reported"]
+            else "unavailable"
+        ),
         semantics=_usage_semantics(
             extracted["raw"].get("usage_semantics")
             or extracted["raw"].get("semantics"),

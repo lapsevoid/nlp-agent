@@ -17,6 +17,7 @@ from core.observability.context import current_telemetry_context
 
 UsageSource = Literal["provider", "estimated", "none"]
 UsageSemantics = Literal["final", "cumulative", "delta", "partial"]
+CacheMeasurementStatus = Literal["measured", "unavailable"]
 UsagePurpose = Literal[
     "coordinator",
     "worker",
@@ -75,6 +76,7 @@ class CanonicalTokenUsage(UsageFrozenModel):
     reasoning_output_tokens: StrictNonNegativeInt = 0
     total_tokens: StrictNonNegativeInt = 0
     source: UsageSource = "none"
+    cache_status: CacheMeasurementStatus = "unavailable"
     semantics: UsageSemantics = "final"
     provider_response_id: str | None = None
 
@@ -104,6 +106,8 @@ class CanonicalTokenUsage(UsageFrozenModel):
             self.total_tokens,
         )):
             raise ValueError("source=none cannot carry token values")
+        if self.cache_status == "measured" and self.source != "provider":
+            raise ValueError("cache_status=measured requires source=provider")
         return self
 
 
@@ -196,6 +200,21 @@ _CURRENT_FEATURE_USAGE: contextvars.ContextVar[BillableFeatureUsage | None] = (
 
 def current_usage_attribution() -> UsageAttributionContext | None:
     return _CURRENT_ATTRIBUTION.get()
+
+
+def worker_usage_attribution(worker_id: str) -> UsageAttributionContext | None:
+    """Derive Worker attribution from the current parent turn, when available.
+
+    Background tasks inherit ``ContextVar`` values. Explicitly changing the
+    Worker boundary prevents its model calls from being reported as
+    Coordinator usage while preserving the request and billing identifiers.
+    """
+    parent = current_usage_attribution()
+    if parent is None:
+        return None
+    return parent.model_copy(
+        update={"worker_id": worker_id, "purpose": "worker"}
+    )
 
 
 def current_billable_feature_usage() -> BillableFeatureUsage:

@@ -311,6 +311,41 @@ def test_worker_kv_cache_prefix_excludes_every_runtime_field():
     assert "second task directive" in str(second[3].content)
 
 
+def test_background_worker_rebinds_inherited_coordinator_usage():
+    from core.model_runtime.usage import (
+        UsageAttributionContext,
+        bind_usage_attribution,
+        worker_usage_attribution,
+    )
+
+    parent = UsageAttributionContext(
+        request_id="turn-1",
+        user_id="user-1",
+        workspace_id="workspace-1",
+        conversation_id="session-1",
+        turn_id="turn-1",
+        reservation_id="reservation-1",
+        purpose="coordinator",
+    )
+
+    with bind_usage_attribution(parent):
+        worker = worker_usage_attribution("worker-research-1")
+
+    assert worker is not None
+    assert worker.request_id == parent.request_id
+    assert worker.user_id == parent.user_id
+    assert worker.workspace_id == parent.workspace_id
+    assert worker.reservation_id == parent.reservation_id
+    assert worker.worker_id == "worker-research-1"
+    assert worker.purpose == "worker"
+
+
+def test_background_worker_without_parent_usage_keeps_existing_fallback():
+    from core.model_runtime.usage import worker_usage_attribution
+
+    assert worker_usage_attribution("worker-research-1") is None
+
+
 def test_coordinator_prompt_v1_5_teaches_academic_search_routing():
     root = Path(__file__).resolve().parents[1]
     prompt = (root / "core" / "prompt_runtime" / "templates" / "coordinator.v1.5.md").read_text(encoding="utf-8")

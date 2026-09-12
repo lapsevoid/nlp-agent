@@ -37,12 +37,14 @@ def test_canonical_usage_deepseek_fields():
     assert canon.reasoning_output_tokens == 80
     assert canon.total_tokens == 1200
     assert canon.source == "provider"
+    assert canon.cache_status == "measured"
     assert canon.provider_response_id == "deepseek-resp-1"
 
     # Observability normalize_usage still retains prompt_cache_miss_tokens
     norm = normalize_usage(raw_deepseek)
     assert norm["prompt_cache_miss_tokens"] == 400
     assert norm["prompt_cache_hit_tokens"] == 600
+    assert norm["cache_status"] == "measured"
 
 
 def test_canonical_usage_qwen_fields():
@@ -64,6 +66,7 @@ def test_canonical_usage_qwen_fields():
     assert canon.reasoning_output_tokens == 50
     assert canon.total_tokens == 650
     assert canon.source == "provider"
+    assert canon.cache_status == "measured"
     assert canon.provider_response_id == "qwen-resp-1"
 
 
@@ -81,6 +84,7 @@ def test_canonical_usage_kimi_fields():
     assert canon.output_tokens == 120
     assert canon.total_tokens == 920
     assert canon.source == "provider"
+    assert canon.cache_status == "measured"
     assert canon.provider_response_id == "kimi-resp-1"
 
     norm = normalize_usage(raw_kimi)
@@ -104,6 +108,7 @@ def test_canonical_usage_glm_fields():
     assert canon.output_tokens == 150
     assert canon.total_tokens == 750
     assert canon.source == "provider"
+    assert canon.cache_status == "measured"
     assert canon.provider_response_id == "glm-resp-1"
 
     norm = normalize_usage(raw_glm)
@@ -121,6 +126,22 @@ def test_canonical_usage_raw_total_mismatch_is_recalculated():
     assert canon.input_tokens == 100
     assert canon.output_tokens == 50
     assert canon.total_tokens == 150  # Canonical calculates input + output
+    assert canon.cache_status == "unavailable"
+
+
+def test_explicit_zero_cache_details_remain_a_provider_measurement():
+    canon = canonical_usage(
+        {
+            "prompt_tokens": 100,
+            "completion_tokens": 5,
+            "prompt_cache_hit_tokens": 0,
+            "prompt_cache_miss_tokens": 100,
+        }
+    )
+
+    assert canon.source == "provider"
+    assert canon.cache_status == "measured"
+    assert canon.cached_input_tokens == 0
 
 
 def test_canonical_usage_empty_and_none():

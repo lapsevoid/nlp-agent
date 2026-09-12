@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
 const { monitorApi } = vi.hoisted(() => ({
   monitorApi: {
@@ -12,6 +12,7 @@ const { monitorApi } = vi.hoisted(() => ({
     systemUsage: vi.fn().mockResolvedValue({ scope: "system", events: 0, priced_events: 0, unpriced_events: 0, credits_complete: true, credit_status: "complete", credits_micro: 0, priced_credits_micro: 0, tokens: {}, breakdown: [], users: [], workspaces: [], providers: [], purposes: [], models: [] }),
     systemUsageTrend: vi.fn().mockResolvedValue({ scope: "system", period_days: 1, from: "2026-09-04T08:00:00Z", to: "2026-09-04T10:00:00Z", granularity: "five_minute", events: 0, priced_events: 0, unpriced_events: 0, credits_complete: true, credit_status: "complete", credits_micro: 0, priced_credits_micro: 0, tokens: {}, breakdown: [], users: [], workspaces: [], providers: [], purposes: [], models: [] }),
     systemUsageUsers: vi.fn().mockResolvedValue({ items: [], total: 0, offset: 0, limit: 12, has_more: false }),
+    systemUsageDimension: vi.fn().mockResolvedValue({ items: [], total: 0, offset: 0, limit: 12, has_more: false }),
     errors: vi.fn().mockResolvedValue({ items: [] }),
     events: vi.fn().mockResolvedValue({ items: [] }), storage: vi.fn().mockResolvedValue({}),
     authorizationAudit: vi.fn().mockResolvedValue({ items: [], total: 0, offset: 0, limit: 50, has_more: false }),
@@ -47,6 +48,7 @@ describe("MonitorApp navigation", () => {
     monitorApi.systemUsageTrend.mockReset().mockResolvedValue({ scope: "system", period_days: 1, from: "2026-09-04T08:00:00Z", to: "2026-09-04T10:00:00Z", granularity: "five_minute", events: 0, priced_events: 0, unpriced_events: 0, credits_complete: true, credit_status: "complete", credits_micro: 0, priced_credits_micro: 0, tokens: {}, breakdown: [], users: [], workspaces: [], providers: [], purposes: [], models: [] });
     monitorApi.dependencies.mockReset().mockResolvedValue({ scope: "system", period_days: 30, from: "2026-09-04T08:00:00Z", to: "2026-09-04T10:00:00Z", summary: { requests: 0, component_calls: 0, errors: 0, component_errors: 0, error_rate: 0, active_users: 0, active_workspaces: 0, latency_ms: { p50: 0, p90: 0, p95: 0, p99: 0 }, ttft_ms: { p50: 0, p90: 0, p95: 0, p99: 0 }, total_tokens: 0 }, trend: [], components: [], providers: [], models: [], anomalies: [] });
     monitorApi.systemUsageUsers.mockReset().mockResolvedValue({ items: [], total: 0, offset: 0, limit: 12, has_more: false });
+    monitorApi.systemUsageDimension.mockReset().mockResolvedValue({ items: [], total: 0, offset: 0, limit: 12, has_more: false });
     monitorApi.traces.mockReset().mockResolvedValue({ items: [] });
     monitorApi.traceGroups.mockReset().mockResolvedValue({ items: [], total: 0, offset: 0, limit: 24, has_more: false });
     monitorApi.traceGroup.mockReset().mockResolvedValue({ chain: null, traces: [], spans: [], events: [] });
@@ -189,21 +191,42 @@ describe("MonitorApp navigation", () => {
     expect(screen.queryByRole("heading", { name: "系统总览", level: 1 })).not.toBeInTheDocument();
   });
 
-  it("shows the Provider-measured KV cache hit rate in the usage summary", async () => {
+  it("makes Worker KV cache and role/model attribution visible", async () => {
     history.replaceState({}, "", "/monitor/usage");
+    const coordinator = {
+      purpose: "coordinator", events: 1, priced_events: 1, unpriced_events: 0, credits_complete: true, credit_status: "complete", credits_micro: 60, priced_credits_micro: 60,
+      tokens: { input_tokens: 100, cached_input_tokens: 10, output_tokens: 2, total_tokens: 102 }, cache_hit_rate: 0.1, cache_input_tokens: 100, cache_cached_input_tokens: 10,
+    };
+    const worker = {
+      purpose: "worker", events: 1, priced_events: 1, unpriced_events: 0, credits_complete: true, credit_status: "complete", credits_micro: 40, priced_credits_micro: 40,
+      tokens: { input_tokens: 100, cached_input_tokens: 80, output_tokens: 2, total_tokens: 102 }, cache_hit_rate: 0.8, cache_input_tokens: 100, cache_cached_input_tokens: 80,
+    };
+    const pro = { ...coordinator, provider: "deepseek", provider_model: "deepseek-v4-pro" };
+    const flash = { ...worker, provider: "deepseek", provider_model: "deepseek-v4-flash" };
     monitorApi.systemUsage.mockResolvedValueOnce({
       scope: "system", period_days: 30, from: "2026-08-09T00:00:00Z", to: "2026-09-08T00:00:00Z", granularity: "day",
       events: 2, priced_events: 2, unpriced_events: 0, credits_complete: true, credit_status: "complete", credits_micro: 100, priced_credits_micro: 100,
       tokens: { input_tokens: 200, cached_input_tokens: 80, cache_write_input_tokens: 0, output_tokens: 4, reasoning_output_tokens: 0, total_tokens: 204 },
-      cache_hit_rate: 0.4, cache_input_tokens: 200, cache_cached_input_tokens: 80,
-      breakdown: [], users: [], workspaces: [], providers: [], purposes: [], models: [],
+      cache_hit_rate: 0.45, cache_input_tokens: 200, cache_cached_input_tokens: 90,
+      worker_cache_hit_rate: 0.8, worker_cache_input_tokens: 100, worker_cache_cached_input_tokens: 80,
+      breakdown: [], users: [], workspaces: [], providers: [], purposes: [coordinator, worker], models: [pro, flash],
+      role_models: [pro, flash],
     });
+    monitorApi.systemUsageDimension.mockImplementation((dimension: string) => Promise.resolve({
+      items: dimension === "models" ? [pro, flash] : [], total: dimension === "models" ? 2 : 0, offset: 0, limit: 12, has_more: false,
+    }));
 
     render(<MonitorApp />);
 
-    expect(await screen.findByText("KV Cache 命中率")).toBeVisible();
-    expect(screen.getByText("40.0%")).toBeVisible();
-    expect(screen.getByText("80 / 200 Provider 输入 Token")).toBeVisible();
+    expect(await screen.findByText("Worker KV Cache")).toBeVisible();
+    expect(screen.getByText("80 / 100 Worker 输入 Token")).toBeVisible();
+    expect(screen.getByRole("region", { name: "模型调用角色分布" })).toHaveTextContent("Worker");
+    expect(screen.getByRole("region", { name: "模型调用角色分布" })).toHaveTextContent("102 Token · 缓存 80.0%");
+    expect(screen.getByRole("region", { name: "模型调用角色分布" })).toHaveTextContent("deepseek-v4-pro");
+    expect(screen.getByRole("region", { name: "模型调用角色分布" })).toHaveTextContent("deepseek-v4-flash");
+    expect((await screen.findAllByText("deepseek-v4-pro")).length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText("deepseek-v4-flash").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText("80.0%").length).toBeGreaterThanOrEqual(2);
   });
 
   it("does not derive a KV cache hit rate from the legacy Trace fallback", async () => {
@@ -222,10 +245,10 @@ describe("MonitorApp navigation", () => {
 
     render(<MonitorApp />);
 
-    const rate = await screen.findByText("KV Cache 命中率");
+    const rate = await screen.findByText("Worker KV Cache");
     expect(rate.parentElement).toHaveTextContent("—");
     expect(rate.parentElement).not.toHaveTextContent("40.0%");
-    expect(rate.parentElement).not.toHaveTextContent("80 / 200 输入 Token");
+    expect(rate.parentElement).toHaveTextContent("暂无 Worker Provider 实测");
   });
 
   it("loads dependency health only on the component route and links an anomaly to traces", async () => {
@@ -493,6 +516,11 @@ describe("MonitorApp navigation", () => {
       credits_micro: 100,
       priced_credits_micro: 100,
       tokens: { total_tokens: 1000 + index },
+      cache_hit_rate: index === 0 ? 0 : null,
+      cache_input_tokens: index === 0 ? 100 : 0,
+      cache_cached_input_tokens: 0,
+      cache_measured_events: index === 0 ? 1 : 0,
+      cache_unmeasured_events: (13 - index) - (index === 0 ? 1 : 0),
     }));
     monitorApi.systemUsageUsers
       .mockResolvedValueOnce({ items: users.slice(0, 12), total: users.length, offset: 0, limit: 12, has_more: true })
@@ -501,6 +529,15 @@ describe("MonitorApp navigation", () => {
     render(<MonitorApp />);
 
     expect(await screen.findByText("usage-user-01")).toBeVisible();
+    const userPanel = screen.getByRole("heading", { name: "按用户" }).closest("section");
+    expect(userPanel).not.toBeNull();
+    const userTable = within(userPanel as HTMLElement);
+    expect(userTable.getByRole("columnheader", { name: "KV Cache" })).toBeVisible();
+    expect(userTable.getByRole("columnheader", { name: "实测覆盖" })).toBeVisible();
+    expect(userTable.queryByRole("columnheader", { name: "总 Token" })).not.toBeInTheDocument();
+    expect(userTable.queryByRole("columnheader", { name: "Credits" })).not.toBeInTheDocument();
+    expect(userTable.getByLabelText("KV Cache 0.0%，0 / 100")).toBeVisible();
+    expect(userTable.getAllByLabelText("KV Cache 无实测，Provider 未返回 Cache").length).toBeGreaterThan(0);
     expect(screen.queryByText("usage-user-13")).not.toBeInTheDocument();
     expect(monitorApi.systemUsageUsers).toHaveBeenCalledWith(30, 12, 0);
     fireEvent.click(screen.getByRole("button", { name: /加载更多用户/ }));

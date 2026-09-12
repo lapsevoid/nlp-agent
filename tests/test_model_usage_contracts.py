@@ -64,6 +64,7 @@ def test_canonical_token_usage_valid():
         reasoning_output_tokens=15,
         total_tokens=150,
         source="provider",
+        cache_status="measured",
         provider_response_id="resp-1",
     )
     assert usage.input_tokens == 100
@@ -74,6 +75,7 @@ def test_canonical_token_usage_valid():
     assert usage.reasoning_output_tokens == 15
     assert usage.total_tokens == 150
     assert usage.source == "provider"
+    assert usage.cache_status == "measured"
     assert usage.provider_response_id == "resp-1"
 
 
@@ -94,6 +96,13 @@ def test_canonical_token_usage_provider_all_zero_allowed():
     )
     assert usage.source == "provider"
     assert usage.total_tokens == 0
+
+
+def test_measured_cache_status_requires_provider_usage():
+    with pytest.raises(
+        ValidationError, match="cache_status=measured requires source=provider"
+    ):
+        CanonicalTokenUsage(cache_status="measured", source="estimated")
 
 
 def test_billable_feature_usage_is_separate_and_context_scoped():

@@ -192,6 +192,7 @@ def _usage_event(
         "reasoning_output_tokens": 0,
         "total_tokens": 10,
         "usage_source": "provider",
+        "cache_status": "unavailable",
         "usage_status": usage_status,
         "pricing_version": "1",
         "credits_micro": credits_micro,
@@ -816,6 +817,7 @@ def test_system_snapshot_reports_provider_measured_kv_cache_hit_rate():
         occurred_at=NOW - timedelta(minutes=30),
     )
     second.update(
+        cache_status="measured",
         input_tokens=100,
         cached_input_tokens=80,
         output_tokens=2,
@@ -845,6 +847,8 @@ def test_system_snapshot_reports_provider_measured_kv_cache_hit_rate():
     assert snapshot["cache_input_tokens"] == 100
     assert snapshot["cache_cached_input_tokens"] == 80
     assert snapshot["cache_hit_rate"] == pytest.approx(0.8)
+    assert snapshot["cache_measured_events"] == 1
+    assert snapshot["cache_unmeasured_events"] == 2
     assert weekly["cache_input_tokens"] == 100
     assert weekly["cache_cached_input_tokens"] == 80
     assert weekly["cache_hit_rate"] == pytest.approx(0.8)
@@ -853,18 +857,163 @@ def test_system_snapshot_reports_provider_measured_kv_cache_hit_rate():
     assert trend["cache_hit_rate"] == pytest.approx(0.8)
 
 
+def test_provider_usage_without_cache_details_is_not_reported_as_zero_percent():
+    engine = _engine()
+    unmeasured = _usage_event(
+        operation_id="op-cache-not-reported",
+        occurred_at=NOW - timedelta(minutes=30),
+    )
+    unmeasured.update(
+        input_tokens=100,
+        cached_input_tokens=0,
+        output_tokens=2,
+        total_tokens=102,
+    )
+    with engine.begin() as connection:
+        connection.execute(insert(UsageEventModel), [unmeasured])
+
+    snapshot = UsageReadService(engine).system_snapshot(days=7, now=NOW)
+
+    assert snapshot["cache_hit_rate"] is None
+    assert snapshot["cache_input_tokens"] == 0
+    assert snapshot["cache_cached_input_tokens"] == 0
+    assert snapshot["cache_measured_events"] == 0
+    assert snapshot["cache_unmeasured_events"] == 1
+
+
+def test_system_snapshot_separates_worker_and_model_cache_measurements():
+    engine = _engine()
+    coordinator = _usage_event(
+        operation_id="op-cache-coordinator",
+        occurred_at=NOW - timedelta(hours=2),
+    )
+    coordinator.update(
+        purpose="coordinator",
+        cache_status="measured",
+        provider_model="deepseek-v4-pro",
+        input_tokens=100,
+        cached_input_tokens=20,
+        output_tokens=2,
+        total_tokens=102,
+    )
+    worker = _usage_event(
+        operation_id="op-cache-worker",
+        occurred_at=NOW - timedelta(hours=1),
+    )
+    worker.update(
+        purpose="worker",
+        cache_status="measured",
+        worker_id="worker-1",
+        provider_model="deepseek-v4-flash",
+        input_tokens=200,
+        cached_input_tokens=150,
+        output_tokens=2,
+        total_tokens=202,
+    )
+    estimated_worker = _usage_event(
+        operation_id="op-cache-worker-estimated",
+        occurred_at=NOW - timedelta(minutes=45),
+    )
+    estimated_worker.update(
+        purpose="worker",
+        worker_id="worker-2",
+        provider_model="deepseek-v4-flash",
+        usage_source="estimated",
+        input_tokens=100,
+        cached_input_tokens=0,
+        output_tokens=2,
+        total_tokens=102,
+    )
+    utility = _usage_event(
+        operation_id="op-cache-utility",
+        occurred_at=NOW - timedelta(minutes=30),
+    )
+    utility.update(
+        purpose="memory",
+        cache_status="measured",
+        provider_model="deepseek-v4-flash",
+        input_tokens=100,
+        cached_input_tokens=50,
+        output_tokens=2,
+        total_tokens=102,
+    )
+    with engine.begin() as connection:
+        connection.execute(
+            insert(UsageEventModel),
+            [coordinator, worker, estimated_worker, utility],
+        )
+
+    reader = UsageReadService(engine)
+    snapshot = reader.system_snapshot(days=7, now=NOW)
+    weekly = reader.system_snapshot(days=7, granularity="week", now=NOW)
+    model_page = reader.system_dimension_page(
+        dimension="models", days=7, now=NOW
+    )
+
+    assert snapshot["cache_hit_rate"] == pytest.approx(0.55)
+    assert snapshot["worker_cache_input_tokens"] == 200
+    assert snapshot["worker_cache_cached_input_tokens"] == 150
+    assert snapshot["worker_cache_hit_rate"] == pytest.approx(0.75)
+    assert weekly["worker_cache_hit_rate"] == pytest.approx(0.75)
+
+    worker_row = next(
+        row for row in snapshot["purposes"] if row["purpose"] == "worker"
+    )
+    assert worker_row["events"] == 2
+    assert worker_row["cache_input_tokens"] == 200
+    assert worker_row["cache_cached_input_tokens"] == 150
+    assert worker_row["cache_hit_rate"] == pytest.approx(0.75)
+    assert worker_row["cache_measured_events"] == 1
+    assert worker_row["cache_unmeasured_events"] == 1
+
+    worker_model_row = next(
+        row
+        for row in snapshot["role_models"]
+        if row["purpose"] == "worker"
+    )
+    assert worker_model_row["provider_model"] == "deepseek-v4-flash"
+    assert worker_model_row["cache_hit_rate"] == pytest.approx(0.75)
+    assert {
+        (row["purpose"], row["provider_model"])
+        for row in weekly["role_models"]
+    } == {
+        ("coordinator", "deepseek-v4-pro"),
+        ("worker", "deepseek-v4-flash"),
+        ("memory", "deepseek-v4-flash"),
+    }
+
+    flash_row = next(
+        row
+        for row in model_page["items"]
+        if row["provider_model"] == "deepseek-v4-flash"
+    )
+    assert flash_row["events"] == 3
+    assert flash_row["cache_input_tokens"] == 300
+    assert flash_row["cache_cached_input_tokens"] == 200
+    assert flash_row["cache_hit_rate"] == pytest.approx(2 / 3)
+    assert flash_row["cache_measured_events"] == 2
+    assert flash_row["cache_unmeasured_events"] == 1
+
+
 def test_system_usage_exposes_bounded_user_pages_and_five_minute_trend():
     engine = _engine()
     with engine.begin() as connection:
         for index in range(3):
-            connection.execute(
-                insert(UsageEventModel).values(
-                    _usage_event(
-                        operation_id=f"op-page-{index}",
-                        user_id=f"user-{index}",
-                        occurred_at=NOW - timedelta(minutes=7 * index + 1),
-                    )
+            event = _usage_event(
+                operation_id=f"op-page-{index}",
+                user_id=f"user-{index}",
+                occurred_at=NOW - timedelta(minutes=7 * index + 1),
+            )
+            if index == 0:
+                event.update(
+                    cache_status="measured",
+                    input_tokens=10,
+                    cached_input_tokens=5,
+                    output_tokens=2,
+                    total_tokens=12,
                 )
+            connection.execute(
+                insert(UsageEventModel).values(event)
             )
 
     reader = UsageReadService(engine)
@@ -875,6 +1024,12 @@ def test_system_usage_exposes_bounded_user_pages_and_five_minute_trend():
     assert page["total"] == 3
     assert len(page["items"]) == 2
     assert page["has_more"] is True
+    measured_user = next(
+        row for row in page["items"] if row["user_id"] == "user-0"
+    )
+    assert measured_user["cache_hit_rate"] == pytest.approx(0.5)
+    assert measured_user["cache_measured_events"] == 1
+    assert measured_user["cache_unmeasured_events"] == 0
     assert trend["scope"] == "system"
     assert trend["window_minutes"] == 30
     assert trend["bucket_minutes"] == 5

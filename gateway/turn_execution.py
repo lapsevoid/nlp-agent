@@ -112,12 +112,11 @@ class InProcessTurnExecutor:
                 conversation_id=task.context.session_id,
                 turn_id=task.turn_id,
                 reservation_id=task.reservation_id,
-                worker_id=getattr(execution_context, "worker_id", None),
-                purpose=(
-                    "worker"
-                    if getattr(execution_context, "worker_id", None)
-                    else "coordinator"
-                ),
+                # The fenced execution context identifies the queue consumer,
+                # not an agent Worker. Actual sub-agent calls rebind usage at
+                # the Worker tool boundary with their semantic worker ID.
+                worker_id=None,
+                purpose="coordinator",
             )
             with bind_usage_attribution(attribution):
                 final_text, updated = await self._run_turn_with_timeout(

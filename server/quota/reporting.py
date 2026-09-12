@@ -302,6 +302,7 @@ class DurableModelUsageReporter(ModelUsageReporter):
             "link_pages": invocation.feature_usage.link_pages,
             "total_tokens": usage.total_tokens,
             "usage_source": usage.source,
+            "cache_status": usage.cache_status,
             "usage_status": usage_status,
             "pricing_version": pricing_version,
             "credits_micro": credits_micro,

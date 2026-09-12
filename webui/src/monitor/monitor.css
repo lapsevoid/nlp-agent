@@ -305,11 +305,27 @@ html,body,#root{height:100%;min-height:0;overflow:hidden}
 .mon-usage-summary-lead{background:linear-gradient(110deg,#282548,#39336a)}
 .mon-usage-summary-lead span,.mon-usage-summary-lead small{color:#c9c7e4}
 .mon-usage-summary-lead strong{color:#fff;font-size:21px}
+.mon-usage-summary-cache{background:linear-gradient(145deg,#f1efff,#f8fffb)}
+.mon-usage-summary-cache span{color:#5144bb;font-weight:700}
+.mon-usage-summary-cache strong{color:#4739b8;font-size:19px}
+.mon-usage-summary-cache>i{display:block;height:3px;overflow:hidden;border-radius:99px;background:#ddd9f8}
+.mon-usage-summary-cache>i>b{display:block;height:100%;border-radius:inherit;background:linear-gradient(90deg,#6558d3,#28a768)}
 .mon-usage-top-grid{grid-template-columns:minmax(360px,.85fr) minmax(0,1.15fr);min-height:0;gap:12px}
 .mon-usage-top-grid>.mon-fixed-panel{min-height:0}
 .mon-usage-token-panel,.mon-usage-trend-panel{display:flex;min-height:0;flex-direction:column}
 .mon-usage-token-panel>header,.mon-usage-trend-panel>header{min-height:0;padding:12px 15px}
 .mon-usage-token-panel>header,.mon-usage-trend-panel>header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+.mon-usage-role-strip{display:grid;gap:6px;padding:8px 10px;border-top:1px solid #f0f0f3;border-bottom:1px solid #e8e7f2;background:#fafafe}
+.mon-usage-role-strip>header{display:flex;align-items:baseline;justify-content:space-between;gap:8px}
+.mon-usage-role-strip>header span{color:#474955;font-size:9px;font-weight:700}
+.mon-usage-role-strip>header small{overflow:hidden;color:#8a8e9a;font-size:8px;text-overflow:ellipsis;white-space:nowrap}
+.mon-usage-role-strip>div{display:flex;gap:6px;overflow-x:auto}
+.mon-usage-role-strip article{display:grid;min-width:112px;gap:2px;padding:6px 8px;border:1px solid #e7e6ed;border-radius:7px;background:#fff}
+.mon-usage-role-strip article.is-worker{border-color:#cfc9fa;background:#f5f3ff}
+.mon-usage-role-strip article span{color:#777b89;font-size:8px}
+.mon-usage-role-strip article strong{color:#343642;font:650 11px ui-monospace,monospace}
+.mon-usage-role-strip article small{color:#8a8e9a;font-size:7px;white-space:nowrap}
+.mon-usage-role-strip article em{overflow:hidden;color:#5549b8;font:600 7px ui-monospace,monospace;text-overflow:ellipsis;white-space:nowrap}
 .mon-usage-token-list{display:grid;min-height:0;flex:1;grid-template-columns:repeat(2,minmax(0,1fr));align-content:start;gap:1px;overflow:auto;background:#f0f0f3}
 .mon-usage-token-list article{display:grid;align-content:center;gap:5px;min-height:53px;padding:9px 12px;background:#fff}
 .mon-usage-token-list article span{overflow:hidden;color:#858996;font-size:9px;text-overflow:ellipsis;white-space:nowrap}
@@ -334,6 +350,15 @@ html,body,#root{height:100%;min-height:0;overflow:hidden}
 .mon-usage-dimension-panel .mon-table td strong{font-size:10px}
 .mon-usage-dimension-panel .mon-table td small{display:block;margin-top:3px;color:#8a8e9a;font-size:8px}
 .mon-usage-dimension-panel .mon-table td .mon-usage-linked{color:#5e50c9}
+.mon-cache-visual{display:grid;min-width:96px;gap:4px}
+.mon-cache-visual>div{display:flex;align-items:baseline;justify-content:space-between;gap:6px}
+.mon-cache-visual strong{color:#4739b8;font:700 10px ui-monospace,monospace}
+.mon-cache-visual small{margin:0!important;color:#7770b8!important;font-size:7px!important;white-space:nowrap}
+.mon-cache-visual>i{display:block;height:4px;overflow:hidden;border-radius:99px;background:#e4e2f5}
+.mon-cache-visual>i>b{display:block;height:100%;border-radius:inherit;background:linear-gradient(90deg,#6558d3,#27a66c)}
+.mon-cache-visual.is-unmeasured strong{color:#8a8e9a}
+.mon-cache-visual.is-unmeasured small{color:#9a9da8!important}
+.mon-cache-visual.is-unmeasured>i{background:repeating-linear-gradient(90deg,#e8e8ed 0,#e8e8ed 5px,#f5f5f7 5px,#f5f5f7 9px)}
 .mon-usage-panel-footer{padding:6px 12px;border-top:1px solid #f0f0f3;color:#9a9da8;font-size:8px}
 .mon-usage-users-panel .mon-table-scroll{display:flex;flex-direction:column}
 .mon-usage-users-panel .mon-table-scroll table{flex:0 0 auto}
