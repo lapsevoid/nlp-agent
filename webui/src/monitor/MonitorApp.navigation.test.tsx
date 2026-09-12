@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
 const { monitorApi } = vi.hoisted(() => ({
   monitorApi: {
@@ -516,6 +516,11 @@ describe("MonitorApp navigation", () => {
       credits_micro: 100,
       priced_credits_micro: 100,
       tokens: { total_tokens: 1000 + index },
+      cache_hit_rate: index === 0 ? 0 : null,
+      cache_input_tokens: index === 0 ? 100 : 0,
+      cache_cached_input_tokens: 0,
+      cache_measured_events: index === 0 ? 1 : 0,
+      cache_unmeasured_events: (13 - index) - (index === 0 ? 1 : 0),
     }));
     monitorApi.systemUsageUsers
       .mockResolvedValueOnce({ items: users.slice(0, 12), total: users.length, offset: 0, limit: 12, has_more: true })
@@ -524,6 +529,15 @@ describe("MonitorApp navigation", () => {
     render(<MonitorApp />);
 
     expect(await screen.findByText("usage-user-01")).toBeVisible();
+    const userPanel = screen.getByRole("heading", { name: "按用户" }).closest("section");
+    expect(userPanel).not.toBeNull();
+    const userTable = within(userPanel as HTMLElement);
+    expect(userTable.getByRole("columnheader", { name: "KV Cache" })).toBeVisible();
+    expect(userTable.getByRole("columnheader", { name: "实测覆盖" })).toBeVisible();
+    expect(userTable.queryByRole("columnheader", { name: "总 Token" })).not.toBeInTheDocument();
+    expect(userTable.queryByRole("columnheader", { name: "Credits" })).not.toBeInTheDocument();
+    expect(userTable.getByLabelText("KV Cache 0.0%，0 / 100")).toBeVisible();
+    expect(userTable.getAllByLabelText("KV Cache 无实测，Provider 未返回 Cache").length).toBeGreaterThan(0);
     expect(screen.queryByText("usage-user-13")).not.toBeInTheDocument();
     expect(monitorApi.systemUsageUsers).toHaveBeenCalledWith(30, 12, 0);
     fireEvent.click(screen.getByRole("button", { name: /加载更多用户/ }));

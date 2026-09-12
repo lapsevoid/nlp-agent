@@ -28,14 +28,27 @@ SystemUsageDimension = Literal["users", "workspaces", "providers", "purposes", "
 SYSTEM_DIMENSION_PREVIEW_LIMIT = 50
 
 
-def _cache_metrics(input_tokens: Any, cached_input_tokens: Any) -> dict[str, Any]:
-    """Return Provider-only cache totals and a rate from bounded token facts."""
+def _cache_metrics(
+    input_tokens: Any,
+    cached_input_tokens: Any,
+    measured_events: Any,
+    total_events: Any,
+) -> dict[str, Any]:
+    """Return cache totals, rate, and measurement coverage."""
     input_value = max(0, int(input_tokens or 0))
     cached_value = min(max(0, int(cached_input_tokens or 0)), input_value)
+    total_value = max(0, int(total_events or 0))
+    measured_value = min(max(0, int(measured_events or 0)), total_value)
     return {
         "cache_input_tokens": input_value,
         "cache_cached_input_tokens": cached_value,
-        "cache_hit_rate": cached_value / input_value if input_value else None,
+        "cache_hit_rate": (
+            cached_value / input_value
+            if measured_value and input_value
+            else None
+        ),
+        "cache_measured_events": measured_value,
+        "cache_unmeasured_events": total_value - measured_value,
     }
 
 
@@ -44,20 +57,27 @@ def _provider_cache_tokens(
     *,
     purpose: str | None = None,
 ) -> dict[str, int]:
-    """Return cache-rate inputs from Provider-measured UsageEvents only."""
-    provider_rows = [
+    """Return cache facts only when the Provider reported cache details."""
+    scoped_rows = [
         row
         for row in rows
+        if purpose is None or row.get("purpose") == purpose
+    ]
+    measured_rows = [
+        row
+        for row in scoped_rows
         if row.get("usage_source") == "provider"
-        and (purpose is None or row.get("purpose") == purpose)
+        and row.get("cache_status") == "measured"
     ]
     return {
         "input_tokens": sum(
-            int(row.get("input_tokens") or 0) for row in provider_rows
+            int(row.get("input_tokens") or 0) for row in measured_rows
         ),
         "cached_input_tokens": sum(
-            int(row.get("cached_input_tokens") or 0) for row in provider_rows
+            int(row.get("cached_input_tokens") or 0) for row in measured_rows
         ),
+        "measured_events": len(measured_rows),
+        "total_events": len(scoped_rows),
     }
 
 
@@ -204,13 +224,17 @@ class UsageReadService:
             ],
         ]
         if include_provider_cache:
+            cache_measured = (
+                (table.c.usage_source == "provider")
+                & (table.c.cache_status == "measured")
+            )
             expressions.extend(
                 [
                     func.coalesce(
                         func.sum(
                             case(
                                 (
-                                    table.c.usage_source == "provider",
+                                    cache_measured,
                                     table.c.input_tokens,
                                 ),
                                 else_=0,
@@ -222,7 +246,7 @@ class UsageReadService:
                         func.sum(
                             case(
                                 (
-                                    table.c.usage_source == "provider",
+                                    cache_measured,
                                     table.c.cached_input_tokens,
                                 ),
                                 else_=0,
@@ -230,6 +254,9 @@ class UsageReadService:
                         ),
                         0,
                     ).label("_provider_cached_input_tokens"),
+                    func.coalesce(
+                        func.sum(case((cache_measured, 1), else_=0)), 0
+                    ).label("_cache_measured_events"),
                 ]
             )
         return expressions
@@ -259,6 +286,8 @@ class UsageReadService:
                 _cache_metrics(
                     row.get("_provider_input_tokens", 0),
                     row.get("_provider_cached_input_tokens", 0),
+                    row.get("_cache_measured_events", 0),
+                    events,
                 )
             )
         return item
@@ -372,6 +401,8 @@ class UsageReadService:
             **_cache_metrics(
                 totals.get("_provider_input_tokens", 0),
                 totals.get("_provider_cached_input_tokens", 0),
+                totals.get("_cache_measured_events", 0),
+                totals.get("events", 0),
             ),
             "breakdown": output_breakdown,
         }
@@ -402,6 +433,16 @@ class UsageReadService:
                 ),
                 "worker_cache_hit_rate": (
                     worker_usage.get("cache_hit_rate") if worker_usage else None
+                ),
+                "worker_cache_measured_events": (
+                    worker_usage.get("cache_measured_events", 0)
+                    if worker_usage
+                    else 0
+                ),
+                "worker_cache_unmeasured_events": (
+                    worker_usage.get("cache_unmeasured_events", 0)
+                    if worker_usage
+                    else 0
                 ),
             }
         )
@@ -513,16 +554,9 @@ class UsageReadService:
             table.c.occurred_at < end,
             table.c.archived_at.is_(None),
         )
-        aggregates = [
-            func.count().label("events"),
-            func.sum(
-                case((table.c.credits_micro.is_(None), 1), else_=0)
-            ).label("unpriced_events"),
-            func.sum(
-                case((table.c.credits_micro.is_not(None), table.c.credits_micro), else_=0)
-            ).label("priced_credits_micro"),
-            *[func.sum(table.c[field]).label(field) for field in TOKEN_FIELDS],
-        ]
+        aggregates = self._aggregate_expressions(
+            table, include_provider_cache=True
+        )
         count_query = (
             select(user_column)
             .where(*conditions)
@@ -539,25 +573,10 @@ class UsageReadService:
         )
         with self._engine.connect() as connection:
             total = int(connection.execute(select(func.count()).select_from(count_query)).scalar_one())
-            page_rows = connection.execute(page_query).mappings()
-            page = []
-            for row in page_rows:
-                events = int(row["events"] or 0)
-                unpriced_events = int(row["unpriced_events"] or 0)
-                priced_credits_micro = int(row["priced_credits_micro"] or 0)
-                page.append(
-                    {
-                        "user_id": str(row["user_id"] or "unknown"),
-                        "events": events,
-                        "priced_events": events - unpriced_events,
-                        "unpriced_events": unpriced_events,
-                        "credits_complete": unpriced_events == 0,
-                        "credit_status": "complete" if unpriced_events == 0 else "partial",
-                        "credits_micro": priced_credits_micro if unpriced_events == 0 else None,
-                        "priced_credits_micro": priced_credits_micro,
-                        "tokens": {field: int(row[field] or 0) for field in TOKEN_FIELDS},
-                    }
-                )
+            page_rows = connection.execute(page_query).mappings().all()
+            page = [
+                self._dimension_item(row, "user_id") for row in page_rows
+            ]
         return {
             "scope": "system",
             "period_days": max(1, days),
@@ -714,6 +733,8 @@ class UsageReadService:
                     int(row.get("_provider_cached_input_tokens") or 0)
                     for row in rows
                 ),
+                sum(int(row.get("_cache_measured_events") or 0) for row in rows),
+                events,
             ),
             "breakdown": breakdown,
         }

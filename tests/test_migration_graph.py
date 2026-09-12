@@ -13,7 +13,10 @@ from alembic.script import ScriptDirectory
 def test_migration_graph_has_one_head_after_all_feature_branches_are_merged() -> None:
     scripts = ScriptDirectory.from_config(Config("alembic.ini"))
 
-    assert scripts.get_heads() == ["20260910_53_whiteboard_library"]
+    assert scripts.get_heads() == ["20260912_54_usage_cache_fix"]
+    assert scripts.get_revision("20260912_54_usage_cache_fix").down_revision == (
+        "20260910_53_whiteboard_library"
+    )
     assert scripts.get_revision("20260905_49_phone_schema_repair").down_revision == (
         "20260904_48_developer_merge"
     )
@@ -97,6 +100,38 @@ def test_migration_revision_ids_fit_alembic_version_column() -> None:
     scripts = ScriptDirectory.from_config(Config("alembic.ini"))
 
     assert all(len(revision.revision) <= 32 for revision in scripts.walk_revisions())
+
+
+def test_usage_cache_backfill_repairs_only_provable_legacy_facts(
+    monkeypatch,
+) -> None:
+    migration = importlib.import_module(
+        "migrations.versions.20260912_54_usage_cache_attribution_backfill"
+    )
+    added_columns: list[tuple[str, sa.Column]] = []
+    statements: list[str] = []
+    fake_op = SimpleNamespace(
+        add_column=lambda table, column: added_columns.append((table, column)),
+        execute=lambda statement: statements.append(str(statement)),
+    )
+    monkeypatch.setattr(migration, "op", fake_op)
+    monkeypatch.setattr(migration, "_usage_columns", lambda: set())
+
+    migration.upgrade()
+
+    assert added_columns[0][0] == "nlp_usage_events"
+    assert added_columns[0][1].name == "cache_status"
+    sql = "\n".join(statements)
+    assert "usage_source = 'provider'" in sql
+    assert "cache_miss_input_tokens > 0" in sql
+    assert "preset LIKE 'coordinator-%'" in sql
+    assert "preset LIKE 'worker-%'" in sql
+    assert "nlp_observability_records" in sql
+    assert "$.payload.attributes.operation_id" in sql
+    assert "$.payload.worker_id" in sql
+    assert "route = 'utility'" in sql
+    assert "route = 'vision-worker'" in sql
+    assert "WHERE purpose <> 'worker'" in sql
 
 
 def test_knowledge_book_page_text_columns_have_no_mysql_default() -> None:

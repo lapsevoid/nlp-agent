@@ -175,6 +175,9 @@ class UsageEventModel(Base):
     )
     total_tokens: Mapped[int] = mapped_column(BIGINT(unsigned=True), nullable=False)
     usage_source: Mapped[str] = mapped_column(String(16), nullable=False)
+    cache_status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="unavailable", server_default="unavailable"
+    )
     usage_status: Mapped[str] = mapped_column(String(16), nullable=False)
     pricing_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
     credits_micro: Mapped[int | None] = mapped_column(
