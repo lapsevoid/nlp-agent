@@ -146,6 +146,11 @@ def _assert_response_envelope(
     if 400 <= response.status_code:
         assert isinstance(payload, dict), payload
         assert any(key in payload for key in ("code", "detail", "title", "type")), payload
+        if response.status_code == 404:
+            assert payload.get("detail") != "Not Found", (
+                f"{operation.service} {operation.method} {operation.path} returned "
+                "the generic framework 404 instead of reaching the declared route"
+            )
         return
     _assert_required_response_fields(operation, document, response.status_code, payload)
 
@@ -247,6 +252,7 @@ def test_every_live_operation_has_http_behavior_contract(
     api_http_client_factory,
     api_http_environment,
     developer_user,
+    authenticated_client_for,
 ) -> None:
     """Run a real HTTP request and validate its success/error envelope per op."""
 
@@ -296,6 +302,12 @@ def test_every_live_operation_has_http_behavior_contract(
         developer_user,
         monitor_csrf_token=monitor_session.csrf_token,
     )
+    safe_context = replace(
+        context,
+        workspace_id=f"missing-{context.nonce}",
+        user_id=f"missing-{context.nonce}",
+        session_id=f"missing-{context.nonce}",
+    )
     web_document, web_operations, monitor_document, monitor_operations = _all_operations(
         web_client,
         monitor_client,
@@ -307,7 +319,29 @@ def test_every_live_operation_has_http_behavior_contract(
         *[(item, web_client, web_document) for item in web_operations],
         *[(item, monitor_client, monitor_document) for item in monitor_operations],
     ):
-        request = _operation_request(operation, document, context)
+        request = _operation_request(operation, document, safe_context)
+        request_client = client
+        public = (
+            _PUBLIC_WEB if operation.service == "web" else _PUBLIC_MONITOR
+        )
+        if (operation.method, operation.path) in public:
+            # Login and guest-session endpoints mutate cookies.  Keep their
+            # cookie jar separate from the authenticated probe client so a
+            # later protected operation cannot pass with a rotated session.
+            request_client = api_http_client_factory(
+                base_url=(
+                    api_http_environment.web_base_url
+                    if operation.service == "web"
+                    else api_http_environment.monitor_base_url
+                )
+            )
+        elif operation.key in {
+            ("web", "DELETE", "/api/v1/auth/session"),
+            ("web", "POST", "/api/v1/users/me/password"),
+        }:
+            # These operations revoke the current database session.  They
+            # must run on a disposable authenticated session.
+            request_client = authenticated_client_for(developer_user)
         if operation.service == "monitor":
             request = ProbeRequest(
                 method=request.method,
@@ -319,7 +353,9 @@ def test_every_live_operation_has_http_behavior_contract(
                 files=request.files,
             )
         try:
-            response = client.request(request.method, request.path, **_request_kwargs(request))
+            response = request_client.request(
+                request.method, request.path, **_request_kwargs(request)
+            )
             _assert_response_envelope(operation, response, document)
         except (AssertionError, httpx.HTTPError, ValueError) as error:
             failures.append(
@@ -370,7 +406,7 @@ def test_every_protected_operation_rejects_missing_cookie(
                 request.path,
                 **{**_request_kwargs(request), "headers": headers},
             )
-            if response.status_code not in {401, 403, 404}:
+            if response.status_code != 401:
                 failures.append(
                     f"{operation.service} {operation.method} {operation.path}: "
                     f"missing-cookie status={response.status_code} body={response.text[:300]}"
@@ -487,7 +523,7 @@ def test_developer_operations_reject_lower_roles(
                     request.path,
                     **{**_request_kwargs(request), "headers": headers},
                 )
-                if response.status_code not in {403, 404}:
+                if response.status_code != 403:
                     failures.append(
                         f"{role} {operation.method} {operation.path}: "
                         f"status={response.status_code} body={response.text[:300]}"
