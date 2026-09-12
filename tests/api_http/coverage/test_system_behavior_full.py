@@ -8,7 +8,7 @@ import pytest
 
 from ..support.environment import SeededUser
 from ..support.database import MySqlProbe
-from ..support.http import json_response, problem_response
+from ..support.http import json_response
 from ..support.resources import create_classroom, create_workspace
 
 
@@ -69,7 +69,8 @@ def test_system_catalogs_and_role_projection_round_trip(
         "/api/v1/system/roles/student/menus",
         json={"menu_ids": student_menus["menu_ids"]},
     )
-    problem_response(menu_write, 404)
+    menu_error = json_response(menu_write, 404)
+    assert menu_error["detail"] == "RBAC resource not found"
 
     user_roles = json_response(
         client.get(f"/api/v1/users/{guest_user.user_id}/roles"),
