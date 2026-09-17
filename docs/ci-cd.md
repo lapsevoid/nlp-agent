@@ -29,7 +29,7 @@
 
 测试环境使用 `/opt/nova-test`，生产环境使用 `/opt/nova-prod`。两个目录中只维护服务器本地 `.env`。部署工作流从仓库 checkout 的 `compose.yaml` 启动服务，并通过临时 `NOVA_ENV_FILE` 显式读取服务器配置。工作流会在 runner 上把本次发布生成的应用镜像和 sandbox-runtime digest 覆盖到临时配置中，原始 `.env` 只保存密钥和环境配置，不会被修改，也不需要每次发布手动更新 digest。
 
-严格部署时测试和生产必须使用不同主机或 VM，最好位于不同 VPC/网络安全域；两边分别使用独立 MySQL、Redis、Docker 凭据、模型密钥、会话密钥和备份策略。若只是本地临时联调，可以用不同 Compose 项目名和端口模拟隔离，但这不满足生产隔离要求。工作流分别使用 Compose 项目名 `nova-test`、`nova-prod`，数据卷彼此隔离；测试 Web/Monitor 默认使用 `18765/18766`，生产使用 `8765/8766`。
+当前部署允许测试和生产运行在同一台服务器，但必须分别使用独立 MySQL、Redis、Docker 凭据、模型密钥、会话密钥和备份策略。工作流固定使用 Compose 项目名 `nova-test`、`nova-prod`，因此网络和命名卷彼此隔离；测试 Web/Monitor 使用 loopback 端口 `18765/18766`，生产使用 `8765/8766`，公网只由宿主机 Nginx 的 `80/443` 接入。同机方案实现服务和数据的逻辑隔离，但不提供主机故障或主机权限层面的隔离；需要更高等级隔离时仍应拆分主机或 VM。域名、证书、宿主机 Nginx 和验证步骤见 [`production-domain-deployment.md`](production-domain-deployment.md)。
 
 首次准备服务器配置：
 
@@ -54,8 +54,8 @@ nano /opt/nova-prod/.env
 ```dotenv
 NOVA_PULL_POLICY=always
 DEEPSEEK_API_KEY=...
-NLP_AGENT_WEB_ALLOWED_HOSTS=你的内网IP或域名
-NLP_AGENT_WEB_ALLOWED_ORIGINS=http://你的内网IP或域名:18765
+NLP_AGENT_WEB_ALLOWED_HOSTS=localhost,127.0.0.1,test.lsnunlp.com
+NLP_AGENT_WEB_ALLOWED_ORIGINS=https://test.lsnunlp.com
 NLP_AGENT_DATABASE_URL=mysql+aiomysql://测试专用用户:密码@mysql:3306/测试专用数据库
 ```
 
