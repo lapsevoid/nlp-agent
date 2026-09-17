@@ -6,7 +6,7 @@ services:
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
     ports:
-      - "${NOVA_WEB_BIND_ADDRESS:-127.0.0.1}:${NOVA_WEB_HOST_PORT:-${NOVA_NGINX_HTTP_PORT:-80}}:80"
+      - "${NOVA_WEB_HOST_PORT:-${NOVA_NGINX_HTTP_PORT:-80}}:80"
     restart: unless-stopped
     depends_on:
       nova-web:
@@ -131,7 +131,7 @@ services:
       NLP_AGENT_MONITOR_HOST: 0.0.0.0
       NLP_AGENT_MONITOR_PORT: 8766
     ports:
-      - "${NOVA_MONITOR_BIND_ADDRESS:-127.0.0.1}:${NOVA_MONITOR_HOST_PORT:-8766}:8766"
+      - "${NOVA_MONITOR_HOST_PORT:-8766}:8766"
     restart: unless-stopped
     profiles: ["monitor"]
     depends_on:
