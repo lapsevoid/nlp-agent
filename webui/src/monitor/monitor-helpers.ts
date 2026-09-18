@@ -78,12 +78,23 @@ function originForPort(current: BrowserLocation, port: number): string {
   return origin.origin;
 }
 
+function currentOrigin(current: BrowserLocation): string {
+  const hostname = current.hostname.includes(":") ? `[${current.hostname}]` : current.hostname;
+  const origin = new URL(`${current.protocol}//${hostname}`);
+  if (current.port) origin.port = current.port;
+  return origin.origin;
+}
+
 export function controlPlaneUrl(current: BrowserLocation = location): string {
-  return `${originForPort(current, pairedPort(current, "monitor"))}/developer`;
+  return current.port
+    ? `${originForPort(current, pairedPort(current, "monitor"))}/developer`
+    : `${currentOrigin(current)}/developer`;
 }
 
 export function monitorUrl(current: BrowserLocation = location): string {
-  return originForPort(current, pairedPort(current, "web"));
+  return current.port
+    ? originForPort(current, pairedPort(current, "web"))
+    : `${currentOrigin(current)}/monitor/`;
 }
 
 export async function resetMonitorData(reset: () => Promise<unknown>, reload: () => Promise<unknown>) {

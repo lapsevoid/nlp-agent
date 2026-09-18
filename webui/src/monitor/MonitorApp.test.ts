@@ -19,6 +19,13 @@ describe("MonitorApp helpers", () => {
     expect(monitorPathForPage("components", { pathname: "/monitor", search: "" })).toBe("/monitor/components");
   });
 
+  it("uses same-domain paths behind standard HTTPS", () => {
+    expect(controlPlaneUrl({ protocol: "https:", hostname: "test.lsnunlp.com", port: "" } as Location))
+      .toBe("https://test.lsnunlp.com/developer");
+    expect(monitorUrl({ protocol: "https:", hostname: "test.lsnunlp.com", port: "" } as Location))
+      .toBe("https://test.lsnunlp.com/monitor/");
+  });
+
   it("returns to the control plane on the same remote host and the paired environment port", () => {
     expect(controlPlaneUrl({ protocol: "https:", hostname: "nlp.example.test", port: "18766" } as Location))
       .toBe("https://nlp.example.test:18765/developer");
