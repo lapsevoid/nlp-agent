@@ -355,5 +355,5 @@ def test_test_deploy_workflow_exposes_the_monitor_on_the_test_host_port() -> Non
         encoding="utf-8"
     )
 
-    assert 'NOVA_MONITOR_BIND_ADDRESS=\\"0.0.0.0\\"' in workflow
-    assert 'NOVA_MONITOR_BIND_ADDRESS="0.0.0.0"' in test_env
+    assert 'NOVA_MONITOR_BIND_ADDRESS=\\"127.0.0.1\\"' in workflow
+    assert 'NOVA_MONITOR_BIND_ADDRESS="127.0.0.1"' in test_env

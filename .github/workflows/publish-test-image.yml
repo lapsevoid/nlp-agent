@@ -180,7 +180,7 @@ jobs:
               next
             }
             /^NOVA_MONITOR_BIND_ADDRESS=/ {
-              print "NOVA_MONITOR_BIND_ADDRESS=\"0.0.0.0\""
+              print "NOVA_MONITOR_BIND_ADDRESS=\"127.0.0.1\""
               monitor_bind_found = 1
               next
             }
@@ -193,7 +193,7 @@ jobs:
             END {
               if (!nova_found) print "NOVA_IMAGE_REF=\"" nova_image_ref "\""
               if (!sandbox_found) print "NLP_AGENT_SANDBOX_DOCKER_IMAGE_DIGEST=\"" sandbox_runtime_ref "\""
-              if (!monitor_bind_found) print "NOVA_MONITOR_BIND_ADDRESS=\"0.0.0.0\""
+              if (!monitor_bind_found) print "NOVA_MONITOR_BIND_ADDRESS=\"127.0.0.1\""
             }
           ' "$DEPLOY_DIR/.env" > "$DEPLOY_ENV_FILE"
           chmod 600 "$DEPLOY_ENV_FILE"
