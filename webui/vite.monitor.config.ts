@@ -15,7 +15,16 @@ export default defineConfig(({ mode }) => {
       host: "127.0.0.1", port: 5174, strictPort: true,
       hmr: { host: "127.0.0.1", path: "/__nlp_monitor_hmr" },
       fs: { allow: [path.resolve(__dirname)] },
-      proxy: { "/api": { target, changeOrigin: true }, "/health": { target, changeOrigin: true }, "/ws": { target, changeOrigin: true, ws: true } },
+      proxy: {
+        "/monitor-api": {
+          target,
+          changeOrigin: true,
+          rewrite: (requestPath) => requestPath.replace(/^\/monitor-api/, ""),
+        },
+        "/api": { target, changeOrigin: true },
+        "/health": { target, changeOrigin: true },
+        "/ws": { target, changeOrigin: true, ws: true },
+      },
     },
   };
 });

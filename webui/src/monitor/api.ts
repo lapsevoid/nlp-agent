@@ -58,6 +58,8 @@ import type { SandboxExecution, SandboxLogEntry, SandboxOverview, SandboxPage, S
 import type { AuthorizationAuditListResponse, AuthorizationAuditSummary } from "@/shared/types";
 
 let csrf = "";
+const MONITOR_API_BASE = "/monitor-api/v1";
+
 export class MonitorApiError extends Error {
   constructor(message: string, readonly status: number, readonly code?: string) {
     super(message);
@@ -69,7 +71,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
   if (init.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
   if (init.method && init.method !== "GET" && csrf) headers.set("X-CSRF-Token", csrf);
-  const response = await fetch(`/api/v1${path}`, { ...init, headers, credentials: "include" });
+  const response = await fetch(`${MONITOR_API_BASE}${path}`, { ...init, headers, credentials: "include" });
   if (!response.ok) {
     const body = await response.json().catch(() => ({})) as { title?: string; detail?: string; code?: string };
     throw new MonitorApiError(body.title ?? body.detail ?? `HTTP ${response.status}`, response.status, body.code);
