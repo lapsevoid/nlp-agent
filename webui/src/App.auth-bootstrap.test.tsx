@@ -22,12 +22,13 @@ const harness = vi.hoisted(() => {
   };
 });
 
-vi.mock("@/lib/websocket-client", () => ({ StudentSocket: class { connect() {} close() {} setSession() {} sendChat() {} resume() {} cancel() {} } }));
-vi.mock("@/lib/api", () => ({
+vi.mock("@/platform/realtime/client", () => ({ StudentSocket: class { connect() {} close() {} setSession() {} sendChat() {} resume() {} cancel() {} } }));
+vi.mock("@/platform/http/api", () => ({
+  AUTH_EXPIRED_EVENT: "nova:auth-expired",
   ensureAuth: harness.authenticate,
   api: {
     listSessions: vi.fn().mockResolvedValue({ items: [] }),
-    getSettings: vi.fn().mockResolvedValue({ preferences: { settings: {} } }),
+    getSettings: vi.fn().mockResolvedValue({ preferences: { settings: {} }, runtime: { default_model_profile: "deepseek", model_profiles: {} } }),
     getLearningCatalog: harness.getLearningCatalog,
   },
 }));

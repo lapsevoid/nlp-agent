@@ -1,8 +1,16 @@
 import asyncio
+import base64
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+import io
+import json
+import time
+import zipfile
 
 import pytest
 from argon2 import PasswordHasher
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import OperationalError
 from starlette.websockets import WebSocketDisconnect
 
 from core.identity import AuthenticatedPrincipal
@@ -127,7 +135,35 @@ def web_app(tmp_path):
         password_hash=PasswordHasher().hash("test-password"),
         roles=frozenset({"admin"}),
     )
-    return create_app(gateway_factory=gateway_factory, auth=auth), engine
+    # Inject testserver so Starlette's TrustedHostMiddleware accepts the
+    # TestClient's default Host: testserver header regardless of the local
+    # .env override of NLP_AGENT_WEB_ALLOWED_HOSTS.
+    return create_app(gateway_factory=gateway_factory, auth=auth, allowed_hosts=["testserver"]), engine
+
+
+@pytest.fixture
+def student_web_app(tmp_path):
+    engine = FakeEngine()
+    sessions = FakeSessions()
+
+    def gateway_factory():
+        return BackendGateway(
+            engine=engine,
+            repository=GatewayRepository(tmp_path / "gateway.sqlite3"),
+            sessions=sessions,
+        )
+
+    auth = SameOriginSessionAuth(
+        secret="test-secret-that-is-long-enough-for-hmac",
+        allowed_origins=["http://testserver"],
+        username="nova",
+        password_hash=PasswordHasher().hash("test-password"),
+        roles=frozenset({"student"}),
+    )
+    # Inject testserver so Starlette's TrustedHostMiddleware accepts the
+    # TestClient's default Host: testserver header regardless of the local
+    # .env override of NLP_AGENT_WEB_ALLOWED_HOSTS.
+    return create_app(gateway_factory=gateway_factory, auth=auth, allowed_hosts=["testserver"]), engine
 
 
 def authenticate(client: TestClient) -> str:
@@ -148,6 +184,201 @@ def test_login_requires_valid_credentials_and_logout_revokes_cookie_session(web_
     app, _engine = web_app
     with TestClient(app) as client:
         assert client.get("/api/v1/sessions").status_code == 401
+
+
+def test_developer_session_management_stats_endpoint_is_not_exposed(web_app):
+    app, _engine = web_app
+
+    assert "/api/v1/sessions/stats" not in {
+        route.path for route in app.routes if hasattr(route, "path")
+    }
+
+
+def test_retired_menu_management_endpoints_are_not_exposed(web_app):
+    app, _engine = web_app
+
+    paths = {route.path for route in app.routes if hasattr(route, "path")}
+
+    assert "/api/v1/system/menus" not in paths
+    assert "/api/v1/system/roles/{role_code}/menus" not in paths
+
+
+def test_guest_session_has_only_guest_capabilities(web_app):
+    app, _engine = web_app
+    with TestClient(app) as client:
+        response = client.post("/api/v1/auth/guest", headers={"Origin": "http://testserver"})
+
+        assert response.status_code == 200
+        assert response.json()["roles"] == ["guest"]
+        # guest 现在具备基础智能体能力，可以读写自己的会话。
+        assert client.get("/api/v1/sessions").status_code == 200
+        assert client.get("/api/v1/developer/release-notes").status_code == 403
+
+
+def test_auth_session_exposes_human_readable_account_identity(web_app):
+    app, _engine = web_app
+    with TestClient(app) as client:
+        login = client.post(
+            "/api/v1/auth/login",
+            json={"username": "nova", "password": "test-password"},
+            headers={"Origin": "http://testserver"},
+        )
+        assert login.status_code == 200
+        assert login.json()["username"] == "nova"
+        assert login.json()["display_name"] == "nova"
+
+        session = client.get("/api/v1/auth/session")
+        assert session.status_code == 200
+        assert session.json()["username"] == "nova"
+        assert session.json()["display_name"] == "nova"
+
+
+def test_usage_me_requires_authentication_and_reports_persistence_unavailable_without_mysql(web_app):
+    app, _engine = web_app
+    with TestClient(app) as client:
+        assert client.get("/api/v1/usage/me").status_code == 401
+        authenticate(client)
+        response = client.get("/api/v1/usage/me")
+
+    assert response.status_code == 503
+    assert response.json()["code"] == "usage_unavailable"
+
+
+def test_usage_me_forwards_workspace_scope_to_usage_reader(web_app):
+    app, _engine = web_app
+
+    class Reader:
+        def __init__(self):
+            self.kwargs = None
+
+        def user_snapshot(self, user_id, **kwargs):
+            self.kwargs = (user_id, kwargs)
+            return {"user_id": user_id, "workspace_id": kwargs["workspace_id"]}
+
+    reader = Reader()
+    app.state.quota_usage_reader = reader
+    with TestClient(app) as client:
+        authenticate(client)
+        response = client.get("/api/v1/usage/me?workspace_id=default&days=7&granularity=week")
+
+    assert response.status_code == 200
+    assert response.json() == {"user_id": "nova", "workspace_id": "default"}
+    assert reader.kwargs == ("nova", {"workspace_id": "default", "days": 7, "granularity": "week"})
+
+
+def test_quota_me_reports_database_schema_upgrade_instead_of_internal_error(web_app):
+    app, _engine = web_app
+
+    class OutdatedQuotaService:
+        def snapshot(self, **_kwargs):
+            raise OperationalError(
+                "select quota policy",
+                {},
+                RuntimeError("(1054, 'Unknown column weekly_limit_micro')"),
+            )
+
+    app.state.quota_read_service = OutdatedQuotaService()
+    with TestClient(app) as client:
+        authenticate(client)
+        response = client.get("/api/v1/quota/me")
+
+    assert response.status_code == 503
+    assert response.json()["code"] == "quota_schema_outdated"
+
+
+def test_developer_quota_grant_supports_rest_revoke_route(web_app):
+    app, _engine = web_app
+
+    routes = [
+        route
+        for route in app.routes
+        if getattr(route, "path", None) == "/api/v1/developer/quota/grants/{grant_id}"
+    ]
+
+    assert any("DELETE" in getattr(route, "methods", set()) for route in routes)
+
+
+def test_developer_quota_pricing_rule_management_routes_are_exposed(web_app):
+    app, _engine = web_app
+
+    collection_methods = {
+        method
+        for route in app.routes
+        if getattr(route, "path", None) == "/api/v1/developer/quota/pricing-rules"
+        for method in getattr(route, "methods", set())
+    }
+    item_methods = {
+        method
+        for route in app.routes
+        if getattr(route, "path", None) == "/api/v1/developer/quota/pricing-rules/{pricing_rule_id}"
+        for method in getattr(route, "methods", set())
+    }
+
+    assert {"GET", "POST"}.issubset(collection_methods)
+    assert {"GET", "DELETE"}.issubset(item_methods)
+
+
+def test_login_sets_httponly_cookie_reports_expiry_and_refreshes_on_activity(web_app):
+    """The real login link: response body, Set-Cookie attributes and the
+    sliding-cookie refresh that keeps a TTL increase from stranding existing
+    sessions."""
+    app, _engine = web_app
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/auth/login",
+            json={"username": "nova", "password": "test-password"},
+            headers={"Origin": "http://testserver"},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["csrf_token"]
+        assert body["expires_at"] > time.time()
+        csrf = body["csrf_token"]
+
+        set_cookie = response.headers.get("set-cookie", "")
+        assert set_cookie.startswith("nlp_session=")
+        assert "HttpOnly" in set_cookie
+        assert "Max-Age=86400" in set_cookie
+        assert "SameSite=lax" in set_cookie
+
+        # The issued cookie authenticates a follow-up request, and that request
+        # re-issues the cookie with the current Max-Age (sliding session).
+        refreshed = client.get("/api/v1/auth/session")
+        assert refreshed.status_code == 200
+        assert refreshed.json()["user_id"] == "nova"
+        assert refreshed.json()["csrf_token"] == csrf
+        restored_again = client.get("/api/v1/auth/session")
+        assert restored_again.status_code == 200
+        assert restored_again.json()["csrf_token"] == csrf
+        refreshed_cookie = refreshed.headers.get("set-cookie", "")
+        assert "Max-Age=86400" in refreshed_cookie
+
+        created = client.post(
+            "/api/v1/sessions",
+            json={"workspace_id": "default"},
+            headers=write_headers(csrf),
+        )
+        assert created.status_code == 201
+
+
+def test_student_cannot_call_teacher_or_developer_control_planes(student_web_app):
+    app, _engine = student_web_app
+    with TestClient(app) as client:
+        authenticate(client)
+
+        teacher = client.get("/api/v1/teacher/overview?workspace_id=default")
+        developer = client.get("/api/v1/developer/snapshot")
+        developer_health = client.get("/api/v1/developer/health")
+        release_notes = client.get("/api/v1/developer/release-notes")
+
+        assert teacher.status_code == 403
+        assert teacher.json()["code"] == "forbidden"
+        assert developer.status_code == 403
+        assert developer.json()["code"] == "forbidden"
+        assert developer_health.status_code == 403
+        assert developer_health.json()["code"] == "forbidden"
+        assert release_notes.status_code == 403
+        assert release_notes.json()["code"] == "forbidden"
         assert client.post("/api/v1/auth/session", headers={"Origin": "http://testserver"}).status_code == 405
 
         rejected = client.post(
@@ -164,7 +395,68 @@ def test_login_requires_valid_credentials_and_logout_revokes_cookie_session(web_
         assert client.get("/api/v1/sessions").status_code == 401
 
 
-def test_http_lifecycle_sessions_chat_settings_and_csrf(web_app):
+def test_learning_release_notes_route_requests_only_published(web_app, monkeypatch):
+    """The public read route must pass include_drafts=False and serialize the payload.
+
+    The published-only filtering itself is exercised by the ReleaseNoteService
+    unit tests (include_drafts=False -> statuses=("published",)); this test pins
+    the route wiring and the LEARNING_CONTENT_READ_PUBLIC grant (held by guest,
+    student, teacher and developer alike) end-to-end without a MySQL DB.
+    """
+    captured: dict[str, bool] = {}
+
+    class FakeRow:
+        def __init__(self, note_id, version, released_at, notes, status):
+            self.id, self.version, self.released_at, self.notes_json, self.status = (
+                note_id, version, released_at, notes, status,
+            )
+
+    class FakeReleaseNoteService:
+        async def list(self, session, *, include_drafts=False):
+            captured["include_drafts"] = include_drafts
+            return [FakeRow(
+                "n1", "1.0.0", datetime(2026, 8, 1, tzinfo=timezone.utc),
+                ["新增发布说明功能"], "published",
+            )]
+
+    class FakeSession:
+        def add(self, obj):
+            return None
+
+        @asynccontextmanager
+        async def begin(self):
+            yield
+
+    @asynccontextmanager
+    async def fake_session_factory():
+        yield FakeSession()
+
+    monkeypatch.setattr("server.web.app.release_note_service", FakeReleaseNoteService())
+    monkeypatch.setattr(
+        BackendGateway,
+        "authorization_session_factory",
+        property(lambda self: fake_session_factory),
+    )
+
+    app, _engine = web_app
+    with TestClient(app) as client:
+        guest = client.post("/api/v1/auth/guest", headers={"Origin": "http://testserver"})
+        assert guest.status_code == 200
+        response = client.get("/api/v1/learning/release-notes")
+
+    assert response.status_code == 200
+    assert captured["include_drafts"] is False
+    assert response.json()["items"] == [{
+        "id": "n1",
+        "version": "1.0.0",
+        "released_at": "2026-08-01T00:00:00+00:00",
+        "notes": ["新增发布说明功能"],
+        "status": "published",
+    }]
+
+
+def test_http_lifecycle_sessions_chat_settings_and_csrf(web_app, monkeypatch):
+    monkeypatch.setenv("QWEN_API_KEY", "sk-mock-key-for-tests")
     app, engine = web_app
     with TestClient(app) as client:
         assert client.get("/health/live").json() == {"status": "ok"}
@@ -172,8 +464,21 @@ def test_http_lifecycle_sessions_chat_settings_and_csrf(web_app):
         csrf = authenticate(client)
         developer = client.get("/api/v1/developer/snapshot")
         assert developer.status_code == 200
-        assert developer.json()["runtime"]["status"] == "ok"
-        assert "tools" in developer.json()
+        developer_payload = developer.json()
+        assert developer_payload["runtime"]["status"] == "ok"
+        assert "tools" in developer_payload
+        providers = developer_payload["models"]["providers"]
+        assert providers["kimi"]["adapter"] == "kimi"
+        assert providers["kimi"]["api_key_env"] == "KIMI_API_KEY"
+        assert providers["glm"]["adapter"] == "glm"
+        assert providers["glm"]["api_key_env"] == "GLM_API_KEY"
+        for provider in providers.values():
+            assert isinstance(provider["api_key_configured"], bool)
+            assert "api_key" not in provider
+        developer_health = client.get("/api/v1/developer/health")
+        assert developer_health.status_code == 200
+        assert developer_health.json()["status"] == "ok"
+        assert developer_health.json()["active_turns"] == 0
         teacher = client.get("/api/v1/teacher/overview?workspace_id=default")
         assert teacher.status_code == 200
         assert teacher.json()["summary"]["questions"] == 0
@@ -217,20 +522,26 @@ def test_http_lifecycle_sessions_chat_settings_and_csrf(web_app):
                 break
             asyncio.run(asyncio.sleep(0.001))
         assert turn["final_text"] == "answer:hello"
-        classified = client.get("/api/v1/teacher/questions?workspace_id=default").json()["items"]
-        assert classified[0]["question"] == "hello"
-        assert classified[0]["topic"] == "NLP 综合"
+        stats = client.get("/api/v1/teacher/analytics?workspace_id=default").json()
+        assert stats["summary"]["questions"] >= 1
+        assert stats["period_days"] == 30
         events = client.get(f"/api/v1/chat/turns/{turn_id}/events").json()["items"]
         assert [event["sequence"] for event in events] == list(range(1, len(events) + 1))
 
         updated = client.patch(
             "/api/v1/settings",
-            json={"theme": "dark", "show_reasoning": True},
+            json={"theme": "dark", "content_font_size": "large", "reduce_motion": True, "show_reasoning": True, "model_profile": "qwen"},
             headers=write_headers(csrf),
         )
         # Teaching catalog revisions are isolated from per-user UI settings.
         assert updated.json()["revision"] == 1
-        assert client.get("/api/v1/settings").json()["preferences"]["settings"]["theme"] == "dark"
+        settings_payload = client.get("/api/v1/settings").json()
+        assert settings_payload["preferences"]["settings"]["theme"] == "dark"
+        assert settings_payload["preferences"]["settings"]["content_font_size"] == "large"
+        assert settings_payload["preferences"]["settings"]["reduce_motion"] is True
+        assert settings_payload["preferences"]["settings"]["model_profile"] == "qwen"
+        assert settings_payload["runtime"]["default_model_profile"] == "deepseek"
+        assert settings_payload["runtime"]["model_profiles"]["qwen"]["label"] == "Qwen"
 
         deleted = client.delete(
             f"/api/v1/sessions/{session_id}",
@@ -281,6 +592,38 @@ def test_teacher_goals_and_reserved_resources_follow_the_public_http_contract(we
             }
 
 
+def test_teacher_ai_analysis_route_accepts_explicit_period_and_returns_generated_report(web_app, monkeypatch):
+    captured = {}
+
+    async def fake_ai_analysis(principal, gateway, workspace_id, body):
+        captured["workspace_id"] = workspace_id
+        captured["body"] = body
+        return {"status": "completed", "source": "deepseek", "summary": "分析完成", "diagnoses": []}
+
+    monkeypatch.setattr("server.web.app.teacher_service.ai_analysis", fake_ai_analysis)
+    app, _engine = web_app
+    with TestClient(app) as client:
+        csrf = authenticate(client)
+        response = client.post(
+            "/api/v1/teacher/reports/ai-analysis",
+            json={
+                "workspace_id": "default",
+                "course_id": "course-001",
+                "content_scope": "all",
+                "start_date": "2026-08-01",
+                "end_date": "2026-08-31",
+                "force_refresh": True,
+            },
+            headers=write_headers(csrf),
+        )
+
+    assert response.status_code == 200
+    assert response.json()["source"] == "deepseek"
+    assert captured["workspace_id"] == "default"
+    assert captured["body"].start_date.isoformat() == "2026-08-01"
+    assert captured["body"].force_refresh is True
+
+
 def test_learning_catalog_only_exposes_enabled_topics_and_enabled_knowledge_points(web_app):
     app, _engine = web_app
     with TestClient(app) as client:
@@ -301,6 +644,7 @@ def test_learning_catalog_only_exposes_enabled_topics_and_enabled_knowledge_poin
                                 "markdown": "## 注意力\n解释 Q、K、V。",
                                 "status": "enabled",
                                 "sort_order": 1,
+                                "question_types": ["实验题"],
                             },
                             {
                                 "id": "legacy",
@@ -345,6 +689,298 @@ def test_learning_catalog_only_exposes_enabled_topics_and_enabled_knowledge_poin
                 ],
             }
         ]
+
+
+def test_whiteboard_library_is_global_and_teacher_managed(web_app, student_web_app):
+    app, _engine = web_app
+    with TestClient(app) as teacher_client:
+        csrf = authenticate(teacher_client)
+        assert teacher_client.get("/api/v1/whiteboard/library").json() == {"items": []}
+
+        created = teacher_client.post(
+            "/api/v1/whiteboard/library",
+            json={
+                "name": "注意力流程",
+                "elements": [{"id": "shape-1", "type": "rectangle"}],
+            },
+            headers=write_headers(csrf),
+        )
+        assert created.status_code == 201
+        item = created.json()["item"]
+        assert item["name"] == "注意力流程"
+        assert item["status"] == "published"
+        assert item["elements"] == [{"id": "shape-1", "type": "rectangle"}]
+
+        listed = teacher_client.get("/api/v1/whiteboard/library")
+        assert listed.status_code == 200
+        assert listed.json() == {"items": [item]}
+
+        rejected_element = teacher_client.post(
+            "/api/v1/whiteboard/library",
+            json={
+                "name": "不安全素材",
+                "elements": [{"id": "embed-1", "type": "embeddable"}],
+            },
+            headers=write_headers(csrf),
+        )
+        assert rejected_element.status_code == 422
+
+        rejected_image = teacher_client.post(
+            "/api/v1/whiteboard/library",
+            json={
+                "name": "图片素材",
+                "elements": [{"id": "image-1", "type": "image"}],
+            },
+            headers=write_headers(csrf),
+        )
+        assert rejected_image.status_code == 422
+
+        rejected_non_finite = teacher_client.post(
+            "/api/v1/whiteboard/library",
+            content=json.dumps({
+                "name": "非有限值",
+                "elements": [{"id": "shape-3", "type": "rectangle", "x": float("nan")}],
+            }).encode(),
+            headers={**write_headers(csrf), "Content-Type": "application/json"},
+        )
+        assert rejected_non_finite.status_code == 422
+
+    student_app, _student_engine = student_web_app
+    with TestClient(student_app) as student_client:
+        csrf = authenticate(student_client)
+        rejected = student_client.post(
+            "/api/v1/whiteboard/library",
+            json={
+                "name": "学生素材",
+                "elements": [{"id": "shape-2", "type": "ellipse"}],
+            },
+            headers=write_headers(csrf),
+        )
+        assert rejected.status_code == 403
+
+
+def test_teacher_book_page_is_draft_first_and_student_reads_only_published_content(web_app):
+    app, _engine = web_app
+    with TestClient(app) as client:
+        csrf = authenticate(client)
+        saved = client.put(
+            "/api/v1/teacher/catalog/default",
+            json={
+                "topics": [{
+                    "id": "transformer", "name": "Transformer", "description": "",
+                    "status": "enabled", "knowledge_points": [{
+                        "id": "attention", "name": "注意力", "markdown": "Q、K、V",
+                        "status": "enabled", "sort_order": 0,
+                    }],
+                }],
+                "exercise_blueprints": [], "review_blueprints": [], "guided_blueprints": [],
+            },
+            headers=write_headers(csrf),
+        )
+        assert saved.status_code == 200
+
+        navigation = client.get("/api/v1/teacher/book/default/navigation")
+        assert navigation.status_code == 200
+        assert navigation.json()["items"] == [{
+            "topic_id": "transformer", "topic_name": "Transformer",
+            "knowledge_point_id": "attention", "title": "注意力",
+            "sort_order": 0, "topic_status": "enabled", "knowledge_point_status": "enabled",
+            "has_draft": False, "has_published": False, "revision": 0,
+            "published_revision": None,
+        }]
+
+        draft = client.put(
+            "/api/v1/teacher/book/default/pages/attention",
+            json={"content_markdown": "# 注意力\n\n教材草稿", "expected_revision": 0},
+            headers=write_headers(csrf),
+        )
+        assert draft.status_code == 200
+        assert draft.json()["page"]["draft_markdown"] == "# 注意力\n\n教材草稿"
+        assert client.get("/api/v1/learning/book/default/pages/attention").status_code == 404
+
+        published = client.post(
+            "/api/v1/teacher/book/default/pages/attention/publish",
+            json={"expected_revision": 1},
+            headers=write_headers(csrf),
+        )
+        assert published.status_code == 200
+        student_page = client.get("/api/v1/learning/book/default/pages/attention")
+        assert student_page.status_code == 200
+        assert student_page.json()["page"]["content_markdown"] == "# 注意力\n\n教材草稿"
+
+        updated_draft = client.put(
+            "/api/v1/teacher/book/default/pages/attention",
+            json={"content_markdown": "# 注意力\n\n第二版草稿", "expected_revision": 1},
+            headers=write_headers(csrf),
+        )
+        assert updated_draft.status_code == 200
+        assert client.get("/api/v1/learning/book/default/navigation").json()["items"][0]["revision"] == 1
+        assert client.get("/api/v1/learning/book/default/pages/attention").json()["page"]["content_markdown"] == "# 注意力\n\n教材草稿"
+
+        stale_update = client.put(
+            "/api/v1/teacher/book/default/pages/attention",
+            json={"content_markdown": "# 过期版本", "expected_revision": 1},
+            headers=write_headers(csrf),
+        )
+        assert stale_update.status_code == 409
+
+
+def test_teacher_book_import_preview_keeps_only_pytorch_code_segments(web_app):
+    app, _engine = web_app
+    with TestClient(app) as client:
+        csrf = authenticate(client)
+        response = client.post(
+            "/api/v1/teacher/book/default/imports/preview",
+            json={
+                "file_name": "attention.md",
+                "content_markdown": (
+                    "# 注意力\n\n"
+                    "```python\n"
+                    "#@tab tensorflow\n"
+                    "tf.nn.softmax(x)\n"
+                    "#@tab pytorch\n"
+                    "torch.softmax(x, dim=-1)\n"
+                    "```"
+                ),
+            },
+            headers=write_headers(csrf),
+        )
+        assert response.status_code == 200
+        preview = response.json()
+        assert "torch.softmax" in preview["content_markdown"]
+        assert "tf.nn.softmax" not in preview["content_markdown"]
+    assert preview["removed_frameworks"] == ["tensorflow"]
+
+
+def test_teacher_book_markdown_import_persists_local_images_for_students(web_app):
+    app, _engine = web_app
+    with TestClient(app) as client:
+        csrf = authenticate(client)
+        catalog = {
+            "topics": [{
+                "id": "basic", "name": "基础", "description": "", "status": "enabled",
+                "knowledge_points": [{"id": "attention", "name": "注意力", "status": "enabled", "sort_order": 0}],
+            }],
+            "exercise_blueprints": [], "review_blueprints": [], "guided_blueprints": [],
+        }
+        assert client.put("/api/v1/teacher/catalog/default", json=catalog, headers=write_headers(csrf)).status_code == 200
+        applied = client.post(
+            "/api/v1/teacher/book/default/imports/apply",
+            json={
+                "knowledge_point_id": "attention",
+                "file_name": "attention.md",
+                "content_markdown": "# 注意力\n\n![图](figure.png)",
+                "expected_revision": 0,
+                "assets": [{"asset_path": "assets/figure.png", "media_type": "image/png", "content_base64": "cG5n"}],
+            },
+            headers=write_headers(csrf),
+        )
+        assert applied.status_code == 200
+        content = applied.json()["page"]["draft_markdown"]
+        assert "/assets/assets/pages/" in content
+        asset_path = content.split("/assets/")[-1].split(")", 1)[0]
+        assert client.post(
+            "/api/v1/teacher/book/default/pages/attention/publish",
+            json={"expected_revision": 1},
+            headers=write_headers(csrf),
+        ).status_code == 200
+        asset = client.get(f"/api/v1/learning/book/default/assets/{asset_path}")
+        assert asset.status_code == 200
+        assert asset.content == b"png"
+
+
+def test_teacher_book_direct_save_accepts_images_reports_warnings_and_hides_disabled_assets(web_app):
+    app, _engine = web_app
+    with TestClient(app) as client:
+        csrf = authenticate(client)
+        catalog = {
+            "topics": [{
+                "id": "basic", "name": "基础", "description": "", "status": "enabled",
+                "knowledge_points": [{"id": "attention", "name": "注意力", "status": "enabled", "sort_order": 0}],
+            }],
+            "exercise_blueprints": [], "review_blueprints": [], "guided_blueprints": [],
+        }
+        assert client.put("/api/v1/teacher/catalog/default", json=catalog, headers=write_headers(csrf)).status_code == 200
+        saved = client.put(
+            "/api/v1/teacher/book/default/pages/attention",
+            json={
+                "content_markdown": "# 注意力\n\n### 跳级标题\n\n![图](assets/direct.png)",
+                "expected_revision": 0,
+                "assets": [{"asset_path": "assets/direct.png", "media_type": "image/png", "content_base64": "cG5n"}],
+            },
+            headers=write_headers(csrf),
+        )
+        assert saved.status_code == 200
+        assert saved.json()["warnings"]
+        content = saved.json()["page"]["draft_markdown"]
+        assert "/assets/assets/pages/" in content
+        asset_path = content.split("/assets/")[-1].split(")", 1)[0]
+        assert client.post(
+            "/api/v1/teacher/book/default/pages/attention/publish",
+            json={"expected_revision": 1},
+            headers=write_headers(csrf),
+        ).status_code == 200
+        assert client.get(f"/api/v1/learning/book/default/assets/{asset_path}").status_code == 200
+
+        disabled_catalog = {
+            **catalog,
+            "topics": [{**catalog["topics"][0], "knowledge_points": [{**catalog["topics"][0]["knowledge_points"][0], "status": "disabled"}]}],
+        }
+        assert client.put("/api/v1/teacher/catalog/default", json=disabled_catalog, headers=write_headers(csrf)).status_code == 200
+        assert client.get(f"/api/v1/learning/book/default/assets/{asset_path}").status_code == 404
+
+
+def test_teacher_book_archive_preview_apply_and_asset_read_are_atomic(web_app):
+    app, _engine = web_app
+    with TestClient(app) as client:
+        csrf = authenticate(client)
+        catalog = {
+            "topics": [{
+                "id": "basic", "name": "基础", "description": "", "status": "enabled",
+                "knowledge_points": [{"id": "attention", "name": "注意力", "status": "enabled", "sort_order": 0}],
+            }],
+            "exercise_blueprints": [], "review_blueprints": [], "guided_blueprints": [],
+        }
+        assert client.put("/api/v1/teacher/catalog/default", json=catalog, headers=write_headers(csrf)).status_code == 200
+        archive_stream = io.BytesIO()
+        with zipfile.ZipFile(archive_stream, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("manifest.json", json.dumps({
+                "format_version": 1, "title": "Nova 教材",
+                "topics": [{"id": "basic", "knowledge_points": [{"id": "attention", "name": "注意力", "file": "topics/basic/attention.md"}]}],
+            }, ensure_ascii=False))
+            archive.writestr("topics/basic/attention.md", "# 注意力\n\n![图](../../assets/attention.png)\n\n正文")
+            archive.writestr("assets/attention.png", b"png")
+        encoded = base64.b64encode(archive_stream.getvalue()).decode("ascii")
+
+        preview = client.post(
+            "/api/v1/teacher/book/default/imports/archive/preview",
+            json={"file_name": "nova-book.zip", "archive_base64": encoded},
+            headers=write_headers(csrf),
+        )
+        assert preview.status_code == 200
+        assert preview.json()["items"][0]["action"] == "create"
+        asset_path = preview.json()["asset_paths"][0]
+        assert asset_path.startswith("assets/pages/")
+        assert client.get("/api/v1/teacher/book/default/pages/attention").json()["page"]["revision"] == 0
+
+        applied = client.post(
+            "/api/v1/teacher/book/default/imports/archive/apply",
+            json={"file_name": "nova-book.zip", "archive_base64": encoded, "expected_revisions": {"attention": 0}},
+            headers=write_headers(csrf),
+        )
+        assert applied.status_code == 200
+        assert applied.json()["applied_count"] == 1
+        assert client.get("/api/v1/teacher/book/default/pages/attention").json()["page"]["revision"] == 1
+        assert client.get(f"/api/v1/learning/book/default/assets/{asset_path}").status_code == 404
+        published = client.post(
+            "/api/v1/teacher/book/default/pages/attention/publish",
+            json={"expected_revision": 1},
+            headers=write_headers(csrf),
+        )
+        assert published.status_code == 200
+        asset = client.get(f"/api/v1/learning/book/default/assets/{asset_path}")
+        assert asset.status_code == 200
+        assert asset.content == b"png"
 
 
 def test_teacher_blueprint_resource_requires_one_knowledge_point_and_persists_it(web_app):
@@ -592,3 +1228,57 @@ def test_websocket_hub_enforces_global_and_per_user_limits():
     assert hub.try_add(connection(alice)) is False
     assert hub.try_add(connection(bob)) is True
     assert hub.try_add(connection(AuthenticatedPrincipal(user_id="carol"))) is False
+
+
+@pytest.mark.asyncio
+async def test_websocket_hub_broadcast_targets_workspace_members():
+    hub = WebSocketHub(max_connections=4, max_connections_per_user=1)
+    delivered: dict[str, int] = {}
+
+    def connection(principal):
+        item = WebSocketConnection(
+            SlowWebSocket(),
+            gateway=None,
+            principal=principal,
+            max_queue=10,
+            send_queue_size=1,
+            send_timeout_s=0.1,
+        )
+
+        async def capture(_event, *, wait=False):
+            delivered[principal.user_id] = delivered.get(principal.user_id, 0) + 1
+            return True
+
+        item.send = capture
+        return item
+
+    assert hub.try_add(connection(AuthenticatedPrincipal(user_id="alice", workspace_ids=frozenset({"workspace-1"})))) is True
+    assert hub.try_add(connection(AuthenticatedPrincipal(user_id="bob", workspace_ids=frozenset({"workspace-2"})))) is True
+    assert hub.try_add(connection(AuthenticatedPrincipal(user_id="developer", workspace_ids=frozenset({"*"})))) is True
+
+    await hub.broadcast(
+        ServerEventEnvelope(type="usage.snapshot", payload={"refresh_required": True}),
+        workspace_id="workspace-1",
+    )
+
+    assert delivered == {"alice": 1, "developer": 1}
+
+
+def test_session_list_exposes_page_metadata(web_app):
+    app, _engine = web_app
+    with TestClient(app) as client:
+        csrf = authenticate(client)
+        headers = write_headers(csrf)
+        for _ in range(2):
+            assert client.post(
+                "/api/v1/sessions",
+                json={"workspace_id": "default"},
+                headers=headers,
+            ).status_code == 201
+
+        page = client.get("/api/v1/sessions?limit=1&offset=1")
+        assert page.status_code == 200
+        assert page.json()["total"] == 2
+        assert page.json()["offset"] == 1
+        assert len(page.json()["items"]) == 1
+        assert page.json()["has_more"] is False

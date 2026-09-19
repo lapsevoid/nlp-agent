@@ -11,6 +11,10 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Set
 from langchain_core.messages import BaseMessage, SystemMessage, HumanMessage, AIMessage
 
+from server.agent.compression.internal_context import (
+    internal_context_metadata,
+    invoke_internal_model,
+)
 from utils.tokens import rough_estimation_for_messages
 from utils.logger import get_logger
 from core.prompt_runtime import global_prompt_runtime
@@ -156,12 +160,17 @@ async def _commit_staged(messages: List[BaseMessage], store: CollapseStore, limi
         
     to_commit = store.staged[:limit] if limit else store.staged
     
+    committed: list[StagedSpan] = []
     for span in to_commit:
         span_msgs = _extract_messages_by_range(messages, span.start_uuid, span.end_uuid)
         if not span_msgs:
             continue
 
-        summary = await _generate_span_summary(span_msgs)
+        try:
+            summary = await _generate_span_summary(span_msgs)
+        except Exception:
+            logger.exception("Context Collapse 摘要生成失败，保留原始消息")
+            continue
 
         commit = CollapseCommit(
             collapse_id=uuid.uuid4().hex[:16],
@@ -172,6 +181,7 @@ async def _commit_staged(messages: List[BaseMessage], store: CollapseStore, limi
         )
 
         store.add_commit(commit)
+        committed.append(span)
 
         logger.info(
             "Context Collapse 提交完成",
@@ -179,7 +189,7 @@ async def _commit_staged(messages: List[BaseMessage], store: CollapseStore, limi
             msg_count=len(span_msgs)
         )
 
-    store.staged = store.staged[len(to_commit):]
+    store.staged = [span for span in store.staged if span not in committed]
 
 
 def _project_view(messages: List[BaseMessage], store: CollapseStore) -> List[BaseMessage]:
@@ -214,7 +224,10 @@ def _project_view(messages: List[BaseMessage], store: CollapseStore) -> List[Bas
                 summary_msg = SystemMessage(
                     content=f'<collapsed id="{c.collapse_id}">\n{c.summary_content}\n</collapsed>',
                     id=c.summary_uuid,
-                    additional_kwargs={"is_collapsed_summary": True}
+                    additional_kwargs=internal_context_metadata(
+                        "collapse",
+                        is_collapsed_summary=True,
+                    ),
                 )
                 projected.append(summary_msg)
             continue
@@ -243,15 +256,14 @@ async def _generate_span_summary(span_messages: List[BaseMessage]) -> str:
             text = text[:1000] + "...(truncated)"
         conversation += f"[{m.type}]: {text}\n"
         
-    try:
-        prompt = global_prompt_runtime.render(
-            "compression.collapse_summary", conversation=conversation
-        )
-        resp = await llm.ainvoke([HumanMessage(content=prompt)])
-        return resp.content
-    except Exception as e:
-        logger.exception("Context Collapse 摘要生成失败")
-        return "历史对话内容被折叠隐藏。"
+    prompt = global_prompt_runtime.render(
+        "compression.collapse_summary", conversation=conversation
+    )
+    from core.model_runtime.usage import bind_usage_purpose
+
+    with bind_usage_purpose("compact"):
+        resp = await invoke_internal_model(llm, [HumanMessage(content=prompt)])
+    return str(resp.content)
 
 
 def _get_all_committed_ids(messages: List[BaseMessage], store: CollapseStore) -> Set[str]:

@@ -1,7 +1,12 @@
 import path from "node:path";
+import { readFileSync } from "node:fs";
 
 import react from "@vitejs/plugin-react";
 import { defineConfig, loadEnv } from "vite";
+
+const packageJson = JSON.parse(
+  readFileSync(path.resolve(__dirname, "./package.json"), "utf-8"),
+) as { version: string };
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
@@ -9,6 +14,9 @@ export default defineConfig(({ mode }) => {
 
   return {
     plugins: [react()],
+    define: {
+      __APP_VERSION__: JSON.stringify(packageJson.version),
+    },
     resolve: {
       alias: { "@": path.resolve(__dirname, "./src") },
     },
@@ -30,6 +38,7 @@ export default defineConfig(({ mode }) => {
       port: 5173,
       strictPort: true,
       hmr: { host: "127.0.0.1", path: "/__nlp_vite_hmr" },
+      fs: { allow: [path.resolve(__dirname)] },
       proxy: {
         "/api": { target, changeOrigin: true },
         "/health": { target, changeOrigin: true },
@@ -40,6 +49,7 @@ export default defineConfig(({ mode }) => {
       environment: "happy-dom",
       globals: true,
       setupFiles: ["./src/tests/setup.ts"],
+      maxWorkers: 4,
     },
   };
 });

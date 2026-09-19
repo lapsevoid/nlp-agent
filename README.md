@@ -1,133 +1,159 @@
-# Nova
+<div align="center">
 
-<p align="center">
-  <img src="webui/logo/nova.png" alt="Nova" width="210">
+<img src="webui/logo/nova.png" alt="Nova logo" width="150" />
+
+<h1>Nova</h1>
+
+**A teaching and learning assistant for NLP courses.**
+
+<p>
+  <img src="https://img.shields.io/github/stars/liunor/nlp-agent?logo=github" alt="GitHub stars">
+  <img src="https://github.com/liunor/nlp-agent/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI">
+  <img src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white" alt="Python 3.11+">
+  <img src="https://img.shields.io/badge/FastAPI-005571?logo=fastapi" alt="FastAPI">
+  <img src="https://img.shields.io/badge/LangGraph-1C3C3C" alt="LangGraph">
+  <img src="https://img.shields.io/badge/MySQL-4479A1?logo=mysql&logoColor=white" alt="MySQL">
+  <img src="https://img.shields.io/badge/Redis-DC382D?logo=redis&logoColor=white" alt="Redis">
+  <img src="https://img.shields.io/badge/Docker-2496ED?logo=docker&logoColor=white" alt="Docker">
+  <img src="https://img.shields.io/badge/docs-docs%2F-blue" alt="Docs">
+  <img src="https://img.shields.io/badge/License-MIT-0969da" alt="MIT License">
 </p>
 
-<p align="center">
-  <strong>你的自然语言处理学习与实践助手</strong><br>
-  从一个问题开始，让学习、练习和复盘变得更简单。
+<p>
+  <a href="#features">Features</a> ·
+  <a href="#quick-start">Quick Start</a> ·
+  <a href="README.zh.md">中文</a> ·
+  <a href="CONTRIBUTING.md">Contributing</a> ·
+  <a href="LICENSE">License</a>
 </p>
 
-## Nova 是什么
+</div>
 
-Nova 是一个面向自然语言处理学习场景的智能体。你可以和它对话、提问、练习，也可以让它根据你的学习情况给出下一步建议。
+<img src="docs/assets/demo-flow.gif" alt="Nova feature walkthrough" width="100%" />
 
-## 四个核心模块
+Nova is a teaching and learning assistant for NLP courses. A single deployment serves four roles — Learner, Teacher, Developer and Monitor — so one instance covers a whole class.
 
-| 模块 | 你可以做什么 |
+Teachers author topics, Markdown knowledge points and exercise blueprints. Students ask questions in plain language and get step-by-step explanations, auto-graded practice, and a review of each answer against the rubric their teacher defined. The Developer configures models and infrastructure, and the Monitor watches every turn across the pipeline.
+
+## Start here
+
+| You want to... | Go to |
 | --- | --- |
-| 学习者 | 提问、学习知识点、完成练习、查看学习记录 |
-| 教师 | 组织学习内容、查看学习情况、辅助准备教学活动 |
-| 开发者 | 查看运行状态、调试对话、检查接口和事件 |
-| 运行监控 | 观察服务健康度、请求状态和实时运行信息 |
+| Run it locally in minutes | [Quick Start](#quick-start) |
+| See what it looks like | [Four dedicated views](#four-dedicated-views) |
+| Understand the feature set | [Features](#features) |
+| Configure models & database | [`.env-example`](./.env-example) |
+| Contribute or extend it | [CONTRIBUTING.md](./CONTRIBUTING.md) |
 
-## 快速启动
+## Four dedicated views
 
-### 1. 准备环境
+Nova runs four role-based views over a single deployment, so a whole classroom works on one instance:
 
-请先安装 Python 3.11 或更高版本，以及 [uv](https://docs.astral.sh/uv/)。然后打开 PowerShell，进入项目目录：
+### Learner
+
+The Learner view is where students do their coursework.
+
+- Ask questions in plain language and follow step-by-step explanations.
+- Practise with auto-generated exercises that come from your teacher's blueprints.
+- Review every answer against the weighted rubric your teacher defined.
+
+<p align="center">
+  <img src="docs/assets/screenshot-learner.png" alt="Learner view" width="900">
+</p>
+
+### Teacher
+
+The Teacher view is where instructors author the course.
+
+- Write topics and Markdown knowledge points; each question is injected with exactly the scope it needs.
+- Design exercise blueprints that generate questions and grade answers against weighted rubrics.
+- Keep grading consistent across the class with one shared rubric.
+
+<p align="center">
+  <img src="docs/assets/screenshot-teacher.png" alt="Teacher view" width="900">
+</p>
+
+### Developer
+
+The Developer view manages model and runtime configuration.
+
+- Add and rotate model providers and their API keys in one place.
+- Tune runtime settings for the web, worker and sandbox services.
+- Manage the sandbox that runs generated code, isolated from the host.
+
+<p align="center">
+  <img src="docs/assets/screenshot-developer.png" alt="Developer view" width="900">
+</p>
+
+### Monitor
+
+The Monitor view is the observability dashboard.
+
+- Watch live turns, traces and metrics across web, worker and sandbox.
+- Inspect task activity along the whole pipeline.
+- Trace a single question from the client all the way to the answer.
+
+<p align="center">
+  <img src="docs/assets/screenshot-monitor.png" alt="Monitor view" width="900">
+</p>
+
+## Features
+
+- **Four role-based views**: Learner, Teacher, Developer and Monitor, separated by access control so each role sees only what it should.
+- **Guided learning**: question-and-answer sessions that resolve a problem step by step instead of dumping a single answer.
+- **Auto-graded exercises**: teachers define blueprints that generate questions and grade each answer against weighted rubrics.
+- **Knowledge-point catalogue**: teachers write topics and Markdown knowledge points; each question is answered with exactly the scope it needs, nothing more.
+- **Observability**: a built-in monitor shows turns, traces and metrics across web, worker and sandbox.
+- **Modular runtime**: a coordinator/worker engine on LangGraph, with tools, memory and sandboxed code execution.
+- **Web and CLI**: chat from the browser or the terminal, so students and teachers aren't tied to one interface.
+
+## Quick Start
+
+### Prerequisites
+
+- Python 3.11 or newer, and [uv](https://docs.astral.sh/uv/).
+- A MySQL database, configured in `.env`.
+
+> [!NOTE]
+> Copy [`.env-example`](./.env-example) to `.env` and fill in the model service key and database connection before starting.
+
+> [!TIP]
+> For the full distributed stack (nginx, MySQL, Redis, web, worker, sandbox manager), use the provided [`compose.yaml`](./compose.yaml).
+
+### Install and run
 
 ```powershell
-cd E:\Github\Pro_NLP
+uv sync                                   # install dependencies
+Copy-Item .env-example .env               # prepare config: model key & database
+uv run python main.py bootstrap-db        # initialize the database
+uv run python main.py bootstrap-developer # create the first account
+uv run python main.py serve               # start the server
 ```
 
-### 2. 安装依赖
+Once it starts, open <http://127.0.0.1:8765>.
 
-```powershell
-uv sync
-```
+### Log in and explore
 
-### 3. 创建配置文件
+Log in with the account created by `bootstrap-developer`:
 
-复制配置模板：
+- Learner — <http://127.0.0.1:8765/>
+- Teacher — <http://127.0.0.1:8765/teacher>
+- Developer — <http://127.0.0.1:8765/developer>
 
-```powershell
-Copy-Item .env-example .env
-```
-
-用记事本打开 `.env`：
-
-```powershell
-notepad .env
-```
-
-至少确认以下配置已经填写：
-
-```dotenv
-DEEPSEEK_API_KEY=你的模型服务密钥
-NLP_AGENT_WEB_SECRET=你自己生成的一段随机长字符串
-```
-
-保存后关闭记事本。`.env` 只用于本机配置，不要提交到 Git。
-
-### 4. 启动 Nova Web
-
-```powershell
-uv run python main.py serve
-```
-
-看到服务启动提示后，在浏览器打开：
-
-<http://127.0.0.1:8765>
-
-### 5. 访问不同模块
-
-- 学习者：<http://127.0.0.1:8765/>
-- 教师：<http://127.0.0.1:8765/teacher>
-- 开发者：<http://127.0.0.1:8765/developer>
-- 运行监控：先执行 `uv run python main.py monitor`，再打开监控页面
-
-## 其他启动方式
-
-命令行对话：
+Or chat from the terminal:
 
 ```powershell
 uv run python main.py chat
 ```
 
-运行监控服务：
+For the observability monitor, run `uv run python main.py monitor` first, then open <http://127.0.0.1:8766/>.
 
-```powershell
-uv run python main.py monitor
-```
+## Documentation
 
-停止服务时，在对应 PowerShell 窗口按 `Ctrl+C` 即可。
+- [Contributing](./CONTRIBUTING.md)
+- [Configuration & guides](./docs/)
+- [License](./LICENSE)
 
-## Docker 部署（内网服务器）
+---
 
-1. 复制并填写部署配置：
-
-```powershell
-Copy-Item .env-example .env
-notepad .env
-```
-
-至少替换 `DEEPSEEK_API_KEY`、`NLP_AGENT_WEB_SECRET`，并将
-`SERVER_IP_OR_DOMAIN` 替换为服务器实际内网 IP 或域名。
-
-2. 构建并启动主服务：
-
-```powershell
-docker compose up -d --build
-```
-
-3. 如需启动运行监控：
-
-```powershell
-docker compose --profile monitor up -d
-```
-
-主服务访问地址为 `http://服务器IP:8765`，监控地址为
-`http://服务器IP:8766`。数据会保存在 Docker 卷 `nova-data` 中，更新镜像不会丢失会话数据。
-
-查看运行状态和日志：
-
-```powershell
-docker compose ps
-docker compose logs -f nova-web
-```
-
-## 项目定位
-
-Nova 当前主要用于内网演示、教学和自然语言处理学习实践。欢迎在使用过程中提出建议，一起把它变成更好用的学习伙伴。
+This repository is licensed under the [MIT](./LICENSE) license.

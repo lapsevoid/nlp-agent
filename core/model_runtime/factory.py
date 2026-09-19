@@ -9,10 +9,18 @@ from dotenv import dotenv_values
 
 from configs.settings import BASE_DIR, settings
 from core.model_runtime.adapters.deepseek import DeepSeekAdapter
+from core.model_runtime.adapters.glm import GLMAdapter
+from core.model_runtime.adapters.kimi import KimiAdapter
 from core.model_runtime.adapters.openai_compatible import OpenAICompatibleAdapter
+from core.model_runtime.adapters.qwen import QwenAdapter
 from core.model_runtime.contracts import ModelPresetConfig, ModelRuntimeConfig
 from core.model_runtime.registry import ProviderRegistry, global_provider_registry
 from core.model_runtime.runtime import ModelCandidate, ResilientChatModel
+
+
+from core.model_runtime.reporters import ModelUsageReporterSlot
+from core.model_runtime.usage import ModelIdentity
+from utils.tokens import rough_estimation_for_messages
 
 
 def _register_builtins(registry: ProviderRegistry) -> None:
@@ -20,13 +28,25 @@ def _register_builtins(registry: ProviderRegistry) -> None:
         registry.register("deepseek", DeepSeekAdapter)
     if "openai_compatible" not in registry.names:
         registry.register("openai_compatible", OpenAICompatibleAdapter)
+    if "qwen" not in registry.names:
+        registry.register("qwen", QwenAdapter)
+    if "kimi" not in registry.names:
+        registry.register("kimi", KimiAdapter)
+    if "glm" not in registry.names:
+        registry.register("glm", GLMAdapter)
 
 
 class ModelFactory:
-    def __init__(self, config: ModelRuntimeConfig, registry: ProviderRegistry | None = None) -> None:
+    def __init__(
+        self,
+        config: ModelRuntimeConfig,
+        registry: ProviderRegistry | None = None,
+        reporter_slot: ModelUsageReporterSlot | None = None,
+    ) -> None:
         self.config = config
         self.registry = registry or global_provider_registry
         _register_builtins(self.registry)
+        self.reporter_slot = reporter_slot or ModelUsageReporterSlot()
         self._cache: dict[tuple[str, ...], ResilientChatModel] = {}
         self._dotenv = dotenv_values(BASE_DIR / ".env")
 
@@ -38,6 +58,8 @@ class ModelFactory:
             "models": raw.get("models", {}),
             "model_presets": raw.get("model_presets", {}),
             "model_routes": raw.get("model_routes", {}),
+            "model_profiles": raw.get("model_profiles", {}),
+            "default_model_profile": raw.get("defaults", {}).get("model_profile"),
         }))
 
     def _api_key(self, env_name: str) -> str:
@@ -74,37 +96,122 @@ class ModelFactory:
             model=model,
         )
 
-    def build_route(self, route_name: str) -> ResilientChatModel:
+    def build_route(
+        self,
+        route_name: str,
+        *,
+        model_profile: str | None = None,
+    ) -> ResilientChatModel:
         entries = self.config.route_presets(route_name)
-        key = ("route", route_name, *(name for name, _ in entries))
+        key = ("route", route_name, str(model_profile), *(name for name, _ in entries))
         if key not in self._cache:
-            self._cache[key] = ResilientChatModel([
-                self._candidate(name, preset) for name, preset in entries
-            ])
+            self._cache[key] = ResilientChatModel(
+                [self._candidate(name, preset) for name, preset in entries],
+                model_profile=model_profile,
+                route=route_name,
+                reporter_slot=self.reporter_slot,
+            )
         return self._cache[key]
 
-    def build_preset(self, preset_name: str) -> ResilientChatModel:
-        key = ("preset", preset_name)
+    def build_preset(
+        self,
+        preset_name: str,
+        *,
+        model_profile: str | None = None,
+    ) -> ResilientChatModel:
+        key = ("preset", preset_name, str(model_profile))
         if key not in self._cache:
             preset = self.config.preset(preset_name)
-            self._cache[key] = ResilientChatModel([self._candidate(preset_name, preset)])
+            self._cache[key] = ResilientChatModel(
+                [self._candidate(preset_name, preset)],
+                model_profile=model_profile,
+                route=None,
+                reporter_slot=self.reporter_slot,
+            )
         return self._cache[key]
 
-    def build_override(self, requested: str, *, base_route: str = "worker") -> ResilientChatModel:
+    def build_profile_role(
+        self,
+        profile_name: str,
+        role: str,
+    ) -> ResilientChatModel:
+        preset_name = self.profile_preset(profile_name, role)
+        return self.build_preset(preset_name, model_profile=profile_name)
+
+    def build_override(
+        self,
+        requested: str,
+        *,
+        base_route: str = "worker",
+        model_profile: str | None = None,
+    ) -> ResilientChatModel:
         if requested in self.config.model_presets:
-            return self.build_preset(requested)
+            return self.build_preset(requested, model_profile=model_profile)
         if requested not in self.config.models:
             raise KeyError(
                 f"Unknown model preset/model {requested!r}; presets={sorted(self.config.model_presets)}"
             )
         base_name, base = self.config.route_presets(base_route)[0]
         override = base.model_copy(update={"model": requested})
-        key = ("override", base_name, requested)
+        key = ("override", base_name, requested, str(model_profile))
         if key not in self._cache:
-            self._cache[key] = ResilientChatModel([
-                self._candidate(f"{base_name}@{requested}", override)
-            ])
+            self._cache[key] = ResilientChatModel(
+                [self._candidate(f"{base_name}@{requested}", override)],
+                model_profile=model_profile,
+                route=base_route,
+                reporter_slot=self.reporter_slot,
+            )
         return self._cache[key]
+
+    def profile_identity(self, profile_name: str, role: str) -> ModelIdentity:
+        profile = self.config.profile(profile_name)
+        if role not in {"coordinator", "worker", "utility"}:
+            raise KeyError(f"Unknown model profile role {role!r}")
+        preset_name = str(getattr(profile, role))
+        preset = self.config.preset(preset_name)
+        model = self.config.models[preset.model]
+        return ModelIdentity(
+            provider=model.provider,
+            provider_model=model.model_id,
+            model_profile=profile_name,
+            preset=preset_name,
+            route=None,
+            pricing_key=model.pricing_key,
+            context_window_tokens=model.context_window_tokens,
+            max_output_tokens=preset.generation.max_output_tokens,
+        )
+
+    def estimate_input_tokens(
+        self,
+        model_profile: str,
+        messages: list[object],
+    ) -> int | None:
+        self.config.profile(model_profile)
+        try:
+            return rough_estimation_for_messages(messages)
+        except Exception:
+            return None
+
+    def profile_preset(self, profile_name: str, role: str) -> str:
+        profile = self.config.profile(profile_name)
+        if role not in {"coordinator", "worker", "utility"}:
+            raise KeyError(f"Unknown model profile role {role!r}")
+        return str(getattr(profile, role))
+
+    def profile_available(self, profile_name: str) -> bool:
+        profile = self.config.profile(profile_name)
+        provider = self.config.providers[profile.provider]
+        return bool(self._api_key(provider.api_key_env))
+
+    def public_profiles(self) -> dict[str, dict[str, Any]]:
+        return {
+            name: {
+                "label": profile.label,
+                "provider": profile.provider,
+                "available": self.profile_available(name),
+            }
+            for name, profile in self.config.model_profiles.items()
+        }
 
     def route_primary_details(self, route_name: str) -> dict[str, Any]:
         preset_name, preset = self.config.route_presets(route_name)[0]

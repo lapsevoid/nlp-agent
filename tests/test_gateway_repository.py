@@ -54,6 +54,58 @@ def test_gateway_repository_idempotency_event_order_and_recovery(tmp_path):
     repository.close()
 
 
+def test_ensure_event_repairs_terminal_log_once(tmp_path):
+    repository = GatewayRepository(tmp_path / "gateway.sqlite3")
+    turn, _ = repository.create_turn(
+        turn_id="turn-1",
+        session_id="session-1",
+        workspace_id="workspace-1",
+        user_id="alice",
+        input_text="hello",
+        idempotency_key=None,
+    )
+    repository.update_turn(turn.turn_id, TurnStatus.COMPLETED, final_text="answer")
+
+    first = repository.ensure_event(
+        turn_id=turn.turn_id,
+        session_id=turn.session_id,
+        event_type=GatewayEventType.TURN_COMPLETED,
+        payload={"content": "answer"},
+    )
+    second = repository.ensure_event(
+        turn_id=turn.turn_id,
+        session_id=turn.session_id,
+        event_type=GatewayEventType.TURN_COMPLETED,
+        payload={"content": "answer"},
+    )
+
+    assert second.event_id == first.event_id
+    assert len(repository.events_after(turn.turn_id)) == 1
+    repository.close()
+
+
+def test_gateway_repository_does_not_resurrect_cancelled_turn(tmp_path):
+    repository = GatewayRepository(tmp_path / "gateway.sqlite3")
+    turn, _ = repository.create_turn(
+        turn_id="turn-1",
+        session_id="session-1",
+        workspace_id="workspace-1",
+        user_id="alice",
+        input_text="hello",
+        idempotency_key=None,
+    )
+
+    repository.update_turn(turn.turn_id, TurnStatus.RUNNING)
+    repository.update_turn(turn.turn_id, TurnStatus.CANCELLED)
+    late_completion = repository.update_turn(
+        turn.turn_id, TurnStatus.COMPLETED, final_text="late answer"
+    )
+
+    assert late_completion.status == TurnStatus.CANCELLED
+    assert late_completion.final_text is None
+    repository.close()
+
+
 def test_event_retention_compacts_terminal_turns_caps_sessions_and_keeps_active(tmp_path):
     repository = GatewayRepository(tmp_path / "gateway.sqlite3")
     terminal_ids = []
@@ -140,6 +192,50 @@ def test_learning_state_and_teaching_catalog_are_isolated_from_turn_history(tmp_
     assert repository.list_turns("session-learning")[0].turn_id == "turn-learning"
     assert repository.get_teaching_catalog("workspace-1")["catalog"]["topics"][0]["name"] == "Transformer"
     repository.close()
+
+
+def test_knowledge_book_page_keeps_draft_and_published_content_separate(tmp_path):
+    repository = GatewayRepository(tmp_path / "gateway.sqlite3")
+    repository.update_teaching_catalog("workspace-1", {
+        "workspace_id": "workspace-1",
+        "topics": [{
+            "id": "transformer", "name": "Transformer", "description": "",
+            "knowledge_points": [{"id": "attention", "name": "注意力", "markdown": "Q、K、V", "status": "enabled"}],
+        }],
+        "exercise_blueprints": [], "review_blueprints": [], "guided_blueprints": [],
+    })
+
+    saved = repository.update_knowledge_page(
+        "workspace-1", "attention", "# 注意力\n\n草稿内容", expected_revision=0,
+    )
+    assert saved["revision"] == 1
+    assert saved["published_markdown"] is None
+    assert repository.get_published_knowledge_page("workspace-1", "attention") is None
+
+    published = repository.publish_knowledge_page("workspace-1", "attention", expected_revision=1)
+    assert published["published_revision"] == 1
+    assert published["published_markdown"] == "# 注意力\n\n草稿内容"
+
+    repository.update_knowledge_page(
+        "workspace-1", "attention", "# 注意力\n\n第二版", expected_revision=1,
+    )
+    assert repository.get_published_knowledge_page("workspace-1", "attention")["published_markdown"] == "# 注意力\n\n草稿内容"
+    repository.close()
+
+
+def test_repository_persists_global_whiteboard_library_items_across_reopen(tmp_path):
+    repository = GatewayRepository(tmp_path / "gateway.sqlite3")
+    item = repository.create_whiteboard_library_item(
+        name="流程图",
+        elements=[{"id": "shape-1", "type": "rectangle"}],
+        created_by="teacher-1",
+    )
+
+    assert item["status"] == "published"
+    assert repository.list_whiteboard_library() == [item]
+
+    reopened = GatewayRepository(tmp_path / "gateway.sqlite3")
+    assert reopened.list_whiteboard_library() == [item]
 
 
 def test_turn_persists_the_real_guided_session_and_blueprint_snapshot_reference(tmp_path):

@@ -1,10 +1,14 @@
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
+import gateway.core as gateway_core
 from core.identity import AccessDeniedError, AuthenticatedPrincipal
-from core.learning import LearningContext
+from core.learning import KnowledgeBookContext, LearningContext, TeachingMaterials
 from core.session_context import SessionContext
+from core.rbac import Permission
+from configs.settings import settings
 from gateway.contracts import (
     EvaluationContext,
     GatewayEventType,
@@ -15,7 +19,33 @@ from gateway.contracts import (
     TeachingConfigurationError,
 )
 from gateway.core import BackendGateway
+from gateway.dispatch import InProcessTurnDispatcher, TurnTask
 from gateway.repository import GatewayRepository
+
+
+@pytest.mark.asyncio
+async def test_knowledge_book_context_uses_published_server_copy():
+    class Repository:
+        def get_published_knowledge_page(self, workspace_id, knowledge_point_id):
+            assert workspace_id == "workspace-1"
+            assert knowledge_point_id == "point-1"
+            return {"published_markdown": "# Published textbook"}
+
+    candidate = KnowledgeBookContext(
+        workspace_id="workspace-1",
+        topic_id="topic-1",
+        knowledge_point_id="point-1",
+        content_markdown="# Client supplied text",
+    )
+
+    resolved = await gateway_core._resolve_knowledge_book_context(
+        Repository(),
+        SessionContext(session_id="session-1", workspace_id="workspace-1"),
+        candidate,
+    )
+
+    assert resolved is not None
+    assert resolved.content_markdown == "# Published textbook"
 
 
 class FakeSessions:
@@ -91,6 +121,98 @@ class FakeEngine:
         self.closed = True
 
 
+class SlowCancelEngine(FakeEngine):
+    def __init__(self):
+        super().__init__()
+        self.cancel_release = asyncio.Event()
+
+    async def cancel_turn(self, context, turn_id):
+        self.cancel_calls.append(turn_id)
+        self.lifecycle.append("cancel")
+        await self.cancel_release.wait()
+        self.active.pop(context.session_id, None)
+
+
+class RecordingTurnDispatcher:
+    def __init__(self):
+        self.submissions = []
+
+    async def submit(self, task):
+        self.submissions.append(task)
+
+    async def cancel(self, turn_id):
+        return None
+
+    async def close(self, *, force=False, grace_s=0):
+        return None
+
+    def active_count(self):
+        return 0
+
+
+class FailingTurnDispatcher(RecordingTurnDispatcher):
+    async def submit(self, task):
+        raise ConnectionError("redis unavailable")
+
+
+class FailingCancelTurnDispatcher(RecordingTurnDispatcher):
+    async def cancel(self, turn_id):
+        raise ConnectionError("redis unavailable")
+
+
+@pytest.mark.asyncio
+async def test_in_process_cancel_does_not_wait_for_slow_executor_cleanup():
+    started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+
+    async def execute(_task):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await release_cleanup.wait()
+
+    dispatcher = InProcessTurnDispatcher(execute)
+    task = TurnTask(
+        context=SessionContext(session_id="session-1"), turn_id="turn-1", content="hello",
+        learning_context=None, learning_progress=None, exercise_state=None,
+        teaching_materials=TeachingMaterials(), guided_session_id=None, exercise_session_id=None,
+    )
+    await dispatcher.submit(task)
+    await started.wait()
+
+    await asyncio.wait_for(dispatcher.cancel(task.turn_id), timeout=0.1)
+    assert dispatcher.active_count() == 1
+
+    release_cleanup.set()
+    await asyncio.sleep(0)
+
+
+def test_explicit_repository_bypasses_redis_runtime_dispatch(tmp_path, monkeypatch):
+    """Injected repositories must keep tests/local integrations in-process."""
+    monkeypatch.setattr(settings, "NLP_AGENT_GATEWAY_TRANSPORT", "redis")
+
+    gateway = BackendGateway(
+        engine=FakeEngine(),
+        repository=GatewayRepository(tmp_path / "gateway.sqlite3"),
+        sessions=FakeSessions(),
+    )
+
+    assert isinstance(gateway.dispatcher, InProcessTurnDispatcher)
+
+
+class FlakyTurnDispatcher(RecordingTurnDispatcher):
+    def __init__(self):
+        super().__init__()
+        self.attempts = 0
+
+    async def submit(self, task):
+        self.attempts += 1
+        if self.attempts == 1:
+            raise ConnectionError("redis unavailable")
+        self.submissions.append(task)
+
+
 class LearningEngine(FakeEngine):
     def __init__(self):
         super().__init__()
@@ -150,7 +272,318 @@ class ExerciseProtocolEngine(LearningEngine):
 
 @pytest.fixture
 def principal():
-    return AuthenticatedPrincipal(user_id="alice", workspace_ids=frozenset({"w1"}))
+    return AuthenticatedPrincipal(
+        user_id="alice", workspace_ids=frozenset({"w1"}), roles=frozenset({"student"})
+    )
+
+
+@pytest.mark.asyncio
+async def test_gateway_rejects_student_teaching_catalog_updates(tmp_path, principal):
+    repository = GatewayRepository(tmp_path / "gateway.sqlite3")
+    gateway = BackendGateway(
+        engine=FakeEngine(),
+        repository=repository,
+        sessions=FakeSessions(),
+        dispatcher=RecordingTurnDispatcher(),
+    )
+
+    with pytest.raises(AccessDeniedError, match="learning:content:manage"):
+        await gateway.update_teaching_catalog(
+            principal,
+            "w1",
+            {
+                "workspace_id": "w1",
+                "topics": [],
+                "exercise_blueprints": [],
+                "review_blueprints": [],
+                "guided_blueprints": [],
+            },
+        )
+
+
+@pytest.mark.asyncio
+async def test_gateway_rejects_non_manager_role_even_with_content_manage_permission(tmp_path):
+    repository = GatewayRepository(tmp_path / "gateway.sqlite3")
+    gateway = BackendGateway(
+        engine=FakeEngine(),
+        repository=repository,
+        sessions=FakeSessions(),
+        dispatcher=RecordingTurnDispatcher(),
+    )
+    student_with_override = AuthenticatedPrincipal(
+        user_id="student-override",
+        workspace_ids=frozenset({"w1"}),
+        roles=frozenset({"student"}),
+        permissions=frozenset({Permission.LEARNING_CONTENT_MANAGE.value}),
+    )
+
+    with pytest.raises(AccessDeniedError, match="teacher or developer"):
+        await gateway.create_whiteboard_library_item(
+            student_with_override,
+            name="不应发布",
+            elements=[{"id": "shape-1", "type": "rectangle"}],
+        )
+
+
+@pytest.mark.asyncio
+async def test_gateway_rejects_guest_teaching_catalog_reads(tmp_path):
+    repository = GatewayRepository(tmp_path / "gateway.sqlite3")
+    gateway = BackendGateway(
+        engine=FakeEngine(),
+        repository=repository,
+        sessions=FakeSessions(),
+        dispatcher=RecordingTurnDispatcher(),
+    )
+    guest = AuthenticatedPrincipal(
+        user_id="guest",
+        workspace_ids=frozenset({"w1"}),
+        roles=frozenset({"guest"}),
+    )
+
+    with pytest.raises(AccessDeniedError, match="learning:content:read_workspace"):
+        await gateway.get_teaching_catalog(guest, "w1")
+
+
+@pytest.mark.asyncio
+async def test_gateway_submits_persisted_turn_to_dispatcher(tmp_path, principal):
+    engine = FakeEngine()
+    sessions = FakeSessions()
+    dispatcher = RecordingTurnDispatcher()
+    repository = GatewayRepository(tmp_path / "gateway.sqlite3")
+    gateway = BackendGateway(
+        engine=engine,
+        repository=repository,
+        sessions=sessions,
+        dispatcher=dispatcher,
+    )
+    await gateway.start()
+    session = await gateway.create_session(principal, workspace_id="w1")
+
+    accepted = await gateway.submit_turn(
+        principal,
+        SubmitTurnRequest(session_id=session.session_id, content="dispatch me"),
+    )
+
+    assert len(dispatcher.submissions) == 1
+    task = dispatcher.submissions[0]
+    assert isinstance(task, TurnTask)
+    assert task.turn_id == accepted.turn_id
+    assert task.context == session
+    assert task.content == "dispatch me"
+    assert repository.get_turn(accepted.turn_id).status == TurnStatus.ACCEPTED
+    await gateway.close()
+
+
+@pytest.mark.asyncio
+async def test_gateway_returns_cancelled_when_dispatcher_cancel_is_unavailable(
+    tmp_path, principal
+):
+    dispatcher = FailingCancelTurnDispatcher()
+    gateway = BackendGateway(
+        engine=FakeEngine(),
+        repository=GatewayRepository(tmp_path / "gateway.sqlite3"),
+        sessions=FakeSessions(),
+        dispatcher=dispatcher,
+    )
+    await gateway.start()
+    session = await gateway.create_session(principal, workspace_id="w1")
+    accepted = await gateway.submit_turn(
+        principal,
+        SubmitTurnRequest(session_id=session.session_id, content="cancel me"),
+    )
+
+    cancelled = await gateway.cancel_turn(principal, accepted.turn_id)
+
+    assert cancelled.status == TurnStatus.CANCELLED
+    await gateway.close()
+
+
+@pytest.mark.asyncio
+async def test_gateway_carries_an_allowed_model_profile_to_the_dispatcher(
+    tmp_path, principal, monkeypatch
+):
+    class ProfileConfig:
+        @staticmethod
+        def profile(name):
+            if name != "qwen":
+                raise KeyError(name)
+            return SimpleNamespace(label="Qwen")
+
+    factory = SimpleNamespace(
+        config=ProfileConfig(),
+        profile_available=lambda name: name == "qwen",
+    )
+    monkeypatch.setattr(
+        "core.model_runtime.factory.get_global_model_factory", lambda: factory
+    )
+    dispatcher = RecordingTurnDispatcher()
+    gateway = BackendGateway(
+        engine=FakeEngine(),
+        repository=GatewayRepository(tmp_path / "gateway.sqlite3"),
+        sessions=FakeSessions(),
+        dispatcher=dispatcher,
+    )
+    await gateway.start()
+    session = await gateway.create_session(principal, workspace_id="w1")
+
+    await gateway.submit_turn(
+        principal,
+        SubmitTurnRequest(
+            session_id=session.session_id,
+            content="use qwen",
+            model_profile="qwen",
+        ),
+    )
+
+    assert dispatcher.submissions[0].model_profile == "qwen"
+    await gateway.close()
+
+
+@pytest.mark.asyncio
+async def test_gateway_marks_turn_failed_when_dispatch_transport_rejects_it(
+    tmp_path, principal
+):
+    sessions = FakeSessions()
+    repository = GatewayRepository(tmp_path / "gateway.sqlite3")
+    gateway = BackendGateway(
+        engine=FakeEngine(),
+        repository=repository,
+        sessions=sessions,
+        dispatcher=FailingTurnDispatcher(),
+    )
+    await gateway.start()
+    session = await gateway.create_session(principal, workspace_id="w1")
+
+    with pytest.raises(ConnectionError, match="redis unavailable"):
+        await gateway.submit_turn(
+            principal,
+            SubmitTurnRequest(session_id=session.session_id, content="dispatch me"),
+        )
+
+    failed = repository.active_turn_for_session(session.session_id)
+    assert failed is None
+    failed_turn = repository.list_turns(session.session_id)[0]
+    assert failed_turn.error_kind == "dispatch_failed"
+    events = repository.events_after(failed_turn.turn_id)
+    assert [event.type for event in events][-1] == GatewayEventType.TURN_FAILED
+    await gateway.close()
+
+
+@pytest.mark.asyncio
+async def test_gateway_retries_dispatch_failure_for_same_idempotency_key(
+    tmp_path, principal
+):
+    sessions = FakeSessions()
+    repository = GatewayRepository(tmp_path / "gateway.sqlite3")
+    dispatcher = FlakyTurnDispatcher()
+    gateway = BackendGateway(
+        engine=FakeEngine(),
+        repository=repository,
+        sessions=sessions,
+        dispatcher=dispatcher,
+    )
+    await gateway.start()
+    session = await gateway.create_session(principal, workspace_id="w1")
+    request = SubmitTurnRequest(
+        session_id=session.session_id,
+        content="dispatch me",
+        idempotency_key="same",
+    )
+
+    with pytest.raises(ConnectionError):
+        await gateway.submit_turn(principal, request)
+    retried = await gateway.submit_turn(principal, request)
+
+    assert retried.duplicate is True
+    assert dispatcher.attempts == 2
+    assert dispatcher.submissions[0].turn_id == retried.turn_id
+    assert repository.get_turn(retried.turn_id).status == TurnStatus.ACCEPTED
+    await gateway.close()
+
+
+@pytest.mark.asyncio
+async def test_gateway_rejects_changed_content_when_retrying_an_idempotency_key(
+    tmp_path, principal
+):
+    sessions = FakeSessions()
+    repository = GatewayRepository(tmp_path / "gateway.sqlite3")
+    dispatcher = FlakyTurnDispatcher()
+    gateway = BackendGateway(
+        engine=FakeEngine(),
+        repository=repository,
+        sessions=sessions,
+        dispatcher=dispatcher,
+    )
+    await gateway.start()
+    session = await gateway.create_session(principal, workspace_id="w1")
+
+    with pytest.raises(ConnectionError):
+        await gateway.submit_turn(
+            principal,
+            SubmitTurnRequest(
+                session_id=session.session_id,
+                content="original request",
+                idempotency_key="same",
+            ),
+        )
+
+    with pytest.raises(TurnConflictError, match="idempotency key"):
+        await gateway.submit_turn(
+            principal,
+            SubmitTurnRequest(
+                session_id=session.session_id,
+                content="different request",
+                idempotency_key="same",
+            ),
+        )
+
+    original = repository.list_turns(session.session_id)[0]
+    assert original.input_text == "original request"
+    assert dispatcher.attempts == 1
+    await gateway.close()
+
+
+@pytest.mark.asyncio
+async def test_gateway_attachment_path_is_session_relative_and_retry_is_idempotent(
+    tmp_path, principal, monkeypatch
+):
+    sessions = FakeSessions()
+    repository = GatewayRepository(tmp_path / "gateway.sqlite3")
+    dispatcher = RecordingTurnDispatcher()
+    uploads_root = tmp_path / ".data" / "uploads"
+    monkeypatch.setattr(gateway_core, "_DEFAULT_UPLOADS_ROOT", uploads_root)
+    gateway = BackendGateway(
+        engine=FakeEngine(),
+        repository=repository,
+        sessions=sessions,
+        dispatcher=dispatcher,
+    )
+    await gateway.start()
+    session = await gateway.create_session(principal, workspace_id="w1")
+    upload_dir = uploads_root / "w1" / "alice" / session.session_id
+    upload_dir.mkdir(parents=True)
+    (upload_dir / "safe-image.png").write_bytes(b"uploaded")
+    request = SubmitTurnRequest(
+        session_id=session.session_id,
+        content="",
+        attachments=[{"file_name": "safe-image.png"}],
+        idempotency_key="attachment-request",
+    )
+
+    accepted = await gateway.submit_turn(principal, request)
+    duplicate = await gateway.submit_turn(principal, request)
+
+    expected = (
+        "---附件---\n"
+        "[图片] safe-image.png\n"
+        "路径: safe-image.png\n"
+        "---附件结束---"
+    )
+    assert duplicate.duplicate is True
+    assert duplicate.turn_id == accepted.turn_id
+    assert dispatcher.submissions[0].content == expected
+    assert repository.get_turn(accepted.turn_id).input_text == expected
+    await gateway.close()
 
 
 @pytest.mark.asyncio
@@ -245,6 +678,34 @@ async def test_gateway_enforces_single_turn_supports_injection_and_cancel(tmp_pa
 
     cancelled = await gateway.cancel_turn(principal, first.turn_id)
     assert cancelled.status == TurnStatus.CANCELLED
+    await gateway.close()
+
+
+@pytest.mark.asyncio
+async def test_gateway_publishes_cancelled_before_slow_executor_cleanup(tmp_path, principal):
+    engine = SlowCancelEngine()
+    engine.block = asyncio.Event()
+    repository = GatewayRepository(tmp_path / "gateway.sqlite3")
+    gateway = BackendGateway(
+        engine=engine,
+        repository=repository,
+        sessions=FakeSessions(),
+    )
+    await gateway.start()
+    session = await gateway.create_session(principal, workspace_id="w1")
+    accepted = await gateway.submit_turn(
+        principal, SubmitTurnRequest(session_id=session.session_id, content="slow")
+    )
+    while session.session_id not in engine.active:
+        await asyncio.sleep(0)
+
+    cancelled = await gateway.cancel_turn(principal, accepted.turn_id)
+    events = repository.events_after(accepted.turn_id)
+
+    assert cancelled.status == TurnStatus.CANCELLED
+    assert [event.type for event in events].count(GatewayEventType.TURN_CANCELLED) == 1
+
+    engine.cancel_release.set()
     await gateway.close()
 
 

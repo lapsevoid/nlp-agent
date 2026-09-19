@@ -1,0 +1,342 @@
+from __future__ import annotations
+
+from unittest.mock import MagicMock, patch, sentinel
+
+import pytest
+from sqlalchemy.exc import OperationalError
+
+from core.learning import ExerciseState, LearningContext, LearningProgress
+from gateway.contracts import GatewayEventType, TurnStatus
+from gateway.contracts import TurnClaimMismatchError
+from gateway.mysql_repository import MySQLGatewayRepository
+
+
+def test_record_parses_json_state_columns_returned_as_text() -> None:
+    repository = object.__new__(MySQLGatewayRepository)
+    record = repository._record(
+        {
+            "id": "turn-1",
+            "conversation_id": "session_x",
+            "workspace_id": "default",
+            "user_id": "user-1",
+            "status": "accepted",
+            "input_text": "hello",
+            "learning_state_json": (
+                '{"context": {"mode": "practice"}, "progress": {"stage": "start"}, "exercise": null}'
+            ),
+            "created_at": "2026-08-05 00:00:00",
+            "started_at": None,
+            "completed_at": None,
+        }
+    )
+
+    assert record.turn_id == "turn-1"
+    assert record.status == TurnStatus.ACCEPTED
+    assert record.learning_context == LearningContext(mode="practice")
+    assert record.learning_progress == LearningProgress()
+    assert record.exercise_state is None
+
+
+def test_public_catalog_does_not_expose_mysql_storage_discriminators() -> None:
+    repository = object.__new__(MySQLGatewayRepository)
+    connection = MagicMock()
+
+    catalog = MagicMock()
+    catalog.mappings.return_value.first.return_value = {
+        "revision": 1,
+        "updated_at": None,
+    }
+    topics = MagicMock()
+    topics.mappings.return_value.all.return_value = [
+        {
+            "id": "topic-1",
+            "name": "Transformer",
+            "description": "",
+            "status": "enabled",
+            "sort_order": 0,
+        }
+    ]
+    points = MagicMock()
+    points.mappings.return_value.all.return_value = []
+    blueprints = MagicMock()
+    blueprints.mappings.return_value.all.return_value = [
+        {
+            "kind": "exercise",
+            "payload_json": '{"id":"exercise-1","name":"QKV","kind":"exercise"}',
+        }
+    ]
+    connection.execute.side_effect = [catalog, topics, points, blueprints]
+    repository._engine = MagicMock()
+    repository._engine.connect.return_value.__enter__.return_value = connection
+
+    result = repository.get_teaching_catalog("workspace-1")
+
+    assert "sort_order" not in result["catalog"]["topics"][0]
+    assert result["catalog"]["exercise_blueprints"] == [
+        {"id": "exercise-1", "name": "QKV"}
+    ]
+
+
+def test_events_after_decodes_mysql_json_payloads() -> None:
+    repository = object.__new__(MySQLGatewayRepository)
+    connection = MagicMock()
+    rows = MagicMock()
+    rows.mappings.return_value.all.return_value = [
+        {
+            "id": "event-1",
+            "conversation_id": "session-1",
+            "sequence": 1,
+            "event_type": "message.delta",
+            "created_at": "2026-08-01T00:00:00Z",
+            "payload_json": '{"delta":"hello"}',
+        }
+    ]
+    connection.execute.return_value = rows
+    repository._engine = MagicMock()
+    repository._engine.connect.return_value.__enter__.return_value = connection
+
+    events = repository.events_after("turn-1")
+
+    assert events[0].payload == {"delta": "hello"}
+
+
+def test_events_after_accepts_reliability_handover_events() -> None:
+    repository = object.__new__(MySQLGatewayRepository)
+    connection = MagicMock()
+    rows = MagicMock()
+    rows.mappings.return_value.all.return_value = [
+        {
+            "id": "event-handover",
+            "conversation_id": "session-1",
+            "sequence": 8,
+            "event_type": "turn.handover",
+            "created_at": "2026-09-10T00:00:00Z",
+            "payload_json": '{"reason":"lease_expired"}',
+        }
+    ]
+    connection.execute.return_value = rows
+    repository._engine = MagicMock()
+    repository._engine.connect.return_value.__enter__.return_value = connection
+
+    events = repository.events_after("turn-1")
+
+    assert events[0].type == GatewayEventType.TURN_HANDOVER
+    assert events[0].payload == {"reason": "lease_expired"}
+
+
+def test_guided_session_stats_qualifies_created_at_after_user_join() -> None:
+    repository = object.__new__(MySQLGatewayRepository)
+    connection = MagicMock()
+    result = MagicMock()
+    result.mappings.return_value.all.return_value = []
+    connection.execute.return_value = result
+    repository._engine = MagicMock()
+    repository._engine.connect.return_value.__enter__.return_value = connection
+
+    assert repository.guided_session_stats(workspace_id="workspace-1", since="2026-08-01") == []
+
+    statement = str(connection.execute.call_args.args[0])
+    assert "ORDER BY s.created_at DESC" in statement
+
+
+def test_ensure_conversation_creates_and_verifies_the_parent_record() -> None:
+    connection = MagicMock()
+    empty = MagicMock()
+    empty.mappings.return_value.first.return_value = None
+    lookup = MagicMock()
+    lookup.mappings.return_value.one.return_value = {
+        "workspace_id": "default",
+        "owner_user_id": "user-1",
+    }
+    connection.execute.side_effect = [empty, MagicMock(), lookup]
+
+    MySQLGatewayRepository._ensure_conversation(
+        connection,
+        session_id="session_ecd63e64644e4df28801b77a49efe6e8",
+        workspace_id="default",
+        user_id="user-1",
+        title="hello",
+    )
+
+    insert_call = connection.execute.call_args_list[1]
+    assert "INSERT INTO nlp_conversations" in str(insert_call.args[0])
+    assert insert_call.args[1] == {
+        "id": "session_ecd63e64644e4df28801b77a49efe6e8",
+        "workspace": "default",
+        "user": "user-1",
+        "title": "hello",
+    }
+
+
+def test_ensure_conversation_rejects_an_identity_collision() -> None:
+    connection = MagicMock()
+    empty = MagicMock()
+    empty.mappings.return_value.first.return_value = None
+    lookup = MagicMock()
+    lookup.mappings.return_value.one.return_value = {
+        "workspace_id": "other",
+        "owner_user_id": "user-2",
+    }
+    connection.execute.side_effect = [empty, MagicMock(), lookup]
+
+    with pytest.raises(PermissionError, match="conversation identity"):
+        MySQLGatewayRepository._ensure_conversation(
+            connection,
+            session_id="session-shared",
+            workspace_id="default",
+            user_id="user-1",
+            title="hello",
+        )
+
+
+def test_create_turn_ensures_the_conversation_before_inserting_the_turn() -> None:
+    repository = object.__new__(MySQLGatewayRepository)
+    engine = MagicMock()
+    connection = engine.begin.return_value.__enter__.return_value
+    repository._engine = engine
+
+    with (
+        patch.object(MySQLGatewayRepository, "_ensure_conversation") as ensure,
+        patch.object(MySQLGatewayRepository, "_row", return_value={"id": "turn-1"}),
+        patch.object(MySQLGatewayRepository, "_record", return_value=sentinel.record),
+    ):
+        record, duplicate = repository.create_turn(
+            turn_id="turn-1",
+            session_id="session_ecd63e64644e4df28801b77a49efe6e8",
+            workspace_id="default",
+            user_id="user-1",
+            input_text="hello",
+            idempotency_key=None,
+        )
+
+    ensure.assert_called_once_with(
+        connection,
+        session_id="session_ecd63e64644e4df28801b77a49efe6e8",
+        workspace_id="default",
+        user_id="user-1",
+        title="hello",
+    )
+    assert "INSERT INTO nlp_turns" in str(connection.execute.call_args.args[0])
+    assert record is sentinel.record
+    assert duplicate is False
+
+
+def test_update_turn_preserves_cancelled_status_in_mysql_adapter() -> None:
+    repository = object.__new__(MySQLGatewayRepository)
+    transaction = MagicMock()
+    connection = transaction.__enter__.return_value
+    current = MagicMock()
+    current.mappings.return_value.first.return_value = {
+        "status": "cancelled",
+        "error_kind": None,
+        "claim_generation": 1,
+    }
+    connection.execute.return_value = current
+    repository._runtime_begin = MagicMock(return_value=transaction)
+    repository._row = MagicMock(return_value={"id": "turn-1", "status": "cancelled"})
+    repository._record = MagicMock(return_value=sentinel.cancelled_record)
+
+    result = repository.update_turn("turn-1", TurnStatus.COMPLETED, final_text="late answer")
+
+    assert result is sentinel.cancelled_record
+    assert connection.execute.call_count == 1
+    assert "UPDATE nlp_turns" not in str(connection.execute.call_args.args[0])
+
+
+def test_update_turn_rejects_a_stale_claim_generation() -> None:
+    repository = object.__new__(MySQLGatewayRepository)
+    transaction = MagicMock()
+    connection = transaction.__enter__.return_value
+    current = MagicMock()
+    current.mappings.return_value.first.return_value = {
+        "status": "running",
+        "error_kind": None,
+        "claim_generation": 2,
+    }
+    connection.execute.return_value = current
+    repository._runtime_begin = MagicMock(return_value=transaction)
+
+    with pytest.raises(TurnClaimMismatchError, match="turn-1"):
+        repository.update_turn(
+            "turn-1",
+            TurnStatus.COMPLETED,
+            expected_claim_generation=1,
+        )
+
+    assert connection.execute.call_count == 1
+
+
+def test_append_event_rejects_a_stale_claim_generation() -> None:
+    repository = object.__new__(MySQLGatewayRepository)
+    transaction = MagicMock()
+    connection = transaction.__enter__.return_value
+    generation = MagicMock()
+    generation.scalar_one_or_none.return_value = 2
+    connection.execute.return_value = generation
+    repository._runtime_begin = MagicMock(return_value=transaction)
+
+    with pytest.raises(TurnClaimMismatchError, match="turn-1"):
+        repository.append_event(
+            turn_id="turn-1",
+            session_id="session-1",
+            event_type=GatewayEventType.MESSAGE_DELTA,
+            payload={"delta": "stale"},
+            expected_claim_generation=1,
+        )
+
+    assert connection.execute.call_count == 1
+
+
+def test_create_turn_retries_the_complete_mysql_transaction_after_deadlock() -> None:
+    class Transaction:
+        def __init__(self, attempt: int, connections: list[MagicMock]) -> None:
+            self.attempt = attempt
+            self.connections = connections
+
+        def __enter__(self):
+            connection = MagicMock(name=f"connection-{self.attempt}")
+            self.connections.append(connection)
+            return connection
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            if self.attempt == 1:
+                raise OperationalError(
+                    "commit",
+                    {},
+                    RuntimeError(1213, "Deadlock found when trying to get lock"),
+                )
+            return False
+
+    class Engine:
+        def __init__(self) -> None:
+            self.begin_count = 0
+            self.connections: list[MagicMock] = []
+
+        def begin(self):
+            self.begin_count += 1
+            return Transaction(self.begin_count, self.connections)
+
+    repository = object.__new__(MySQLGatewayRepository)
+    engine = Engine()
+    repository._engine = engine
+    repository.quota_service = None
+
+    with (
+        patch.object(MySQLGatewayRepository, "_ensure_conversation"),
+        patch.object(MySQLGatewayRepository, "_row", return_value={"id": "turn-1"}),
+        patch.object(MySQLGatewayRepository, "_record", return_value=sentinel.record),
+    ):
+        record, duplicate = repository.create_turn(
+            turn_id="turn-1",
+            session_id="session-retry",
+            workspace_id="default",
+            user_id="user-1",
+            input_text="hello",
+            idempotency_key=None,
+        )
+
+    assert record is sentinel.record
+    assert duplicate is False
+    assert engine.begin_count == 2
+    assert len(engine.connections) == 2
+    assert engine.connections[0] is not engine.connections[1]

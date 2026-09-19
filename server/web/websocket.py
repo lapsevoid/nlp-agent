@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -13,15 +14,17 @@ from fastapi import WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 
 from core.identity import AuthenticatedPrincipal
+from core.rbac import Permission, authorization_service
 from gateway.contracts import GatewayEventType, InjectMessageRequest, SubmitTurnRequest
 from gateway.core import BackendGateway
-from gateway.events import GatewayEventSubscription
+from gateway.events import GatewayEventStreamInterrupted, GatewayEventSubscription
 from server.web.auth import (
     AuthenticationError,
     OriginRejectedError,
     SameOriginSessionAuth,
     SessionClaims,
 )
+from server.web.database_auth import DatabaseSessionAuth, DatabaseSessionClaims
 from server.web.contracts import (
     ChatCancelPayload,
     ChatInjectPayload,
@@ -34,6 +37,19 @@ from server.web.contracts import (
     parse_command_payload,
 )
 from server.web.protocol import control_event, gateway_event_envelope
+from server.quota.errors import QuotaRejectedError
+
+
+# The gateway repeats these checks at its transport-independent boundary.
+# This map keeps the protocol contract visible for WebSocket clients/reviewers.
+WS_COMMAND_PERMISSIONS: dict[str, Permission] = {
+    "chat.send": Permission.AGENT_TURN_SUBMIT,
+    "chat.inject": Permission.AGENT_SESSION_UPDATE,
+    "chat.cancel": Permission.AGENT_TURN_CANCEL,
+    "session.subscribe": Permission.AGENT_SESSION_READ,
+    "session.unsubscribe": Permission.AGENT_SESSION_READ,
+    "stream.resume": Permission.AGENT_EVENT_REPLAY,
+}
 
 
 @dataclass(slots=True)
@@ -73,11 +89,19 @@ class WebSocketHub:
         event: ServerEventEnvelope,
         *,
         user_id: str | None = None,
+        workspace_id: str | None = None,
     ) -> None:
         targets = [
             connection
             for connection in tuple(self._connections)
-            if user_id is None or connection.principal.user_id == user_id
+            if (
+                (user_id is None or connection.principal.user_id == user_id)
+                and (
+                    workspace_id is None
+                    or "*" in connection.principal.workspace_ids
+                    or workspace_id in connection.principal.workspace_ids
+                )
+            )
         ]
         if targets:
             await asyncio.gather(
@@ -104,6 +128,18 @@ class WebSocketHub:
                 *(connection.close(code=code, reason=reason) for connection in targets),
                 return_exceptions=True,
             )
+
+    async def close_user(
+        self, user_id: str, *, code: int = 4403, reason: str = "authorization changed"
+    ) -> None:
+        """Immediately terminate local sockets after a durable RBAC change.
+
+        The outbox event provides cross-process delivery; the direct close
+        prevents a changed role from retaining a socket until its guard tick.
+        """
+        targets = [item for item in tuple(self._connections) if item.principal.user_id == user_id]
+        if targets:
+            await asyncio.gather(*(item.close(code=code, reason=reason) for item in targets), return_exceptions=True)
 
     async def close(self) -> None:
         connections = list(self._connections)
@@ -136,9 +172,11 @@ class WebSocketConnection:
         max_queue: int,
         send_queue_size: int,
         send_timeout_s: float,
+        auth_session_id: str | None = None,
         session_fingerprint: bytes | None = None,
-        session_check: Callable[[], SessionClaims] | None = None,
-        session_touch: Callable[[], SessionClaims] | None = None,
+        session_check: Callable[[], Any] | None = None,
+        session_touch: Callable[[], Any] | None = None,
+        authorization_refresh: Callable[[], Awaitable[AuthenticatedPrincipal]] | None = None,
         session_check_interval_s: float = 20,
     ) -> None:
         self.websocket = websocket
@@ -153,9 +191,11 @@ class WebSocketConnection:
             maxsize=max(1, send_queue_size)
         )
         self.send_timeout_s = max(0.1, send_timeout_s)
+        self.auth_session_id = auth_session_id
         self.session_fingerprint = session_fingerprint
         self._session_check = session_check
         self._session_touch = session_touch
+        self._authorization_refresh = authorization_refresh
         self._session_check_interval_s = max(1.0, session_check_interval_s)
         self._sender_task: asyncio.Task[None] | None = None
         self._session_guard_task: asyncio.Task[None] | None = None
@@ -174,18 +214,30 @@ class WebSocketConnection:
                 name=f"websocket-session-guard:{self.principal.user_id}",
             )
 
-    def require_active_session(self, *, touch: bool) -> None:
+    async def require_active_session(self, *, touch: bool) -> None:
         validator = self._session_touch if touch else self._session_check
         if validator is not None:
-            validator()
+            result = validator()
+            if inspect.isawaitable(result):
+                await result
+
+    async def refresh_authorization(self) -> None:
+        if self._authorization_refresh is not None:
+            refreshed = await self._authorization_refresh()
+            if refreshed.authorization_version != self.principal.authorization_version:
+                raise PermissionError("authorization changed; reconnect required")
+            self.principal = refreshed
 
     async def _session_guard_loop(self) -> None:
         try:
             while True:
                 await asyncio.sleep(self._session_check_interval_s)
-                self.require_active_session(touch=False)
+                await self.require_active_session(touch=False)
+                await self.refresh_authorization()
         except AuthenticationError:
             await self._terminate(code=4401, reason="authentication expired")
+        except PermissionError:
+            await self._terminate(code=4403, reason="authorization revoked")
         except asyncio.CancelledError:
             raise
 
@@ -283,6 +335,8 @@ class WebSocketConnection:
         try:
             async for event in subscription:
                 await self._deliver_gateway_event(event)
+        except GatewayEventStreamInterrupted:
+            await self._terminate(code=1012, reason="event transport interrupted")
         except asyncio.CancelledError:
             raise
         finally:
@@ -380,64 +434,122 @@ class WebSocketConnection:
                 )
             )
 
+    @staticmethod
+    async def _wait_for_tasks(tasks: list[asyncio.Task[Any]]) -> None:
+        if not tasks:
+            return
+        waiter = asyncio.gather(*tasks, return_exceptions=True)
+        try:
+            await asyncio.shield(waiter)
+        except asyncio.CancelledError:
+            # Wait for tasks to finish but don't propagate cancellation further
+            # This ensures proper cleanup happens even when cancelled
+            await waiter
+            # Now raise the cancellation so higher-level logic knows it was cancelled
+            raise
+        except Exception:
+            # Handle any other exceptions during task waiting
+            pass
+
     async def _terminate(self, *, code: int, reason: str) -> None:
         if self._closed:
             return
         self._closed = True
         self._closed_event.set()
-        current = asyncio.current_task()
-        subscriptions = list(self._subscriptions.values())
-        tasks = list(self._subscription_tasks.values())
-        self._subscriptions.clear()
-        self._subscription_tasks.clear()
-        for subscription in subscriptions:
-            await subscription.close()
-        for task in tasks:
-            if task is not current and not task.done():
-                task.cancel()
-        wait_tasks = [task for task in tasks if task is not current]
-        if wait_tasks:
-            await asyncio.gather(*wait_tasks, return_exceptions=True)
-        if self._sender_task is not None and self._sender_task is not current:
-            if not self._sender_task.done():
-                self._sender_task.cancel()
-            await asyncio.gather(self._sender_task, return_exceptions=True)
-        if self._session_guard_task is not None and self._session_guard_task is not current:
-            if not self._session_guard_task.done():
-                self._session_guard_task.cancel()
-            await asyncio.gather(self._session_guard_task, return_exceptions=True)
         try:
-            await asyncio.wait_for(
-                self.websocket.close(code=code, reason=reason),
-                timeout=min(1.0, self.send_timeout_s),
-            )
-        except (asyncio.TimeoutError, RuntimeError, OSError):
-            pass
-        self._fail_queued_frames()
+            current = asyncio.current_task()
+            subscriptions = list(self._subscriptions.values())
+            tasks = list(self._subscription_tasks.values())
+            self._subscriptions.clear()
+            self._subscription_tasks.clear()
+
+            # Close all subscriptions
+            for subscription in subscriptions:
+                try:
+                    await subscription.close()
+                except Exception:
+                    pass  # Ignore errors during subscription cleanup
+
+            # Cancel all subscription tasks
+            for task in tasks:
+                if task is not current and not task.done():
+                    task.cancel()
+
+            # Wait for subscription tasks with protection against cancellation
+            wait_tasks = [task for task in tasks if task is not current]
+            if wait_tasks:
+                try:
+                    await asyncio.shield(self._wait_for_tasks(wait_tasks))
+                except asyncio.CancelledError:
+                    # Even if cancelled, continue with remaining cleanup
+                    pass
+
+            # Cancel and wait for sender task
+            if self._sender_task is not None and self._sender_task is not current:
+                if not self._sender_task.done():
+                    self._sender_task.cancel()
+                try:
+                    await asyncio.shield(self._wait_for_tasks([self._sender_task]))
+                except asyncio.CancelledError:
+                    # Even if cancelled, continue with remaining cleanup
+                    pass
+
+            # Cancel and wait for session guard task
+            if self._session_guard_task is not None and self._session_guard_task is not current:
+                if not self._session_guard_task.done():
+                    self._session_guard_task.cancel()
+                try:
+                    await asyncio.shield(self._wait_for_tasks([self._session_guard_task]))
+                except asyncio.CancelledError:
+                    # Even if cancelled, continue with remaining cleanup
+                    pass
+
+            # Close the WebSocket connection
+            try:
+                await asyncio.wait_for(
+                    self.websocket.close(code=code, reason=reason),
+                    timeout=min(1.0, self.send_timeout_s),
+                )
+            except (asyncio.TimeoutError, RuntimeError, OSError):
+                pass
+        finally:
+            self._fail_queued_frames()
 
     async def close(self, *, code: int = 1000, reason: str = "connection closed") -> None:
         await self._terminate(code=code, reason=reason)
 
 
-def _command_error(error: Exception) -> tuple[str, str]:
+def _command_error(error: Exception) -> tuple[str, str, dict[str, Any]]:
     name = type(error).__name__
+    if isinstance(error, QuotaRejectedError):
+        problem = error.problem
+        return (
+            problem.code.value,
+            problem.reason,
+            {
+                "remaining_micro": problem.remaining_micro,
+                "reset_at": problem.reset_at.isoformat() if problem.reset_at else None,
+                "allowed_model_profiles": list(problem.allowed_model_profiles),
+                "retryable": problem.retryable,
+            },
+        )
     if isinstance(error, ValidationError):
-        return "validation_error", "command payload is invalid"
+        return "validation_error", "command payload is invalid", {}
     if name == "TeachingConfigurationError":
-        return "teaching_configuration_error", str(error)
+        return "teaching_configuration_error", str(error), {}
     if isinstance(error, ValueError):
-        return "invalid_command", str(error)
+        return "invalid_command", str(error), {}
     if isinstance(error, FileNotFoundError):
-        return "not_found", str(error)
+        return "not_found", str(error), {}
     if isinstance(error, PermissionError):
-        return "forbidden", "resource access is forbidden"
+        return "forbidden", "resource access is forbidden", {}
     if name == "TurnConflictError":
-        return "turn_conflict", str(error)
+        return "turn_conflict", str(error), {}
     if name == "ResourceNotFoundError":
-        return "not_found", str(error)
+        return "not_found", str(error), {}
     if name == "GatewayNotStartedError":
-        return "gateway_unavailable", "Backend Gateway is not ready"
-    return "internal_error", "command failed"
+        return "gateway_unavailable", "Backend Gateway is not ready", {}
+    return "internal_error", "command failed", {}
 
 
 async def _dispatch_command(
@@ -445,6 +557,9 @@ async def _dispatch_command(
     command: CommandEnvelope,
 ) -> None:
     payload = parse_command_payload(command)
+    required = WS_COMMAND_PERMISSIONS.get(command.type)
+    if required is not None:
+        authorization_service.require(connection.principal, required)
     if isinstance(payload, ChatSendPayload):
         await connection.subscribe(payload.session_id)
         accepted = await connection.gateway.submit_turn(
@@ -452,9 +567,13 @@ async def _dispatch_command(
             SubmitTurnRequest(
                 session_id=payload.session_id,
                 content=payload.content,
+                attachments=[a.model_dump() for a in payload.attachments],
                 idempotency_key=payload.idempotency_key,
                 learning_context=payload.learning_context,
+                knowledge_book_context=payload.knowledge_book_context,
+                model_profile=payload.model_profile,
             ),
+            auth_session_id=connection.auth_session_id,
         )
         await connection.send(
             control_event(
@@ -547,10 +666,25 @@ async def websocket_endpoint(
     max_queue: int,
     send_queue_size: int,
     send_timeout_s: float,
+    principal_resolver: Callable[[SessionClaims | DatabaseSessionClaims], Awaitable[AuthenticatedPrincipal]] | None = None,
+    database_auth: DatabaseSessionAuth | None = None,
+    authorization_session_factory: Any | None = None,
 ) -> None:
     try:
-        auth.require_same_origin(websocket.headers.get("origin"), websocket.headers.get("host"))
-        claims = auth.authenticate(websocket.cookies.get(auth.cookie_name))
+        if database_auth is not None:
+            if authorization_session_factory is None:
+                raise AuthenticationError("database authentication is unavailable")
+            origin = websocket.headers.get("origin")
+            database_auth.require_same_origin(origin, websocket.headers.get("host"))
+            claims = await database_auth.consume_ws_ticket(
+                authorization_session_factory,
+                websocket.query_params.get("ticket"),
+                origin=origin,
+                host=websocket.headers.get("host"),
+            )
+        else:
+            auth.require_same_origin(websocket.headers.get("origin"), websocket.headers.get("host"))
+            claims = auth.authenticate(websocket.cookies.get(auth.cookie_name))
     except AuthenticationError:
         await websocket.close(code=4401, reason="authentication required")
         return
@@ -558,21 +692,53 @@ async def websocket_endpoint(
         await websocket.close(code=4403, reason="origin rejected")
         return
 
+    try:
+        principal = (
+            await principal_resolver(claims)
+            if principal_resolver is not None
+            else claims.principal()
+        )
+    except PermissionError:
+        await websocket.close(code=4403, reason="authorization rejected")
+        return
+
     session_token = websocket.cookies.get(auth.cookie_name)
+    session_fingerprint = (
+        database_auth.session_fingerprint_from_hash(claims.token_hash)
+        if isinstance(claims, DatabaseSessionClaims)
+        else auth.token_fingerprint(session_token)
+    )
+    if isinstance(claims, DatabaseSessionClaims):
+        assert database_auth is not None
+        assert authorization_session_factory is not None
+        session_check: Callable[[], Any] = lambda: database_auth.authenticate_session_id(
+            authorization_session_factory, claims.session_id, touch=False
+        )
+        session_touch: Callable[[], Any] = lambda: database_auth.authenticate_session_id(
+            authorization_session_factory, claims.session_id, touch=True
+        )
+        interval = min(20.0, float(database_auth.idle_timeout_s))
+    else:
+        session_check = lambda: auth.authenticate(session_token, touch=False)
+        session_touch = lambda: auth.authenticate(session_token)
+        interval = min(20.0, float(getattr(auth, "idle_timeout_s", 900)))
     connection = WebSocketConnection(
         websocket,
         gateway,
-        claims.principal(),
+        principal,
         max_queue=max_queue,
         send_queue_size=send_queue_size,
         send_timeout_s=send_timeout_s,
-        session_fingerprint=auth.token_fingerprint(session_token),
-        session_check=lambda: auth.authenticate(session_token, touch=False),
-        session_touch=lambda: auth.authenticate(session_token),
-        session_check_interval_s=min(
-            20.0,
-            float(getattr(auth, "idle_timeout_s", 900)),
+        auth_session_id=(claims.session_id if isinstance(claims, DatabaseSessionClaims) else None),
+        session_fingerprint=session_fingerprint,
+        session_check=session_check,
+        session_touch=session_touch,
+        authorization_refresh=(
+            (lambda: principal_resolver(claims))
+            if principal_resolver is not None
+            else None
         ),
+        session_check_interval_s=interval,
     )
     if not hub.try_add(connection):
         await websocket.close(code=4429, reason="connection limit reached")
@@ -583,8 +749,8 @@ async def websocket_endpoint(
         control_event(
             "connection.ready",
             payload={
-                "user_id": claims.user_id,
-                "workspace_ids": sorted(claims.workspace_ids),
+                "user_id": principal.user_id,
+                "workspace_ids": sorted(principal.workspace_ids),
                 "protocol_version": "1",
             },
         ),
@@ -597,7 +763,20 @@ async def websocket_endpoint(
         await _receive_commands(websocket, connection, max_message_bytes)
     finally:
         hub.discard(connection)
-        await connection.close()
+        try:
+            await connection.close()
+        except asyncio.CancelledError:
+            # Re-raise cancellation but ensure basic cleanup happens
+            # The connection will be marked as closed in all cases
+            if not connection._closed:
+                connection._closed = True
+                connection._closed_event.set()
+            raise
+        except Exception:
+            # Other exceptions during close are logged but not propagated
+            if not connection._closed:
+                connection._closed = True
+                connection._closed_event.set()
 
 
 async def _receive_commands(
@@ -616,20 +795,21 @@ async def _receive_commands(
             try:
                 command = CommandEnvelope.model_validate(json.loads(raw))
                 request_id = command.request_id
-                connection.require_active_session(touch=command.type != "ping")
+                await connection.require_active_session(touch=command.type != "ping")
+                await connection.refresh_authorization()
                 await _dispatch_command(connection, command)
             except AuthenticationError:
                 await connection.close(code=4401, reason="authentication expired")
                 return
             except (json.JSONDecodeError, ValidationError, ValueError, PermissionError, RuntimeError, LookupError, FileNotFoundError) as error:
-                code, message = _command_error(error)
+                code, message, details = _command_error(error)
                 session_id = command.payload.get("session_id") if command is not None else None
                 await connection.send(
                     control_event(
                         "command.error",
                         request_id=request_id,
                         session_id=session_id if isinstance(session_id, str) else None,
-                        payload={"code": code, "message": message},
+                        payload={"code": code, "message": message, **details},
                     )
                 )
     # A browser may cancel an upgrade while the server is yielding to its

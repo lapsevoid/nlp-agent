@@ -6,9 +6,9 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from core.learning import ExerciseState, LearningContext, LearningProgress
+from core.learning import ExerciseState, KnowledgeBookContext, LearningContext, LearningProgress
 
 
 def utc_now() -> datetime:
@@ -24,9 +24,14 @@ class TurnStatus(str, Enum):
     INTERRUPTED = "interrupted"
 
 
+class TurnClaimMismatchError(RuntimeError):
+    """A stale Worker attempted to mutate a Turn owned by another generation."""
+
+
 class GatewayEventType(str, Enum):
     TURN_ACCEPTED = "turn.accepted"
     TURN_STARTED = "turn.started"
+    TURN_HANDOVER = "turn.handover"
     TURN_COMPLETED = "turn.completed"
     TURN_FAILED = "turn.failed"
     TURN_CANCELLED = "turn.cancelled"
@@ -61,10 +66,21 @@ class SubmitTurnRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     session_id: str
-    content: str = Field(min_length=1, max_length=200_000)
+    content: str = Field(default="", max_length=200_000)
+    attachments: list[dict[str, str]] = Field(default_factory=list)
     idempotency_key: str | None = Field(default=None, max_length=128)
     learning_context: LearningContext | None = None
+    knowledge_book_context: KnowledgeBookContext | None = None
     evaluation: EvaluationContext | None = None
+    model_profile: str | None = Field(
+        default=None, pattern=r"^[a-z][a-z0-9_-]{0,63}$"
+    )
+
+    @model_validator(mode="after")
+    def require_content_or_attachment(self) -> "SubmitTurnRequest":
+        if not self.content.strip() and not self.attachments:
+            raise ValueError("content 或 attachments 至少提供一项")
+        return self
 
 
 class InjectMessageRequest(BaseModel):
@@ -146,6 +162,10 @@ class GatewayNotStartedError(RuntimeError):
 
 class TurnConflictError(RuntimeError):
     pass
+
+
+class KnowledgeBookRevisionConflictError(ValueError):
+    """Raised when a teacher saves a stale knowledge-book revision."""
 
 
 class ResourceNotFoundError(LookupError):

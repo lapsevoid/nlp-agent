@@ -9,6 +9,7 @@ from langchain_core.language_models import LanguageModelInput
 from langchain_core.messages import AIMessage
 from langchain_deepseek import ChatDeepSeek
 
+from core.model_runtime.network import model_http_client_kwargs
 from core.model_runtime.contracts import (
     ModelDefinition,
     ModelPresetConfig,
@@ -35,23 +36,31 @@ class DeepSeekChatModel(ChatDeepSeek):
         messages = self._convert_input(input_).to_messages()
         payload = super()._get_request_payload(input_, stop=stop, **kwargs)
         payload_messages = payload.get("messages", [])
+        replay_all_reasoning = bool(payload.get("tools"))
         for index, message in enumerate(messages):
             if not isinstance(message, AIMessage) or index >= len(payload_messages):
                 continue
             reasoning = message.additional_kwargs.get("reasoning_content")
-            # DeepSeek requires CoT replay for assistant messages that initiated
-            # tool calls. For plain completed turns the field is ignored and is
-            # deliberately omitted to keep request prefixes stable.
-            if reasoning and message.tool_calls:
+            # Function-calling requests must replay the reasoning from every
+            # preceding assistant turn, including turns that did not call a
+            # tool. Without tools, retain the narrower replay used by existing
+            # tool-call histories so plain request prefixes remain stable.
+            if reasoning and (replay_all_reasoning or message.tool_calls):
                 payload_messages[index]["reasoning_content"] = reasoning
         return payload
 
     def _create_chat_result(self, response: Any, generation_info: dict | None = None):
         result = super()._create_chat_result(response, generation_info)
         raw = response.model_dump() if hasattr(response, "model_dump") else dict(response)
-        usage = normalize_usage(raw.get("usage") or {})
+        response_id = raw.get("id")
+        raw_usage = raw.get("usage") or {}
+        usage = normalize_usage(raw_usage)
         for generation in result.generations:
+            if response_id:
+                generation.message.response_metadata["provider_response_id"] = response_id
+                generation.message.additional_kwargs["provider_response_id"] = response_id
             generation.message.additional_kwargs["provider_usage"] = usage
+            generation.message.additional_kwargs["provider_usage_raw"] = raw_usage
             if usage["total_tokens"]:
                 generation.message.usage_metadata = {
                     "input_tokens": usage["input_tokens"],
@@ -68,16 +77,27 @@ class DeepSeekChatModel(ChatDeepSeek):
         result = super()._convert_chunk_to_generation_chunk(
             chunk, default_chunk_class, base_generation_info
         )
-        if result is not None and chunk.get("usage"):
-            usage = normalize_usage(chunk["usage"])
-            result.message.additional_kwargs["provider_usage"] = usage
-            result.message.usage_metadata = {
-                "input_tokens": usage["input_tokens"],
-                "output_tokens": usage["output_tokens"],
-                "total_tokens": usage["total_tokens"],
-                "input_token_details": usage["input_token_details"],
-                "output_token_details": usage["output_token_details"],
-            }
+        if result is not None:
+            if chunk.get("usage"):
+                # DeepSeek repeats response ids across streamed chunks. Attaching
+                # the id only to the terminal usage chunk prevents LangChain from
+                # concatenating it during chunk aggregation.
+                response_id = chunk.get("id")
+                if response_id:
+                    result.message.response_metadata["provider_response_id"] = response_id
+                    result.message.additional_kwargs["provider_response_id"] = response_id
+                raw_usage = chunk["usage"]
+                usage = normalize_usage(raw_usage, default_semantics="cumulative")
+                result.message.additional_kwargs["provider_usage"] = usage
+                result.message.additional_kwargs["provider_usage_raw"] = raw_usage
+                result.message.additional_kwargs["provider_usage_semantics"] = usage["usage_semantics"]
+                result.message.usage_metadata = {
+                    "input_tokens": usage["input_tokens"],
+                    "output_tokens": usage["output_tokens"],
+                    "total_tokens": usage["total_tokens"],
+                    "input_token_details": usage["input_token_details"],
+                    "output_token_details": usage["output_token_details"],
+                }
         return result
 
 
@@ -126,6 +146,7 @@ class DeepSeekAdapter:
             "default_headers": provider.default_headers or None,
             "extra_body": {"thinking": thinking},
         }
+        kwargs.update(model_http_client_kwargs(provider.base_url, timeout))
         effort = self._effort(preset)
         if effort:
             kwargs["reasoning_effort"] = effort

@@ -20,6 +20,7 @@ from core.tool_runtime import (
     ToolSource,
     global_tool_runtime,
 )
+from core.rbac import required_permission_for_high_risk_tool
 from server.tools.tool_manager import register_builtin_tools
 from utils.logger import get_logger
 
@@ -43,10 +44,16 @@ class PhysicalToolManager:
     def refresh_config(self) -> None:
         self.config = load_agent_runtime_config()
 
+    def ensure_custom_tools(self) -> list[str]:
+        """Load local custom tools without starting external MCP clients."""
+        if self._extensions_loaded:
+            return []
+        registered = load_custom_tools(self.config.tools.custom, self.runtime.catalog)
+        self._extensions_loaded = True
+        return registered
+
     async def start_extensions(self) -> None:
-        if not self._extensions_loaded:
-            load_custom_tools(self.config.tools.custom, self.runtime.catalog)
-            self._extensions_loaded = True
+        self.ensure_custom_tools()
         await self.runtime.start_mcp(self.config.tools.mcp_servers)
 
     async def close(self) -> None:
@@ -70,6 +77,11 @@ class PhysicalToolManager:
         max_concurrency: int = 0,
         retry: ToolRetryPolicy | None = None,
     ) -> None:
+        if risk in {ToolRisk.HIGH, ToolRisk.CRITICAL}:
+            # Enforced at registration, before the descriptor can reach a
+            # model-visible ToolSet.  The execution boundary checks the
+            # resulting permission again with the live principal.
+            required_permission_for_high_risk_tool(tool.name)
         descriptor = ToolDescriptor(
             name=tool.name,
             description=tool.description or tool.name,
@@ -162,17 +174,20 @@ class PhysicalToolManager:
         denied_names: Iterable[str] = (),
         session_id: str = "",
         profile: str = "",
+        inherit_policy: bool = True,
         allow_high_risk: bool = False,
     ) -> ToolSet:
         policy = self.config.tools.policies.worker
+        policy_tools = policy.allowed_tools if inherit_policy else set()
+        policy_capabilities = policy.allowed_capabilities if inherit_policy else set()
         return self.runtime.build_toolset(
             ToolGrantRequest(
                 role=ToolScope.WORKER,
                 session_id=session_id,
                 profile=profile,
-                allowed_tools=frozenset({*policy.allowed_tools, *allowed_names}),
+                allowed_tools=frozenset({*policy_tools, *allowed_names}),
                 allowed_capabilities=frozenset(
-                    {*policy.allowed_capabilities, *capabilities}
+                    {*policy_capabilities, *capabilities}
                 ),
                 denied_tools=frozenset({*policy.denied_tools, *denied_names}),
                 denied_capabilities=frozenset(policy.denied_capabilities),
