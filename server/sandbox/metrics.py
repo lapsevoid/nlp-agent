@@ -14,8 +14,10 @@ from sqlalchemy import func, or_, select
 
 from server.infrastructure.mysql.models import (
     RoleModel,
+    SessionModel,
     SandboxLeaseModel,
     SandboxRuntimeInstanceModel,
+    UserModel,
     UserRoleModel,
 )
 
@@ -110,9 +112,17 @@ async def collect_sandbox_lease_demand(
     current_time = (now or datetime.now(UTC)).replace(tzinfo=None)
     active_rows = (
         await session.execute(
-            select(SandboxLeaseModel.user_id, SandboxLeaseModel.runtime_instance_id).where(
+            select(SandboxLeaseModel.user_id, SandboxLeaseModel.runtime_instance_id)
+            .join(SessionModel, SessionModel.id == SandboxLeaseModel.auth_session_id)
+            .join(UserModel, UserModel.id == SandboxLeaseModel.user_id)
+            .where(
                 SandboxLeaseModel.state == "active",
                 SandboxLeaseModel.expires_at > current_time,
+                SessionModel.revoked_at.is_(None),
+                SessionModel.expires_at > current_time,
+                SessionModel.authorization_version == UserModel.authorization_version,
+                UserModel.status == "active",
+                UserModel.deleted_at.is_(None),
             )
         )
     ).all()

@@ -14,9 +14,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.infrastructure.mysql.models import (
     RoleModel,
+    SessionModel,
     SandboxEnvironmentModel,
     SandboxLeaseModel,
     SandboxRuntimeInstanceModel,
+    UserModel,
     UserRoleModel,
 )
 
@@ -118,11 +120,18 @@ class WarmPoolService:
             (
                 await session.scalars(
                     select(SandboxLeaseModel.user_id)
+                    .join(SessionModel, SessionModel.id == SandboxLeaseModel.auth_session_id)
+                    .join(UserModel, UserModel.id == SandboxLeaseModel.user_id)
                     .where(
                         SandboxLeaseModel.id != current_lease_id,
                         SandboxLeaseModel.state == "active",
                         SandboxLeaseModel.runtime_instance_id.is_(None),
                         SandboxLeaseModel.expires_at > now,
+                        SessionModel.revoked_at.is_(None),
+                        SessionModel.expires_at > now,
+                        SessionModel.authorization_version == UserModel.authorization_version,
+                        UserModel.status == "active",
+                        UserModel.deleted_at.is_(None),
                     )
                     .limit(100)
                 )
