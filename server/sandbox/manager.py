@@ -30,6 +30,15 @@ def _utc_now() -> datetime:
     return datetime.now(UTC).replace(tzinfo=None)
 
 
+def _is_recent_capacity_sample(raw_timestamp: object, *, now_timestamp: float, max_age_seconds: float = 300.0) -> bool:
+    """Accept only finite, non-future samples inside the feedback window."""
+    try:
+        timestamp = float(raw_timestamp or 0)
+    except (TypeError, ValueError):
+        return False
+    return 0 < timestamp <= now_timestamp and now_timestamp - timestamp <= max_age_seconds
+
+
 def refill_deficit(
     *,
     target: int,
@@ -263,8 +272,9 @@ class WarmPoolManager:
                 for sample in await recent(limit=12):
                     if not isinstance(sample, dict):
                         continue
-                    stamp = float(sample.get("timestamp", 0) or 0)
-                    if stamp <= 0 or now_timestamp - stamp <= 300:
+                    if _is_recent_capacity_sample(
+                        sample.get("timestamp"), now_timestamp=now_timestamp
+                    ):
                         sample_window.append(sample)
                 if sample_window:
                     desired = self._adaptive_policy.target_for_samples(
@@ -290,13 +300,15 @@ class WarmPoolManager:
             try:
                 sample = await latest()
                 if sample:
-                    stamp = float(sample.get("timestamp", 0) or 0)
-                    if stamp <= 0 or datetime.now(UTC).timestamp() - stamp <= 300:
+                    now_timestamp = datetime.now(UTC).timestamp()
+                    if _is_recent_capacity_sample(
+                        sample.get("timestamp"), now_timestamp=now_timestamp
+                    ):
                         arrival_rate = max(0.0, float(sample.get("arrival_rate_per_min", arrival_rate)))
                         refill_p95 = max(0.0, float(sample.get("refill_p95_s", refill_p95)))
                         unassigned_lease_count = max(0, int(sample.get("unassigned_count", 0) or 0))
                     else:
-                        self._trace("sandbox.manager.metrics.stale", age_seconds=round(datetime.now(UTC).timestamp() - stamp, 1))
+                        self._trace("sandbox.manager.metrics.stale")
             except Exception as error:
                 self._trace("sandbox.manager.metrics.unavailable", error=type(error).__name__)
             desired = self.recommended_ready_target(
