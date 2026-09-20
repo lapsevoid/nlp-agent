@@ -130,6 +130,7 @@ async def run_forever() -> None:
         kernel_image=settings.NLP_AGENT_SANDBOX_FIRECRACKER_KERNEL_IMAGE.strip() or None,
         rootfs_image=settings.NLP_AGENT_SANDBOX_FIRECRACKER_ROOTFS_IMAGE.strip() or None,
         client=kubernetes_client,
+        namespace=settings.NLP_AGENT_SANDBOX_NAMESPACE.strip(),
     )
     manager = WarmPoolManager(
         session_factory=create_session_factory(engine),

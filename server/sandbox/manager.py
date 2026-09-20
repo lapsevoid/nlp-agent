@@ -20,6 +20,7 @@ from server.infrastructure.mysql.models import SandboxEnvironmentModel, SandboxL
 
 from .contracts import SandboxScope
 from .faults import SandboxFaultInjector
+from .host_budget import host_budget_lock
 from .optimization import AdaptivePoolPolicy, host_capacity_allows_create, refill_count
 from .runtime_adapters import SandboxRuntimeAdapter
 from .runtime_profile import DEFAULT_SANDBOX_RUNTIME_LIMITS
@@ -364,6 +365,10 @@ class WarmPoolManager:
         self._requested_target = min(target, upper)
 
     async def refill(self) -> int:
+        async with host_budget_lock(settings.NLP_AGENT_SANDBOX_HOST_LOCK_FILE):
+            return await self._refill_locked()
+
+    async def _refill_locked(self) -> int:
         """Create only the deficit. Docker runs outside every database transaction."""
         self._trace("sandbox.manager.refill.started", profile=self._resource_profile_id)
         lock_name = f"nova.sandbox.pool.{self._resource_profile_id}"
@@ -388,7 +393,8 @@ class WarmPoolManager:
                 )
                 for _ in range(deficit):
                     if not await self._host_allows_create(
-                        total_count=counts.total_count + len(reserved_runtime_ids)
+                        total_count=counts.total_count + len(reserved_runtime_ids),
+                        reserved_count=len(reserved_runtime_ids),
                     ):
                         self._trace(
                             "sandbox.manager.capacity.host_guard",
@@ -427,18 +433,36 @@ class WarmPoolManager:
             result = await result
         return result if isinstance(result, dict) else None
 
-    async def _host_allows_create(self, *, total_count: int) -> bool:
+    async def _host_runtime_count(self) -> int | None:
+        probe = getattr(self._docker, "host_managed_runtime_count", None)
+        if probe is None:
+            return None
+        result = probe()
+        if asyncio.iscoroutine(result):
+            result = await result
+        try:
+            return max(0, int(result))
+        except (TypeError, ValueError):
+            return None
+
+    async def _host_allows_create(self, *, total_count: int, reserved_count: int = 0) -> bool:
+        host_runtime_count = await self._host_runtime_count()
+        host_total_max = max(0, int(settings.NLP_AGENT_SANDBOX_HOST_RUNTIME_TOTAL_MAX))
+        effective_total_count = total_count
+        if host_runtime_count is not None:
+            effective_total_count = max(effective_total_count, host_runtime_count + reserved_count)
         resources = await self._host_resources()
         if resources is None:
-            # Non-Docker adapters may not expose host telemetry. The global
-            # Runtime cap still protects those adapters.
-            return total_count < settings.NLP_AGENT_SANDBOX_RUNTIME_TOTAL_MAX
+            # Non-Docker adapters may not expose host telemetry. Docker's
+            # cross-Compose count still protects the shared host budget.
+            total_max = host_total_max if host_runtime_count is not None else settings.NLP_AGENT_SANDBOX_RUNTIME_TOTAL_MAX
+            return effective_total_count < total_max
         available_memory = resources.get("available_memory_mb")
         disk_free = resources.get("disk_free_gb")
         if available_memory is not None and disk_free is not None:
             return host_capacity_allows_create(
-                total_count=total_count,
-                total_max=settings.NLP_AGENT_SANDBOX_RUNTIME_TOTAL_MAX,
+                total_count=effective_total_count,
+                total_max=host_total_max if host_runtime_count is not None else settings.NLP_AGENT_SANDBOX_RUNTIME_TOTAL_MAX,
                 available_memory_mb=float(available_memory),
                 memory_reserve_mb=settings.NLP_AGENT_SANDBOX_HOST_MEMORY_RESERVE_MB,
                 runtime_memory_mb=DEFAULT_SANDBOX_RUNTIME_LIMITS.memory_mb,
@@ -449,7 +473,8 @@ class WarmPoolManager:
             return False
         if available_memory is not None and float(available_memory) < settings.NLP_AGENT_SANDBOX_HOST_MEMORY_RESERVE_MB + DEFAULT_SANDBOX_RUNTIME_LIMITS.memory_mb:
             return False
-        return total_count < settings.NLP_AGENT_SANDBOX_RUNTIME_TOTAL_MAX
+        total_max = host_total_max if host_runtime_count is not None else settings.NLP_AGENT_SANDBOX_RUNTIME_TOTAL_MAX
+        return effective_total_count < total_max
 
     async def capacity_snapshot(self) -> dict[str, object]:
         """Management-plane capacity data for dashboards and alert thresholds."""

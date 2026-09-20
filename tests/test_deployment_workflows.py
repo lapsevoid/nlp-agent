@@ -284,7 +284,7 @@ def test_deploy_workflows_overlay_published_digests_without_mutating_server_env(
         assert "The deployment directory" in workflow
 
 
-def test_test_deploy_cleans_before_and_after_pull_without_removing_volumes() -> None:
+def test_test_deploy_does_not_prune_shared_docker_resources() -> None:
     workflow = yaml.safe_load(
         (ROOT / ".github" / "workflows" / "publish-test-image.yml").read_text(
             encoding="utf-8"
@@ -296,26 +296,30 @@ def test_test_deploy_cleans_before_and_after_pull_without_removing_volumes() -> 
         for index, step in enumerate(steps)
         if step.get("name")
     }
-    cleanup_index, cleanup = named_steps["Cleanup unused Docker resources"]
     deploy_index, deploy = named_steps["Deploy the published GHCR image"]
-    post_cleanup_index, post_cleanup = named_steps["Cleanup Docker resources after deployment"]
+    post_cleanup = named_steps["Report Docker disk usage after deployment"][1]
 
-    # The runner keeps the database/Redis/application volumes, but old image
-    # layers, networks, containers, and builder cache have no deployment value.
-    assert cleanup_index < deploy_index
-    assert deploy_index < post_cleanup_index
-    assert cleanup.get("if") != "always()"
+    all_runs = "\n".join(step.get("run", "") for step in steps)
+    assert "docker system prune" not in all_runs
+    assert "docker builder prune" not in all_runs
     assert post_cleanup.get("if") == "always()"
-    for step in (cleanup, post_cleanup):
-        assert "docker system prune -af" in step["run"]
-        assert "docker builder prune -af" in step["run"]
-        assert "--volumes" not in step["run"]
-        assert "docker volume prune" not in step["run"]
     assert "docker system df" in post_cleanup["run"]
     assert 'docker pull --quiet "$SANDBOX_CONFIGURED_REF"' in deploy["run"]
     assert "pull --quiet nova-migrate nova-web nova-worker nova-monitor nova-sandbox-manager nginx" in deploy["run"]
     assert 'docker image inspect "$SANDBOX_CONFIGURED_REF"' in deploy["run"]
+    assert 'NLP_AGENT_SANDBOX_NAMESPACE=\\"test\\"' in deploy["run"]
+    assert 'NLP_AGENT_SANDBOX_HOST_RUNTIME_TOTAL_MAX=\\"4\\"' in deploy["run"]
+    assert "config --format json" in deploy["run"]
+    assert "18765, 18766" in deploy["run"]
     assert "timeout-minutes" not in workflow["jobs"]["deploy"]
+
+
+def test_release_deploy_overlays_production_namespace_and_validates_ports() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "release-prod.yml").read_text(encoding="utf-8")
+    assert 'NLP_AGENT_SANDBOX_NAMESPACE=\\"prod\\"' in workflow
+    assert 'NLP_AGENT_SANDBOX_HOST_RUNTIME_TOTAL_MAX=\\"4\\"' in workflow
+    assert "config --format json" in workflow
+    assert "8765, 8766" in workflow
 
 
 def test_compose_limits_container_stdout_log_growth() -> None:

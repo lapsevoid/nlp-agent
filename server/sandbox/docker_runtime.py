@@ -74,6 +74,7 @@ class DockerRuntimeConfig:
     shm_size: str = f"{DEFAULT_SANDBOX_RUNTIME_LIMITS.shm_mb}m"
     runtime: str = "runsc"
     allow_local_image_id: bool = False
+    namespace: str = "local"
 
     def __post_init__(self) -> None:
         local_image_id = re.fullmatch(r"sha256:[0-9a-fA-F]{64}", self.image) is not None
@@ -81,6 +82,8 @@ class DockerRuntimeConfig:
             raise ValueError("sandbox runtime image must be pinned by immutable digest")
         if self.runtime != "runsc":
             raise ValueError("Phase 3 sandbox runtime must use gVisor runsc")
+        if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,62}[a-z0-9]", self.namespace) and not re.fullmatch(r"[a-z0-9]", self.namespace):
+            raise ValueError("sandbox namespace must be a lowercase Docker label value")
 
 
 class DockerRuntimeAdapter:
@@ -108,6 +111,7 @@ class DockerRuntimeAdapter:
             "docker", "run", "--detach", "--name", name,
             "--runtime", self.config.runtime,
             "--label", "nova.sandbox.managed=true",
+            "--label", f"nova.sandbox.namespace={self.config.namespace}",
             "--label", "nova.sandbox.state=ready_unbound",
             "--read-only", "--network", "none", "--cap-drop", "ALL",
             "--security-opt", "no-new-privileges=true",
@@ -314,9 +318,11 @@ class DockerRuntimeAdapter:
         return json.loads(stdout.decode("utf-8"))
 
     async def managed_runtime_ids(self) -> set[str]:
-        """List only Manager-owned containers; never enumerate arbitrary Docker work."""
+        """List only this deployment's containers; unknown namespaces are untouched."""
         process = await asyncio.create_subprocess_exec(
-            "docker", "ps", "--all", "--no-trunc", "--quiet", "--filter", "label=nova.sandbox.managed=true",
+            "docker", "ps", "--all", "--no-trunc", "--quiet",
+            "--filter", "label=nova.sandbox.managed=true",
+            "--filter", f"label=nova.sandbox.namespace={self.config.namespace}",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -324,3 +330,16 @@ class DockerRuntimeAdapter:
         if process.returncode != 0:
             raise RuntimeError(stderr.decode("utf-8", "replace").strip())
         return {line for line in stdout.decode("utf-8", "replace").splitlines() if line}
+
+    async def host_managed_runtime_count(self) -> int:
+        """Count all managed namespaces for the shared host budget guard."""
+        process = await asyncio.create_subprocess_exec(
+            "docker", "ps", "--all", "--no-trunc", "--quiet",
+            "--filter", "label=nova.sandbox.managed=true",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await _communicate(process)
+        if process.returncode != 0:
+            raise RuntimeError(stderr.decode("utf-8", "replace").strip())
+        return sum(bool(line.strip()) for line in stdout.decode("utf-8", "replace").splitlines())

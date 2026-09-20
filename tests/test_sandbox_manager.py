@@ -55,6 +55,40 @@ def test_manager_host_guard_blocks_new_runtime_when_headroom_is_low() -> None:
     assert asyncio.run(manager._host_allows_create(total_count=1)) is False
 
 
+def test_manager_host_guard_counts_runtime_containers_from_other_namespaces() -> None:
+    from configs.settings import settings
+    from server.sandbox.manager import WarmPoolManager
+
+    class Docker:
+        runtime_kind = "docker"
+        image_digest = "registry.example/nova@sha256:" + "b" * 64
+
+        def host_resources(self) -> dict[str, float]:
+            return {"available_memory_mb": 32_000.0, "disk_free_gb": 100.0}
+
+        async def host_managed_runtime_count(self) -> int:
+            return settings.NLP_AGENT_SANDBOX_HOST_RUNTIME_TOTAL_MAX
+
+    manager = WarmPoolManager(
+        session_factory=object(),
+        docker=Docker(),
+        resource_profile_id="python-base",
+        ready_target=2,
+    )
+
+    assert asyncio.run(manager._host_allows_create(total_count=0)) is False
+
+
+def test_host_budget_lock_is_optional_for_local_single_process_development() -> None:
+    from server.sandbox.host_budget import host_budget_lock
+
+    async def exercise() -> bool:
+        async with host_budget_lock(""):
+            return True
+
+    assert asyncio.run(exercise()) is True
+
+
 def test_manager_recommended_target_includes_unassigned_online_leases() -> None:
     from server.sandbox.manager import WarmPoolManager
     from server.sandbox.optimization import AdaptivePoolPolicy
