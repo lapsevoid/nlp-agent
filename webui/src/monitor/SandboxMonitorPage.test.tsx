@@ -80,7 +80,7 @@ describe("SandboxMonitorPage", () => {
       { timestamp: sampledNow - 2, ready: 4, creating: 0, target: 5, deficit: 0 },
     ];
 
-    const visible = mergeSandboxCapacitySamples(current, incoming, now);
+    const visible = mergeSandboxCapacitySamples(current, incoming);
 
     expect(visible).toHaveLength(2);
     expect(visible.at(-1)).toMatchObject({ timestamp: sampledNow - 2, ready: 4, creating: 0 });

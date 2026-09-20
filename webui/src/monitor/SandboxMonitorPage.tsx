@@ -171,7 +171,6 @@ export function normalizeSandboxCapacitySamples(
 export function mergeSandboxCapacitySamples(
   current: SandboxCapacitySample[],
   incoming: SandboxCapacitySample[],
-  _now = Date.now(),
 ): SandboxCapacitySample[] {
   const normalizedCurrent = normalizeSandboxCapacitySamples(current);
   const normalizedIncoming = normalizeSandboxCapacitySamples(incoming);

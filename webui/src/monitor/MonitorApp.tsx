@@ -304,7 +304,7 @@ export function MonitorApp() {
     if (page === "errors") return <MonitorErrorsPage days={days} onOpenProblem={navigateToTraceFilter} />;
     if (page === "storage") return <MonitorStoragePage storage={storage} retentionDays={storageRetentionDays(storage)} onPrune={async () => { setStorage(await monitorApi.prune()); }} />;
     return <MonitorOverviewPage data={overview} usage={usage} systemUsage={systemUsage} />;
-  }, [days, drainSandbox, events, eventsError, eventsLoading, handleAuthFailure, live, loadEvents, loadSandbox, loadSandboxMore, navigateToTraceFilter, openTraceById, overview, page, sandboxError, sandboxExecutionPage, sandboxExecutions, sandboxListLoading, sandboxLive, sandboxLoading, sandboxLogLoading, sandboxLogs, sandboxOverview, sandboxRuntimePage, sandboxRuntimes, storage, systemUsage, traceFocus, traceQuery, usage]);
+  }, [days, drainSandbox, events, eventsError, eventsLoading, handleAuthFailure, live, loadEvents, loadSandbox, loadSandboxMore, navigateToTraceFilter, openTraceById, overview, page, sandboxError, sandboxExecutionPage, sandboxExecutions, sandboxHistoryMinutes, sandboxListLoading, sandboxLive, sandboxLoading, sandboxLogLoading, sandboxLogs, sandboxOverview, sandboxRuntimePage, sandboxRuntimes, storage, systemUsage, traceFocus, traceQuery, usage]);
   if (authState === "checking") return <main className="monitor-auth-shell"><div className="monitor-auth-loading"><RefreshCw className="spin" /><span>正在验证监控权限…</span></div></main>;
   if (authState === "login") return <MonitorLoginPage message={authMessageText} onLogin={login} />;
   const canReset = monitorSession?.permissions?.includes("system:runtime:reset") ?? false;
