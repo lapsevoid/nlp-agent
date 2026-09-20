@@ -216,6 +216,39 @@ def test_manager_ignores_future_or_malformed_capacity_samples() -> None:
     assert asyncio.run(manager._effective_ready_target()) == 1
 
 
+def test_manual_manager_target_expires_and_returns_to_adaptive_policy() -> None:
+    from server.sandbox.manager import WarmPoolManager
+    from server.sandbox.optimization import AdaptivePoolPolicy
+
+    class Docker:
+        runtime_kind = "docker"
+        image_digest = "registry.example/nova@sha256:" + "a" * 64
+
+    class Metrics:
+        async def latest(self):
+            return {
+                "timestamp": datetime.now(UTC).timestamp(),
+                "arrival_rate_per_min": 0,
+                "refill_p95_s": 4,
+                "unassigned_count": 2,
+            }
+
+    manager = WarmPoolManager(
+        session_factory=object(),
+        docker=Docker(),
+        resource_profile_id="python-base",
+        ready_target=1,
+        adaptive_policy=AdaptivePoolPolicy(ready_min=1, ready_max=4, burst_buffer=1),
+        metrics_store=Metrics(),
+    )
+
+    asyncio.run(manager.request_target(4, ttl_seconds=60))
+    assert asyncio.run(manager._effective_ready_target()) == 4
+    manager._requested_target_expires_at = datetime.now(UTC).timestamp() - 1
+    assert asyncio.run(manager._effective_ready_target()) == 3
+    assert manager._requested_target is None
+
+
 def test_claim_priority_defers_student_when_teacher_is_waiting() -> None:
     from server.sandbox.warm_pool import warm_pool_service
 
@@ -235,6 +268,38 @@ def test_claim_priority_defers_student_when_teacher_is_waiting() -> None:
             if self.calls == 1:
                 return Result(["student"])
             return Result(["teacher-user"])
+
+        async def execute(self, _query):
+            return Result([("teacher-user", "teacher")])
+
+    assert asyncio.run(
+        warm_pool_service._has_higher_priority_waiter(
+            Session(),
+            current_lease_id="student-lease",
+            current_user_id="student-user",
+        )
+    ) is True
+
+
+def test_claim_priority_scans_waiters_beyond_previous_page_limit() -> None:
+    from server.sandbox.warm_pool import warm_pool_service
+
+    class Result:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def all(self):
+            return self.rows
+
+    class Session:
+        def __init__(self):
+            self.calls = 0
+
+        async def scalars(self, _query):
+            self.calls += 1
+            if self.calls == 1:
+                return Result(["student"])
+            return Result([*(f"guest-{index}" for index in range(100)), "teacher-user"])
 
         async def execute(self, _query):
             return Result([("teacher-user", "teacher")])

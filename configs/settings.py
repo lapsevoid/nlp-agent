@@ -97,6 +97,7 @@ class Settings(BaseSettings):
     NLP_AGENT_SANDBOX_EVENT_RETENTION_S: int = 86_400
     NLP_AGENT_SANDBOX_EVENT_MAXLEN: int = 10_000
     NLP_AGENT_SANDBOX_COMMAND_RETENTION_S: int = 86_400
+    NLP_AGENT_SANDBOX_PREWARM_TARGET_TTL_S: int = 900
     # Scratch permits up to 60 seconds; keep RPC response budget above that
     # limit so a valid long-running execution cannot outlive its Web request.
     NLP_AGENT_SANDBOX_MANAGER_RPC_TIMEOUT_S: float = 75.0

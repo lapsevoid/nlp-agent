@@ -84,7 +84,13 @@ async def process_manager_command(
     except (KeyError, ValueError):
         return await acknowledge()
     try:
-        await manager.request_target(target)
+        target_ttl_seconds = float(command.get("target_ttl_seconds", settings.NLP_AGENT_SANDBOX_PREWARM_TARGET_TTL_S))
+    except (TypeError, ValueError):
+        return await acknowledge()
+    if target_ttl_seconds <= 0:
+        return await acknowledge()
+    try:
+        await manager.request_target(target, ttl_seconds=target_ttl_seconds)
     except ValueError:
         # Invalid operator input cannot become valid on a retry; acknowledge
         # it after refusing the side effect so it cannot poison the queue.

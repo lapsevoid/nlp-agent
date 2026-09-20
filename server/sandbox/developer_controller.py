@@ -35,6 +35,7 @@ class PrewarmBody(BaseModel):
     sessions_per_runtime: int = Field(default=1, ge=1, le=100)
     profile_id: str = Field(default="python-base", min_length=1, max_length=64)
     execute_at: datetime | None = None
+    ttl_seconds: int = Field(default=900, ge=60, le=86_400)
 
 
 def _require_monitor(principal: Principal) -> None:
@@ -165,6 +166,15 @@ async def sandbox_overview(
         unassigned_lease_count=lease_demand.unassigned_count,
     )
     capacity["adaptive_target"] = adaptive_target
+    capacity.update(
+        {
+            "online_count": lease_demand.online_count,
+            "active_session_count": lease_demand.active_session_count,
+            "unassigned_count": lease_demand.unassigned_count,
+            "role_demand": lease_demand.role_demand,
+            "target_source": "adaptive",
+        }
+    )
     manager = getattr(request.app.state, "sandbox_manager", None)
     snapshot = getattr(manager, "capacity_snapshot", None)
     if snapshot is not None:
@@ -173,10 +183,15 @@ async def sandbox_overview(
             for key in (
                 "ready", "creating", "target", "deficit", "adaptive_target",
                 "assigned", "total", "total_max", "execution_limit",
-                "online_count", "unassigned_count",
+                "online_count", "active_session_count", "unassigned_count",
+                "host_total", "host_total_max", "host_available", "host_budget_blocked_count",
             ):
-                if key in manager_capacity:
+                if key in manager_capacity and manager_capacity[key] is not None:
                     capacity[key] = int(manager_capacity[key])
+            if manager_capacity.get("target_source"):
+                capacity["target_source"] = str(manager_capacity["target_source"])
+            if manager_capacity.get("manual_target_expires_at") is not None:
+                capacity["manual_target_expires_at"] = manager_capacity["manual_target_expires_at"]
             if isinstance(manager_capacity.get("role_demand"), dict):
                 capacity["role_demand"] = dict(manager_capacity["role_demand"])
             adaptive_target = int(capacity["adaptive_target"])
@@ -196,13 +211,20 @@ async def sandbox_overview(
         "total": capacity.get("total", sum(runtime_states.values())),
         "total_max": capacity.get("total_max", settings.NLP_AGENT_SANDBOX_RUNTIME_TOTAL_MAX),
         "online_count": capacity.get("online_count", lease_demand.online_count),
+        "active_session_count": capacity.get("active_session_count", lease_demand.active_session_count),
         "unassigned_count": capacity.get("unassigned_count", lease_demand.unassigned_count),
         "role_demand": capacity.get("role_demand", lease_demand.role_demand),
         "target": capacity["target"], "deficit": capacity["deficit"],
         "adaptive_target": adaptive_target,
+        "target_source": capacity.get("target_source", "adaptive"),
+        "manual_target_expires_at": capacity.get("manual_target_expires_at"),
         "arrival_rate_per_min": observed_arrival_rate,
         "new_lease_count": new_lease_count,
         "refill_p95_s": settings.NLP_AGENT_SANDBOX_REFILL_P95_S,
+        "host_total": capacity.get("host_total"),
+        "host_total_max": capacity.get("host_total_max"),
+        "host_available": capacity.get("host_available"),
+        "host_budget_blocked_count": capacity.get("host_budget_blocked_count", 0),
     }
     history = [sample]
     if default_sandbox_metrics_store is not None:
@@ -296,6 +318,7 @@ async def request_capacity_prewarm(body: PrewarmBody, principal: Principal) -> d
             target=target,
             reason=f"developer.prewarm:{principal.user_id}",
             execute_at=body.execute_at.isoformat() if body.execute_at else None,
+            target_ttl_seconds=body.ttl_seconds,
         )
     finally:
         await store.close()
@@ -305,6 +328,7 @@ async def request_capacity_prewarm(body: PrewarmBody, principal: Principal) -> d
         "target": target,
         "expected_sessions": body.expected_sessions,
         "execute_at": body.execute_at.isoformat() if body.execute_at else None,
+        "ttl_seconds": body.ttl_seconds,
     }
 
 

@@ -133,7 +133,7 @@ class WarmPoolService:
                         UserModel.status == "active",
                         UserModel.deleted_at.is_(None),
                     )
-                    .limit(100)
+                    .order_by(SandboxLeaseModel.created_at.asc(), SandboxLeaseModel.id.asc())
                 )
             ).all()
         )
@@ -209,6 +209,7 @@ class WarmPoolService:
                 SandboxRuntimeInstanceModel.environment_id.is_(None),
                 SandboxRuntimeInstanceModel.resource_profile_id == environment.resource_profile_id,
             )
+            .order_by(SandboxRuntimeInstanceModel.created_at.asc(), SandboxRuntimeInstanceModel.id.asc())
             .with_for_update(skip_locked=True)
         )
         if runtime is None:

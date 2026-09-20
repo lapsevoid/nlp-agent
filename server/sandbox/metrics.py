@@ -27,11 +27,12 @@ from .optimization import AdaptivePoolPolicy, SANDBOX_ROLE_PRIORITY
 
 @dataclass(frozen=True, slots=True)
 class SandboxLeaseDemand:
-    """Online Lease demand split from already-assigned Runtime capacity."""
+    """Online user demand split from already-assigned Runtime capacity."""
 
     online_count: int
     unassigned_count: int
     role_demand: dict[str, int]
+    active_session_count: int = 0
 
 
 def aggregate_sandbox_capacity_samples(
@@ -100,6 +101,7 @@ def summarize_sandbox_lease_demand(
         online_count=online_count,
         unassigned_count=unassigned_count,
         role_demand=role_demand,
+        active_session_count=online_count,
     )
 
 
@@ -145,12 +147,24 @@ async def collect_sandbox_lease_demand(
         ).all()
         for user_id, role_code in role_rows:
             roles_by_user.setdefault(str(user_id), set()).add(str(role_code))
-    return summarize_sandbox_lease_demand(
+    sessions_by_user: dict[str, bool] = {}
+    for user_id, runtime_id in active_rows:
+        key = str(user_id)
+        # A user with multiple sessions is online once; they are considered
+        # assigned when any active session already owns a Runtime.
+        sessions_by_user[key] = sessions_by_user.get(key, False) or runtime_id is not None
+    demand = summarize_sandbox_lease_demand(
         (
-            roles_by_user.get(str(user_id), {"guest"}),
-            runtime_id is not None,
+            roles_by_user.get(user_id, {"guest"}),
+            assigned,
         )
-        for user_id, runtime_id in active_rows
+        for user_id, assigned in sessions_by_user.items()
+    )
+    return SandboxLeaseDemand(
+        online_count=demand.online_count,
+        unassigned_count=demand.unassigned_count,
+        role_demand=demand.role_demand,
+        active_session_count=len(active_rows),
     )
 
 
@@ -331,6 +345,7 @@ async def record_sandbox_capacity_sample(session_factory: Any, *, store: Any | N
         "total": sum(state in {"ready_unbound", "creating", "claiming", "assigned", "draining"} for state in states),
         "total_max": settings.NLP_AGENT_SANDBOX_RUNTIME_TOTAL_MAX,
         "online_count": demand.online_count,
+        "active_session_count": demand.active_session_count,
         "unassigned_count": demand.unassigned_count,
         "role_demand": demand.role_demand,
         "target": settings.NLP_AGENT_SANDBOX_WARM_POOL_READY_TARGET,

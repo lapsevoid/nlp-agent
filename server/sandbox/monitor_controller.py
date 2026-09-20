@@ -28,6 +28,7 @@ class PrewarmBody(BaseModel):
     sessions_per_runtime: int = Field(default=1, ge=1, le=100)
     profile_id: str = Field(default="python-base", min_length=1, max_length=64)
     execute_at: datetime | None = None
+    ttl_seconds: int = Field(default=900, ge=60, le=86_400)
 
 
 def require_runtime_mutation(identity: AuthenticatedPrincipal) -> None:

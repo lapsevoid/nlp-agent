@@ -227,6 +227,8 @@ class WarmPoolManager:
         self._adaptive_state_store = adaptive_state_store
         self._metrics_store = metrics_store
         self._requested_target: int | None = None
+        self._requested_target_expires_at: float | None = None
+        self._host_budget_blocked_count = 0
         self._execution_semaphore = asyncio.Semaphore(
             max(1, int(settings.NLP_AGENT_SANDBOX_EXECUTION_CONCURRENCY_MAX))
         )
@@ -260,7 +262,10 @@ class WarmPoolManager:
 
     async def _effective_ready_target(self) -> int:
         if self._requested_target is not None:
-            return self._requested_target
+            if self._requested_target_expires_at is None or time.time() < self._requested_target_expires_at:
+                return self._requested_target
+            self._requested_target = None
+            self._requested_target_expires_at = None
         arrival_rate = settings.NLP_AGENT_SANDBOX_ARRIVAL_RATE_PER_MIN
         refill_p95 = settings.NLP_AGENT_SANDBOX_REFILL_P95_S
         unassigned_lease_count = 0
@@ -354,7 +359,7 @@ class WarmPoolManager:
             return desired
         return current
 
-    async def request_target(self, target: int) -> None:
+    async def request_target(self, target: int, *, ttl_seconds: int | float | None = None) -> None:
         if target < 0:
             raise ValueError("pool target must be non-negative")
         upper = (
@@ -362,7 +367,11 @@ class WarmPoolManager:
             if self._adaptive_policy is not None
             else max(self._ready_target, settings.NLP_AGENT_SANDBOX_WARM_POOL_READY_MAX)
         )
+        ttl = settings.NLP_AGENT_SANDBOX_PREWARM_TARGET_TTL_S if ttl_seconds is None else float(ttl_seconds)
+        if ttl <= 0:
+            raise ValueError("prewarm target TTL must be positive")
         self._requested_target = min(target, upper)
+        self._requested_target_expires_at = time.time() + ttl
 
     async def refill(self) -> int:
         async with host_budget_lock(settings.NLP_AGENT_SANDBOX_HOST_LOCK_FILE):
@@ -400,6 +409,7 @@ class WarmPoolManager:
                             "sandbox.manager.capacity.host_guard",
                             total_count=counts.total_count + len(reserved_runtime_ids),
                         )
+                        self._host_budget_blocked_count += 1
                         break
                     runtime_id = str(uuid4())
                     lock_session.add(
@@ -481,6 +491,11 @@ class WarmPoolManager:
         async with self._session_factory() as session:
             counts = await self._counts(session)
         target = await self._effective_ready_target()
+        host_runtime_count: int | None = None
+        try:
+            host_runtime_count = await self._host_runtime_count()
+        except Exception as error:
+            self._trace("sandbox.manager.host_count.unavailable", error=type(error).__name__)
         snapshot: dict[str, object] = {
             "resource_profile": self._resource_profile_id,
             "ready": counts.ready_count,
@@ -500,6 +515,15 @@ class WarmPoolManager:
             # Report the target actually selected after reading the durable
             # metrics/cooldown state, not the static environment estimate.
             "adaptive_target": target,
+            "target_source": "manual" if self._requested_target is not None else "adaptive",
+            "manual_target_expires_at": self._requested_target_expires_at,
+            "host_total": host_runtime_count,
+            "host_total_max": settings.NLP_AGENT_SANDBOX_HOST_RUNTIME_TOTAL_MAX,
+            "host_available": (
+                max(0, settings.NLP_AGENT_SANDBOX_HOST_RUNTIME_TOTAL_MAX - host_runtime_count)
+                if host_runtime_count is not None else None
+            ),
+            "host_budget_blocked_count": self._host_budget_blocked_count,
         }
         resources = await self._host_resources()
         if resources is not None:

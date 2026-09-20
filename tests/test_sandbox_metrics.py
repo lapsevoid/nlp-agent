@@ -89,6 +89,46 @@ def test_collect_sandbox_lease_demand_resolves_active_roles() -> None:
     assert demand.online_count == 2
     assert demand.unassigned_count == 1
     assert demand.role_demand == {"developer": 1}
+    assert demand.active_session_count == 2
+
+
+def test_collect_sandbox_lease_demand_counts_distinct_users_and_sessions() -> None:
+    from server.sandbox.metrics import collect_sandbox_lease_demand
+
+    class Result:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def all(self):
+            return self._rows
+
+    class Session:
+        calls = 0
+
+        async def execute(self, _query):
+            self.calls += 1
+            if self.calls == 1:
+                return Result([
+                    ("developer-user", None),
+                    ("developer-user", "runtime-1"),
+                    ("student-user", None),
+                ])
+            return Result([
+                ("developer-user", "developer"),
+                ("student-user", "student"),
+            ])
+
+    demand = asyncio.run(
+        collect_sandbox_lease_demand(
+            Session(),
+            now=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+    )
+
+    assert demand.online_count == 2
+    assert demand.active_session_count == 3
+    assert demand.unassigned_count == 1
+    assert demand.role_demand == {"student": 1}
 
 
 def test_arrival_rate_uses_new_sandbox_leases_not_code_execution_count() -> None:

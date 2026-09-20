@@ -11,6 +11,7 @@ import {
   type SandboxCapacitySample,
   type SandboxLogEntry,
   type SandboxOverview,
+  type SandboxRuntime,
 } from "./SandboxMonitorPage";
 
 const now = Date.parse("2026-08-28T03:00:00.000Z");
@@ -24,9 +25,9 @@ const overview: SandboxOverview = {
   recent_failures: 1,
   alerts: [],
   capacity_history: [
-    { timestamp: sampledNow - 120, ready: 2, creating: 2, target: 5, deficit: 1 },
-    { timestamp: sampledNow - 60, ready: 3, creating: 1, target: 5, deficit: 0 },
-    { timestamp: sampledNow, ready: 4, creating: 1, target: 5, deficit: 0 },
+    { timestamp: sampledNow - 120, ready: 2, creating: 2, target: 5, adaptive_target: 3, deficit: 1 },
+    { timestamp: sampledNow - 60, ready: 3, creating: 1, target: 5, adaptive_target: 4, deficit: 0 },
+    { timestamp: sampledNow, ready: 4, creating: 1, target: 5, adaptive_target: 5, deficit: 0 },
   ],
   sampled_at: new Date(now).toISOString(),
 };
@@ -120,8 +121,33 @@ describe("SandboxMonitorPage", () => {
     expect(screen.getByText(/在线 7/)).toBeVisible();
     expect(screen.getByText(/开发者 1/)).toBeVisible();
     expect(screen.getByText("近期故障")).toBeVisible();
+    expect(screen.getAllByText("自适应目标").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("运行日志")).toBeVisible();
     expect(screen.getByText("运行时异常")).toBeVisible();
+  });
+
+  it("exposes runtime detail, execution replay, preload matrix, and manual prewarm", () => {
+    const runtime: SandboxRuntime = {
+      id: "runtime-1", state: "ready_unbound", node_id: null, runtime_kind: "docker",
+      resource_profile_id: "python-base", external_runtime_id: "container-1", failure_reason: null,
+      updated_at: new Date(now).toISOString(), image_digest: "sha256:test", generation: 2,
+      environment_id: null, last_heartbeat_at: new Date(now).toISOString(),
+    };
+    const onPrewarm = vi.fn();
+    render(<SandboxMonitorPage
+      overview={{ ...overview, capacity: { ...overview.capacity, host_total: 2, host_total_max: 4, host_available: 2, host_budget_blocked_count: 1 } }}
+      logs={[]}
+      runtimes={[runtime]}
+      executions={[{ id: "execution-1", owner_user_id: "user-1", environment_id: "env-1", runtime_instance_id: "runtime-1", status: "completed", generation: 2, started_at: new Date(now).toISOString(), completed_at: new Date(now).toISOString(), exit_reason: null }]}
+      preloadMatrix={{ source: "ci", profiles: { "python-base": { status: "compatible", image_digest: "sha256:test" } } }}
+      onPrewarm={onPrewarm}
+      live loading={false} logLoading={false} onRefresh={() => undefined} onDrain={() => undefined}
+    />);
+    expect(screen.getByText("主机可用预算")).toBeVisible();
+    expect(screen.getByText("预加载兼容矩阵")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "手动预热" }));
+    fireEvent.click(screen.getByRole("button", { name: "提交预热" }));
+    expect(onPrewarm).toHaveBeenCalledWith({ expected_sessions: 4, sessions_per_runtime: 1, ttl_seconds: 900 });
   });
 
   it("offers explicit capacity history windows without changing the page refresh loop", () => {
