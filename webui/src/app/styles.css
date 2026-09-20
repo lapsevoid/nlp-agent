@@ -866,6 +866,18 @@ button { color: inherit; }
 .knowledge-book-heading-anchor { display: block; height: 1px; margin-bottom: -1px; visibility: hidden; pointer-events: none; scroll-margin-top: 18px; }
 .knowledge-book-article .markdown-content h2,.knowledge-book-article .markdown-content h3,.knowledge-book-article .markdown-content h4 { scroll-margin-top: 18px; }
 .knowledge-book-page-nav { display: flex; justify-content: space-between; gap: 10px; margin-top: 40px; padding-top: 17px; border-top: 1px solid var(--border); }
+.knowledge-book-files { margin-top: 36px; padding: 17px; border: 1px solid var(--border); border-radius: 10px; background: color-mix(in srgb,var(--soft-bg) 72%,var(--bg)); }
+.knowledge-book-files-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.knowledge-book-files-heading h2 { margin: 0; color: var(--fg); font-size: 15px; }
+.knowledge-book-files-heading span { color: var(--muted); font-size: 12px; }
+.knowledge-book-file-list { display: grid; gap: 7px; margin: 0; padding: 0; list-style: none; }
+.knowledge-book-file { display: flex; align-items: center; gap: 10px; min-width: 0; padding: 9px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--muted); }
+.knowledge-book-file-preview { display: grid; min-width: 0; flex: 1; gap: 2px; color: var(--fg); text-decoration: none; }
+.knowledge-book-file-preview:hover strong { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+.knowledge-book-file-preview strong { overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.knowledge-book-file-preview span { overflow: hidden; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.knowledge-book-file-download { display: grid; flex: 0 0 30px; width: 30px; height: 30px; place-items: center; border-radius: 6px; color: var(--muted); }
+.knowledge-book-file-download:hover { background: var(--accent-soft); color: var(--accent); }
 .knowledge-book-page-nav button { min-height: 34px; padding: 0 11px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--muted); font: inherit; font-size: 12px; cursor: pointer; }
 .knowledge-book-page-nav button:hover:not(:disabled) { border-color: color-mix(in srgb,var(--accent) 36%,var(--border)); background: var(--accent-soft); color: var(--accent); }
 .knowledge-book-page-nav button:disabled { cursor: not-allowed; opacity: .4; }
@@ -1186,6 +1198,23 @@ button { color: inherit; }
 .teacher-book-heading-outline a:hover { color: #5547b6; text-decoration: underline; }
 .teacher-book-heading-outline a.level-3,.teacher-book-heading-outline a.level-4 { padding-left: 10px; color: #777b8c; }
 .teacher-book-heading-outline > small { line-height: 1.5; }
+.teacher-book-files { margin: 10px 20px 0; padding: 11px 13px; border: 1px solid #dedcf1; border-radius: 10px; background: #fbfbff; }
+.teacher-book-files-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+.teacher-book-files-heading > div { display: grid; min-width: 0; gap: 2px; }
+.teacher-book-files-heading strong { color: #433b83; font-size: 12px; }
+.teacher-book-files-heading small,.teacher-book-files-heading > span { color: var(--teacher-muted); font-size: 10px; }
+.teacher-book-files > ul { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.teacher-book-files > ul > li { display: flex; min-width: 0; align-items: center; gap: 8px; padding: 7px 8px; border: 1px solid #e6e3f1; border-radius: 7px; background: #fff; color: #777b8c; }
+.teacher-book-file-info { display: grid; min-width: 0; flex: 1; gap: 2px; }
+.teacher-book-file-info strong { overflow: hidden; color: #4b4d5c; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.teacher-book-file-info small { overflow: hidden; color: var(--teacher-muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.teacher-book-file-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 4px; }
+.teacher-book-file-actions button,.teacher-book-file-replace { display: inline-flex; min-height: 27px; align-items: center; justify-content: center; gap: 4px; padding: 0 7px; border: 1px solid #dedcf1; border-radius: 6px; background: #fff; color: #6758c9; font-size: 10px; cursor: pointer; }
+.teacher-book-file-actions button:hover,.teacher-book-file-replace:hover { border-color: #a69ee6; background: #f5f2ff; }
+.teacher-book-file-actions button:disabled { cursor: wait; opacity: .55; }
+.teacher-book-file-replace { position: relative; overflow: hidden; }
+.teacher-book-file-replace input { position: absolute; inset: 0; width: 100%; cursor: pointer; opacity: 0; }
+.teacher-book-files > p { margin: 4px 0 0; color: var(--teacher-muted); font-size: 10px; }
 .teacher-content-book { width: auto; max-width: none; height: calc(100vh - 58px); box-sizing: border-box; padding: 18px 22px 22px; overflow: hidden; }
 .teacher-content-book .teacher-book-editor { height: 100%; min-height: 0; grid-template-rows: auto auto auto minmax(0, 1fr); }
 .teacher-content-book .teacher-book-summary { min-height: 86px; }
@@ -1195,6 +1224,7 @@ button { color: inherit; }
 @media (max-width: 820px) { .teacher-content-book { height: auto; min-height: calc(100vh - 58px); overflow: visible; } }
 @media (max-width: 820px) { .teacher-book-layout { grid-template-columns: 180px minmax(0, 1fr); }.teacher-book-page-heading { align-items: flex-start; flex-direction: column; }.teacher-book-page-heading > div:last-child { width: 100%; }.teacher-book-page-heading button { flex: 1; justify-content: center; } }
 @media (max-width: 620px) { .teacher-book-layout { grid-template-columns: 1fr; }.teacher-book-layout.directory-collapsed { grid-template-columns: 1fr; }.teacher-book-tree { max-height: 240px; border-right: 0; border-bottom: 1px solid var(--teacher-border); }.teacher-book-tree.collapsed { min-height: 45px; max-height: 45px; }.teacher-book-tree section { padding-top: 8px; }.teacher-book-tree section button { display: inline-flex; width: auto; margin-right: 3px; }.teacher-book-tree section { white-space: nowrap; overflow-x: auto; }.teacher-book-tree h3 { display: block; }.teacher-book-textarea,.teacher-book-preview { min-height: 460px; padding: 17px; }.teacher-book-source .teacher-book-textarea { min-height: 430px; }.teacher-book-markdown-toolbar small { width: 100%; margin-left: 0; }.teacher-book-import-preview { align-items: flex-start; flex-direction: column; } }
+@media (max-width: 620px) { .teacher-book-files { margin-inline: 10px; }.teacher-book-files > ul > li { align-items: flex-start; flex-wrap: wrap; }.teacher-book-file-actions { width: 100%; padding-left: 25px; } }
 
 /* The book editor is a viewport workbench: every parent must pass a definite
    height down to the source/preview pane. */

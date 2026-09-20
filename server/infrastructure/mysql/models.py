@@ -19,7 +19,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
-from sqlalchemy.dialects.mysql import BIGINT, DATETIME, MEDIUMTEXT
+from sqlalchemy.dialects.mysql import BIGINT, DATETIME, LONGBLOB, MEDIUMTEXT
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .base import Base, TimestampedModel
@@ -432,6 +432,57 @@ class KnowledgeBookAssetModel(TimestampedModel, Base):
     published_content: Mapped[bytes | None] = mapped_column(LargeBinary)
     size_bytes: Mapped[int] = mapped_column(BIGINT(unsigned=True), nullable=False)
     sha256: Mapped[str] = mapped_column(String(64, collation="ascii_bin"), nullable=False)
+
+
+class KnowledgeBookFileModel(TimestampedModel, Base):
+    """Text/code files embedded in teacher-authored knowledge-book pages."""
+
+    __tablename__ = "nlp_knowledge_book_files"
+    __table_args__ = (
+        Index(
+            "ix_nlp_knowledge_book_files_point",
+            "workspace_id",
+            "knowledge_point_id",
+            "created_at",
+            "id",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(UUID, primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(
+        UUID, ForeignKey("nlp_course_catalogs.workspace_id", ondelete="CASCADE"), nullable=False
+    )
+    knowledge_point_id: Mapped[str] = mapped_column(UUID, nullable=False)
+    original_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    media_type: Mapped[str] = mapped_column(String(128), nullable=False)
+    content: Mapped[bytes] = mapped_column(LONGBLOB, nullable=False)
+    size_bytes: Mapped[int] = mapped_column(BIGINT(unsigned=True), nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64, collation="ascii_bin"), nullable=False)
+    created_by: Mapped[str] = mapped_column(String(128, collation="ascii_bin"), nullable=False)
+
+
+class KnowledgeBookFileRefModel(Base):
+    """Ordered draft/published references from a page to its embedded files."""
+
+    __tablename__ = "nlp_knowledge_book_file_refs"
+    __table_args__ = (
+        CheckConstraint("state IN ('draft', 'published')", name="ck_nlp_book_file_refs_state"),
+        ForeignKeyConstraint(
+            ["file_id"], ["nlp_knowledge_book_files.id"],
+            ondelete="CASCADE", name="fk_nlp_book_file_refs_file",
+        ),
+        Index("ix_nlp_knowledge_book_file_refs_file", "workspace_id", "file_id", "state"),
+    )
+
+    workspace_id: Mapped[str] = mapped_column(UUID, primary_key=True)
+    knowledge_point_id: Mapped[str] = mapped_column(UUID, primary_key=True)
+    state: Mapped[str] = mapped_column(String(16), primary_key=True)
+    file_id: Mapped[str] = mapped_column(UUID, primary_key=True)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DATETIME(fsp=6), nullable=False, server_default=func.utc_timestamp(6)
+    )
 
 
 class WhiteboardLibraryItemModel(TimestampedModel, Base):

@@ -540,7 +540,7 @@ export function stripInternalChatMetadata(content: string): string {
   return content.replace(/\s*<!--\s*guided-result\s*:\s*(?:\{[\s\S]*?\}\s*-->|[\s\S]*$)/gi, "").trimEnd();
 }
 
-export function MarkdownContent({ children, streaming = false, streamRenderIntervalMs = 30, headingIds, headingIdsByLine, codeActions, allowDataImages = false }: { children: string; streaming?: boolean; streamRenderIntervalMs?: number; headingIds?: string[]; headingIdsByLine?: Record<number, string>; codeActions?: MarkdownCodeActions; allowDataImages?: boolean }) {
+export function MarkdownContent({ children, streaming = false, streamRenderIntervalMs = 30, headingIds, headingIdsByLine, codeActions, allowDataImages = false, bookFileLinks }: { children: string; streaming?: boolean; streamRenderIntervalMs?: number; headingIds?: string[]; headingIdsByLine?: Record<number, string>; codeActions?: MarkdownCodeActions; allowDataImages?: boolean; bookFileLinks?: Record<string, string> }) {
   const renderedChildren = useThrottledValue(children, streaming, Math.max(0, streamRenderIntervalMs));
   const renderedMarkdown = useMemo(() => {
     if (streaming) return null;
@@ -592,6 +592,10 @@ export function MarkdownContent({ children, streaming = false, streamRenderInter
             return <LessonCodeBlock language={match[1]} code={content} actions={codeActions} streaming={streaming} />;
           },
           a: ({ children: value, href, ...props }) => {
+            const resolvedBookFileHref = href ? bookFileLinks?.[href] ?? bookFileLinks?.[href.toLowerCase()] : undefined;
+            if (resolvedBookFileHref && isSafeMarkdownLink(resolvedBookFileHref)) {
+              return <a {...props} href={resolvedBookFileHref} target="_blank" rel="noopener noreferrer">{value}</a>;
+            }
             if (isSafeMarkdownLink(href)) {
               if (isExternalMarkdownLink(href)) {
                 const academicHref = normalizeTrustedAcademicLink(href) ?? href;
@@ -617,7 +621,7 @@ export function MarkdownContent({ children, streaming = false, streamRenderInter
         {normalizeLatexDelimiters(stripInternalChatMetadata(renderedChildren) || (streaming ? "" : "暂无内容"))}
       </ReactMarkdown>
     );
-  }, [allowDataImages, codeActions, headingIds, headingIdsByLine, renderedChildren, streaming]);
+  }, [allowDataImages, bookFileLinks, codeActions, headingIds, headingIdsByLine, renderedChildren, streaming]);
 
   return (
     <div className="markdown-content prose prose-zinc max-w-none dark:prose-invert prose-headings:scroll-mt-20 prose-pre:p-0">

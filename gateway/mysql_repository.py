@@ -984,6 +984,7 @@ class MySQLGatewayRepository:
         knowledge_point_id: str,
         *,
         expected_revision: int,
+        published_file_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         with self._runtime_begin() as connection:
             row = connection.execute(
@@ -1020,6 +1021,14 @@ class MySQLGatewayRepository:
                     ),
                     {"workspace_id": workspace_id, "asset_path": asset_path},
                 )
+            if published_file_ids is not None:
+                self._replace_knowledge_book_file_refs_in_transaction(
+                    connection,
+                    workspace_id,
+                    knowledge_point_id,
+                    "published",
+                    published_file_ids,
+                )
         return self.get_knowledge_page(workspace_id, knowledge_point_id)  # type: ignore[return-value]
 
     @staticmethod
@@ -1036,6 +1045,7 @@ class MySQLGatewayRepository:
         workspace_id: str,
         pages: list[dict[str, Any]],
         assets: list[dict[str, Any]],
+        file_refs: dict[str, list[str]] | None = None,
     ) -> list[dict[str, Any]]:
         with self._runtime_begin() as connection:
             currents: dict[str, dict[str, Any] | None] = {}
@@ -1104,6 +1114,11 @@ class MySQLGatewayRepository:
                         "sha256": str(asset.get("sha256") or hashlib.sha256(content).hexdigest()),
                     },
                 )
+            if file_refs is not None:
+                for point_id, file_ids in file_refs.items():
+                    self._replace_knowledge_book_file_refs_in_transaction(
+                        connection, workspace_id, str(point_id), "draft", file_ids
+                    )
         return [self.get_knowledge_page(workspace_id, str(page["knowledge_point_id"])) for page in pages]  # type: ignore[list-item]
 
     def get_knowledge_book_asset(self, workspace_id: str, asset_path: str) -> dict[str, Any] | None:
@@ -1118,6 +1133,334 @@ class MySQLGatewayRepository:
         if row is None or row["content"] is None:
             return None
         return dict(row)
+
+    def create_knowledge_book_file(
+        self,
+        *,
+        workspace_id: str,
+        knowledge_point_id: str,
+        original_name: str,
+        display_name: str,
+        media_type: str,
+        content: bytes,
+        created_by: str,
+        file_id: str | None = None,
+    ) -> dict[str, Any]:
+        identifier = file_id or str(uuid.uuid4())
+        now = _now()
+        with self._runtime_begin() as connection:
+            connection.execute(
+                text(
+                    """INSERT INTO nlp_knowledge_book_files(
+                        id,workspace_id,knowledge_point_id,original_name,display_name,
+                        media_type,content,size_bytes,sha256,created_by,created_at,updated_at
+                    ) VALUES(:id,:workspace_id,:knowledge_point_id,:original_name,:display_name,
+                        :media_type,:content,:size_bytes,:sha256,:created_by,:created_at,:updated_at)"""
+                ),
+                {
+                    "id": identifier,
+                    "workspace_id": workspace_id,
+                    "knowledge_point_id": knowledge_point_id,
+                    "original_name": original_name,
+                    "display_name": display_name,
+                    "media_type": media_type,
+                    "content": content,
+                    "size_bytes": len(content),
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                    "created_by": created_by,
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            )
+        return self.get_knowledge_book_file(workspace_id, identifier)  # type: ignore[return-value]
+
+    def get_knowledge_book_file(
+        self,
+        workspace_id: str,
+        file_id: str,
+        *,
+        include_content: bool = True,
+    ) -> dict[str, Any] | None:
+        columns = "id,workspace_id,knowledge_point_id,original_name,display_name,media_type,size_bytes,sha256,created_by,created_at,updated_at"
+        if include_content:
+            columns += ",content"
+        with self._engine.connect() as connection:
+            row = connection.execute(
+                text(
+                    f"SELECT {columns} FROM nlp_knowledge_book_files "
+                    "WHERE workspace_id=:workspace_id AND id=:id"
+                ),
+                {"workspace_id": workspace_id, "id": file_id},
+            ).mappings().first()
+        return dict(row) if row is not None else None
+
+    def list_knowledge_book_files(
+        self,
+        workspace_id: str,
+        knowledge_point_id: str,
+        *,
+        include_content: bool = False,
+    ) -> list[dict[str, Any]]:
+        columns = "id,workspace_id,knowledge_point_id,original_name,display_name,media_type,size_bytes,sha256,created_by,created_at,updated_at"
+        if include_content:
+            columns += ",content"
+        with self._engine.connect() as connection:
+            rows = connection.execute(
+                text(
+                    f"SELECT {columns} FROM nlp_knowledge_book_files "
+                    "WHERE workspace_id=:workspace_id AND knowledge_point_id=:knowledge_point_id "
+                    "ORDER BY created_at,id"
+                ),
+                {"workspace_id": workspace_id, "knowledge_point_id": knowledge_point_id},
+            ).mappings().all()
+        return [dict(row) for row in rows]
+
+    def list_published_knowledge_book_files(
+        self,
+        workspace_id: str,
+        knowledge_point_id: str,
+    ) -> list[dict[str, Any]]:
+        """Return metadata for files attached to the published page snapshot."""
+
+        with self._engine.connect() as connection:
+            rows = connection.execute(
+                text(
+                    """SELECT f.id,f.workspace_id,f.knowledge_point_id,f.original_name,
+                              f.display_name,f.media_type,f.size_bytes,f.sha256,
+                              f.created_by,f.created_at,f.updated_at
+                       FROM nlp_knowledge_book_files AS f
+                       JOIN nlp_knowledge_book_file_refs AS r
+                         ON r.workspace_id=f.workspace_id AND r.file_id=f.id
+                       WHERE f.workspace_id=:workspace_id AND r.knowledge_point_id=f.knowledge_point_id
+                         AND r.knowledge_point_id=:knowledge_point_id
+                         AND r.state='published'
+                       ORDER BY r.sort_order,r.file_id"""
+                ),
+                {"workspace_id": workspace_id, "knowledge_point_id": knowledge_point_id},
+            ).mappings().all()
+        return [dict(row) for row in rows]
+
+    def update_knowledge_book_file(
+        self,
+        workspace_id: str,
+        file_id: str,
+        *,
+        original_name: str | None = None,
+        display_name: str | None = None,
+        media_type: str | None = None,
+        content: bytes | None = None,
+    ) -> dict[str, Any]:
+        current = self.get_knowledge_book_file(workspace_id, file_id)
+        if current is None:
+            raise FileNotFoundError(file_id)
+        with self._engine.connect() as connection:
+            published = connection.execute(
+                text(
+                    "SELECT 1 FROM nlp_knowledge_book_file_refs "
+                    "WHERE workspace_id=:workspace_id AND file_id=:file_id "
+                    "AND state='published' LIMIT 1"
+                ),
+                {"workspace_id": workspace_id, "file_id": file_id},
+            ).first()
+        if published is not None:
+            raise ValueError("已发布文件不能原地更新，请上传新文件替换")
+        next_original_name = original_name if original_name is not None else str(current["original_name"])
+        next_name = display_name if display_name is not None else str(current["display_name"])
+        next_media_type = media_type if media_type is not None else str(current["media_type"])
+        next_content = content if content is not None else bytes(current["content"])
+        with self._runtime_begin() as connection:
+            connection.execute(
+                text(
+                    """UPDATE nlp_knowledge_book_files SET original_name=:original_name,
+                        display_name=:display_name,
+                        media_type=:media_type,content=:content,size_bytes=:size_bytes,
+                        sha256=:sha256,updated_at=UTC_TIMESTAMP(6)
+                       WHERE workspace_id=:workspace_id AND id=:id"""
+                ),
+                {
+                    "original_name": next_original_name,
+                    "display_name": next_name,
+                    "media_type": next_media_type,
+                    "content": next_content,
+                    "size_bytes": len(next_content),
+                    "sha256": hashlib.sha256(next_content).hexdigest(),
+                    "workspace_id": workspace_id,
+                    "id": file_id,
+                },
+            )
+        return self.get_knowledge_book_file(workspace_id, file_id)  # type: ignore[return-value]
+
+    def delete_knowledge_book_file(self, workspace_id: str, file_id: str) -> bool:
+        with self._runtime_begin() as connection:
+            referenced = connection.execute(
+                text(
+                    "SELECT 1 FROM nlp_knowledge_book_file_refs "
+                    "WHERE workspace_id=:workspace_id AND file_id=:file_id LIMIT 1"
+                ),
+                {"workspace_id": workspace_id, "file_id": file_id},
+            ).first()
+            if referenced is not None:
+                raise ValueError("文件仍被教材引用，不能删除")
+            result = connection.execute(
+                text(
+                    "DELETE FROM nlp_knowledge_book_files "
+                    "WHERE workspace_id=:workspace_id AND id=:file_id"
+                ),
+                {"workspace_id": workspace_id, "file_id": file_id},
+            )
+        return result.rowcount > 0
+
+    @staticmethod
+    def _validate_knowledge_book_file_ref_state(state: str) -> None:
+        if state not in {"draft", "published"}:
+            raise ValueError("教材文件引用状态必须是 draft 或 published")
+
+    def _replace_knowledge_book_file_refs_in_transaction(
+        self,
+        connection: Connection,
+        workspace_id: str,
+        knowledge_point_id: str,
+        state: str,
+        file_ids: list[str],
+    ) -> None:
+        self._validate_knowledge_book_file_ref_state(state)
+        ordered_ids = list(dict.fromkeys(str(file_id) for file_id in file_ids))
+        for file_id in ordered_ids:
+            row = connection.execute(
+                text(
+                    "SELECT knowledge_point_id FROM nlp_knowledge_book_files "
+                    "WHERE workspace_id=:workspace_id AND id=:file_id"
+                ),
+                {"workspace_id": workspace_id, "file_id": file_id},
+            ).mappings().first()
+            if row is None:
+                raise FileNotFoundError(file_id)
+            if str(row["knowledge_point_id"]) != knowledge_point_id:
+                raise ValueError("教材文件不能跨知识点引用")
+        connection.execute(
+            text(
+                "DELETE FROM nlp_knowledge_book_file_refs WHERE workspace_id=:workspace_id "
+                "AND knowledge_point_id=:knowledge_point_id AND state=:state"
+            ),
+            {
+                "workspace_id": workspace_id,
+                "knowledge_point_id": knowledge_point_id,
+                "state": state,
+            },
+        )
+        now = _now()
+        for index, file_id in enumerate(ordered_ids):
+            connection.execute(
+                text(
+                    """INSERT INTO nlp_knowledge_book_file_refs(
+                        workspace_id,knowledge_point_id,file_id,state,sort_order,created_at
+                    ) VALUES(:workspace_id,:knowledge_point_id,:file_id,:state,:sort_order,:created_at)"""
+                ),
+                {
+                    "workspace_id": workspace_id,
+                    "knowledge_point_id": knowledge_point_id,
+                    "file_id": file_id,
+                    "state": state,
+                    "sort_order": index,
+                    "created_at": now,
+                },
+            )
+
+    def set_knowledge_book_file_refs(
+        self,
+        workspace_id: str,
+        knowledge_point_id: str,
+        state: str,
+        file_ids: list[str],
+    ) -> None:
+        with self._runtime_begin() as connection:
+            self._replace_knowledge_book_file_refs_in_transaction(
+                connection, workspace_id, knowledge_point_id, state, file_ids
+            )
+
+    def list_knowledge_book_file_refs(
+        self,
+        workspace_id: str,
+        knowledge_point_id: str,
+        state: str,
+    ) -> list[str]:
+        self._validate_knowledge_book_file_ref_state(state)
+        with self._engine.connect() as connection:
+            rows = connection.execute(
+                text(
+                    "SELECT file_id FROM nlp_knowledge_book_file_refs "
+                    "WHERE workspace_id=:workspace_id AND knowledge_point_id=:knowledge_point_id "
+                    "AND state=:state ORDER BY sort_order,file_id"
+                ),
+                {
+                    "workspace_id": workspace_id,
+                    "knowledge_point_id": knowledge_point_id,
+                    "state": state,
+                },
+            ).mappings().all()
+        return [str(row["file_id"]) for row in rows]
+
+    def publish_knowledge_book_file_refs(
+        self,
+        workspace_id: str,
+        knowledge_point_id: str,
+    ) -> list[str]:
+        """Promote the current draft references as one atomic page snapshot."""
+
+        with self._runtime_begin() as connection:
+            draft_rows = connection.execute(
+                text(
+                    "SELECT file_id,sort_order FROM nlp_knowledge_book_file_refs "
+                    "WHERE workspace_id=:workspace_id AND knowledge_point_id=:knowledge_point_id "
+                    "AND state='draft' ORDER BY sort_order,file_id"
+                ),
+                {"workspace_id": workspace_id, "knowledge_point_id": knowledge_point_id},
+            ).mappings().all()
+            connection.execute(
+                text(
+                    "DELETE FROM nlp_knowledge_book_file_refs WHERE workspace_id=:workspace_id "
+                    "AND knowledge_point_id=:knowledge_point_id AND state='published'"
+                ),
+                {"workspace_id": workspace_id, "knowledge_point_id": knowledge_point_id},
+            )
+            now = _now()
+            for row in draft_rows:
+                connection.execute(
+                    text(
+                        """INSERT INTO nlp_knowledge_book_file_refs(
+                            workspace_id,knowledge_point_id,file_id,state,sort_order,created_at
+                        ) VALUES(:workspace_id,:knowledge_point_id,:file_id,'published',:sort_order,:created_at)"""
+                    ),
+                    {
+                        "workspace_id": workspace_id,
+                        "knowledge_point_id": knowledge_point_id,
+                        "file_id": str(row["file_id"]),
+                        "sort_order": int(row["sort_order"]),
+                        "created_at": now,
+                    },
+                )
+        return [str(row["file_id"]) for row in draft_rows]
+
+    def get_published_knowledge_book_file(
+        self,
+        workspace_id: str,
+        file_id: str,
+    ) -> dict[str, Any] | None:
+        with self._engine.connect() as connection:
+            row = connection.execute(
+                text(
+                    """SELECT f.id,f.workspace_id,f.knowledge_point_id,f.original_name,
+                              f.display_name,f.media_type,f.content,f.size_bytes,f.sha256,
+                              f.created_by,f.created_at,f.updated_at
+                       FROM nlp_knowledge_book_files AS f
+                       JOIN nlp_knowledge_book_file_refs AS r
+                         ON r.workspace_id=f.workspace_id AND r.file_id=f.id
+                       WHERE f.workspace_id=:workspace_id AND f.id=:file_id
+                         AND r.knowledge_point_id=f.knowledge_point_id AND r.state='published'"""
+                ),
+                {"workspace_id": workspace_id, "file_id": file_id},
+            ).mappings().first()
+        return dict(row) if row is not None else None
 
     def teaching_topic(self, workspace_id: str, topic_id: str):
         catalog = self.get_teaching_catalog(workspace_id)["catalog"]

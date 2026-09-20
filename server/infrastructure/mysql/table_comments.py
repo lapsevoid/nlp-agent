@@ -49,6 +49,8 @@ TABLE_COMMENTS: dict[str, str] = {
     "nlp_knowledge_points": "主题下的知识点内容。",
     "nlp_knowledge_pages": "知识点教材正文的草稿与已发布版本。",
     "nlp_knowledge_book_assets": "知识教材批量导入后经过校验的图片资源。",
+    "nlp_knowledge_book_files": "教师教材中可预览、可下载的文件内容。",
+    "nlp_knowledge_book_file_refs": "知识教材文件的草稿与已发布引用关系。",
     "nlp_whiteboard_library_items": "教师和开发者创建的全局共享白板素材。",
     "nlp_teaching_blueprints": "教学或练习蓝图及其载荷版本。",
     "nlp_blueprint_rubrics": "蓝图评分标准、权重与排序。",
