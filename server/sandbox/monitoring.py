@@ -415,7 +415,7 @@ async def drain_runtime(db: AsyncSession, runtime_id: str, principal: Any) -> di
         target_user_id=None,
         decision="allow",
         reason_code="sandbox_runtime_drain_requested",
-        permission_code="system:runtime:monitor",
+        permission_code="system:runtime:reset",
         resource_type="sandbox_runtime",
         resource_id=runtime_id,
     )

@@ -30,6 +30,11 @@ class PrewarmBody(BaseModel):
     execute_at: datetime | None = None
 
 
+def require_runtime_mutation(identity: AuthenticatedPrincipal) -> None:
+    """Require the explicit reset capability for state-changing operations."""
+    authorization_service.require(identity, Permission.SYSTEM_RUNTIME_RESET)
+
+
 def create_sandbox_monitor_router(
     *,
     db_session_dependency: Callable[..., Any],
@@ -99,6 +104,7 @@ def create_sandbox_monitor_router(
         _write: Any = Depends(write_access_dependency),
     ):
         require_monitor(identity)
+        require_runtime_mutation(identity)
         try:
             return await drain_runtime(db, runtime_id, identity)
         except LookupError as error:
@@ -144,6 +150,7 @@ def create_sandbox_monitor_router(
         _write: Any = Depends(write_access_dependency),
     ):
         require_monitor(identity)
+        require_runtime_mutation(identity)
         try:
             return await request_capacity_prewarm(body, identity)
         except ValueError as error:
