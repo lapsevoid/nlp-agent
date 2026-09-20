@@ -170,6 +170,17 @@ export interface LearningBookNavigationItem {
   sort_order: number;
   revision: number;
 }
+export interface LearningBookFile {
+  id: string;
+  token: string;
+  original_name: string;
+  display_name: string;
+  media_type: string;
+  size_bytes: number;
+  sha256: string;
+  preview_url: string;
+  download_url: string;
+}
 export interface TeacherBookPage {
   workspace_id: string;
   topic_id: string;
@@ -182,6 +193,20 @@ export interface TeacherBookPage {
   published_revision: number | null;
   updated_at: string | null;
 }
+export interface TeacherBookFile {
+  id: string;
+  workspace_id: string;
+  knowledge_point_id: string;
+  token: string;
+  original_name: string;
+  display_name: string;
+  media_type: string;
+  size_bytes: number;
+  sha256: string;
+  created_by: string;
+  created_at: string | null;
+  updated_at: string | null;
+}
 export interface LearningBookPage {
   workspace_id: string;
   topic_id: string;
@@ -190,6 +215,7 @@ export interface LearningBookPage {
   title: string;
   content_markdown: string;
   revision: number;
+  files?: LearningBookFile[];
 }
 export interface KnowledgeBookContext {
   workspace_id: string;

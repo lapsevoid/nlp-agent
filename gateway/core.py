@@ -949,17 +949,21 @@ class BackendGateway:
         knowledge_point_id: str,
         *,
         expected_revision: int,
+        published_file_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         authorization_service.require(
             principal,
             Permission.LEARNING_CONTENT_MANAGE,
             workspace_id=workspace_id,
         )
+        kwargs: dict[str, Any] = {"expected_revision": expected_revision}
+        if published_file_ids is not None:
+            kwargs["published_file_ids"] = published_file_ids
         return await asyncio.to_thread(
             self.repository.publish_knowledge_page,
             workspace_id,
             knowledge_point_id,
-            expected_revision=expected_revision,
+            **kwargs,
         )
 
     async def apply_knowledge_book_import(
@@ -968,17 +972,19 @@ class BackendGateway:
         workspace_id: str,
         pages: list[dict[str, Any]],
         assets: list[dict[str, Any]],
+        file_refs: dict[str, list[str]] | None = None,
     ) -> list[dict[str, Any]]:
         authorization_service.require(
             principal,
             Permission.LEARNING_CONTENT_MANAGE,
             workspace_id=workspace_id,
         )
+        args: tuple[Any, ...] = (workspace_id, pages, assets)
+        if file_refs is not None:
+            args += (file_refs,)
         return await asyncio.to_thread(
             self.repository.apply_knowledge_book_import,
-            workspace_id,
-            pages,
-            assets,
+            *args,
         )
 
     async def get_knowledge_book_asset(
@@ -996,6 +1002,180 @@ class BackendGateway:
             self.repository.get_knowledge_book_asset,
             workspace_id,
             asset_path,
+        )
+
+    async def create_knowledge_book_file(
+        self,
+        principal: AuthenticatedPrincipal,
+        workspace_id: str,
+        knowledge_point_id: str,
+        *,
+        original_name: str,
+        display_name: str,
+        media_type: str,
+        content: bytes,
+        created_by: str,
+        file_id: str | None = None,
+    ) -> dict[str, Any]:
+        authorization_service.require(
+            principal, Permission.LEARNING_CONTENT_MANAGE, workspace_id=workspace_id
+        )
+        return await asyncio.to_thread(
+            self.repository.create_knowledge_book_file,
+            workspace_id=workspace_id,
+            knowledge_point_id=knowledge_point_id,
+            original_name=original_name,
+            display_name=display_name,
+            media_type=media_type,
+            content=content,
+            created_by=created_by,
+            file_id=file_id,
+        )
+
+    async def get_knowledge_book_file(
+        self,
+        principal: AuthenticatedPrincipal,
+        workspace_id: str,
+        file_id: str,
+    ) -> dict[str, Any] | None:
+        authorization_service.require(
+            principal, Permission.LEARNING_PROGRESS_READ_CLASSROOM, workspace_id=workspace_id
+        )
+        return await asyncio.to_thread(
+            self.repository.get_knowledge_book_file, workspace_id, file_id
+        )
+
+    async def list_knowledge_book_files(
+        self,
+        principal: AuthenticatedPrincipal,
+        workspace_id: str,
+        knowledge_point_id: str,
+    ) -> list[dict[str, Any]]:
+        authorization_service.require(
+            principal, Permission.LEARNING_PROGRESS_READ_CLASSROOM, workspace_id=workspace_id
+        )
+        return await asyncio.to_thread(
+            self.repository.list_knowledge_book_files,
+            workspace_id,
+            knowledge_point_id,
+        )
+
+    async def list_published_knowledge_book_files(
+        self,
+        principal: AuthenticatedPrincipal,
+        workspace_id: str,
+        knowledge_point_id: str,
+    ) -> list[dict[str, Any]]:
+        authorization_service.require(
+            principal, Permission.LEARNING_CONTENT_READ_WORKSPACE, workspace_id=workspace_id
+        )
+        return await asyncio.to_thread(
+            self.repository.list_published_knowledge_book_files,
+            workspace_id,
+            knowledge_point_id,
+        )
+
+    async def update_knowledge_book_file(
+        self,
+        principal: AuthenticatedPrincipal,
+        workspace_id: str,
+        file_id: str,
+        *,
+        original_name: str | None = None,
+        display_name: str | None = None,
+        media_type: str | None = None,
+        content: bytes | None = None,
+    ) -> dict[str, Any]:
+        authorization_service.require(
+            principal, Permission.LEARNING_CONTENT_MANAGE, workspace_id=workspace_id
+        )
+        return await asyncio.to_thread(
+            self.repository.update_knowledge_book_file,
+            workspace_id,
+            file_id,
+            original_name=original_name,
+            display_name=display_name,
+            media_type=media_type,
+            content=content,
+        )
+
+    async def delete_knowledge_book_file(
+        self,
+        principal: AuthenticatedPrincipal,
+        workspace_id: str,
+        file_id: str,
+    ) -> bool:
+        authorization_service.require(
+            principal, Permission.LEARNING_CONTENT_MANAGE, workspace_id=workspace_id
+        )
+        return await asyncio.to_thread(
+            self.repository.delete_knowledge_book_file, workspace_id, file_id
+        )
+
+    async def set_knowledge_book_file_refs(
+        self,
+        principal: AuthenticatedPrincipal,
+        workspace_id: str,
+        knowledge_point_id: str,
+        state: str,
+        file_ids: list[str],
+    ) -> None:
+        authorization_service.require(
+            principal, Permission.LEARNING_CONTENT_MANAGE, workspace_id=workspace_id
+        )
+        await asyncio.to_thread(
+            self.repository.set_knowledge_book_file_refs,
+            workspace_id,
+            knowledge_point_id,
+            state,
+            file_ids,
+        )
+
+    async def list_knowledge_book_file_refs(
+        self,
+        principal: AuthenticatedPrincipal,
+        workspace_id: str,
+        knowledge_point_id: str,
+        state: str,
+    ) -> list[str]:
+        authorization_service.require(
+            principal, Permission.LEARNING_PROGRESS_READ_CLASSROOM, workspace_id=workspace_id
+        )
+        return await asyncio.to_thread(
+            self.repository.list_knowledge_book_file_refs,
+            workspace_id,
+            knowledge_point_id,
+            state,
+        )
+
+    async def publish_knowledge_book_file_refs(
+        self,
+        principal: AuthenticatedPrincipal,
+        workspace_id: str,
+        knowledge_point_id: str,
+    ) -> list[str]:
+        authorization_service.require(
+            principal, Permission.LEARNING_CONTENT_MANAGE, workspace_id=workspace_id
+        )
+        return await asyncio.to_thread(
+            self.repository.publish_knowledge_book_file_refs,
+            workspace_id,
+            knowledge_point_id,
+        )
+
+    async def get_published_knowledge_book_file(
+        self,
+        principal: AuthenticatedPrincipal,
+        workspace_id: str,
+        file_id: str,
+    ) -> dict[str, Any] | None:
+        authorization_service.require(
+            principal, Permission.LEARNING_CONTENT_READ_WORKSPACE, workspace_id=workspace_id
+        )
+        return await asyncio.to_thread(
+            self.repository.get_published_knowledge_book_file,
+            workspace_id,
+            file_id,
         )
 
     async def stream_events(

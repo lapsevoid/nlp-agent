@@ -52,6 +52,65 @@ describe("KnowledgeBookPanel", () => {
     expect(api.getLearningBookPage).toHaveBeenCalledWith("workspace-1", "point-1");
   });
 
+  it("renders published教材 attachments with preview and download actions", async () => {
+    vi.mocked(api.getLearningBookPage).mockResolvedValue({
+      page: {
+        ...page,
+        files: [{
+          id: "file-1",
+          token: "book-file:file-1",
+          original_name: "demo.py",
+          display_name: "演示.py",
+          media_type: "text/x-python",
+          size_bytes: 9,
+          sha256: "sha-demo",
+          preview_url: "/api/v1/learning/book/workspace-1/files/file-1",
+          download_url: "/api/v1/learning/book/workspace-1/files/file-1/download",
+        }],
+      },
+    });
+
+    render(<KnowledgeBookPanel workspaceId="workspace-1" />);
+
+    expect(await screen.findByText("教材附件")).toBeInTheDocument();
+    expect(screen.getByText("演示.py")).toBeInTheDocument();
+    const previewLink = screen.getByRole("link", { name: "预览教材附件：演示.py" });
+    expect(previewLink).toHaveAttribute("href", "/api/v1/learning/book/workspace-1/files/file-1");
+    expect(previewLink).toHaveAttribute("target", "_blank");
+    expect(previewLink).toHaveAttribute("rel", "noopener noreferrer");
+    const downloadLink = screen.getByRole("link", { name: "下载教材附件：演示.py" });
+    expect(downloadLink).toHaveAttribute("href", "/api/v1/learning/book/workspace-1/files/file-1/download");
+    expect(downloadLink).toHaveAttribute("download");
+  });
+
+  it("turns a teacher-inserted book-file reference into a preview link in the article", async () => {
+    const fileToken = "book-file:550e8400-e29b-41d4-a716-446655440000";
+    vi.mocked(api.getLearningBookPage).mockResolvedValue({
+      page: {
+        ...page,
+        content_markdown: "请先阅读：[演示.py](book-file:550E8400-E29B-41D4-A716-446655440000)",
+        files: [{
+          id: "file-1",
+          token: fileToken,
+          original_name: "demo.py",
+          display_name: "演示.py",
+          media_type: "text/x-python",
+          size_bytes: 9,
+          sha256: "sha-demo",
+          preview_url: "/api/v1/learning/book/workspace-1/files/file-1",
+          download_url: "/api/v1/learning/book/workspace-1/files/file-1/download",
+        }],
+      },
+    });
+
+    render(<KnowledgeBookPanel workspaceId="workspace-1" />);
+
+    const inlineLink = await screen.findByRole("link", { name: "演示.py" });
+    expect(inlineLink).toHaveAttribute("href", "/api/v1/learning/book/workspace-1/files/file-1");
+    expect(inlineLink).toHaveAttribute("target", "_blank");
+    expect(inlineLink).toHaveAttribute("rel", "noopener noreferrer");
+  });
+
   it("lets Markdown own the article title without showing teacher-only metadata", async () => {
     vi.mocked(api.getLearningBookPage).mockResolvedValue({
       page: { ...page, content_markdown: "# 词法分析\n\n## 核心概念\n\n正文" },
@@ -79,6 +138,26 @@ describe("KnowledgeBookPanel", () => {
 
     expect(await screen.findByRole("heading", { name: "句法分析" })).toBeInTheDocument();
     expect(api.getLearningBookPage).toHaveBeenCalledWith("workspace-1", "point-2");
+  });
+
+  it("does not reuse a cached page when the workspace changes", async () => {
+    vi.mocked(api.getLearningBookNavigation).mockImplementation((workspaceId) => {
+      const currentWorkspaceId = workspaceId ?? "workspace-1";
+      return Promise.resolve({ workspace_id: currentWorkspaceId, items: navigation });
+    });
+    vi.mocked(api.getLearningBookPage).mockImplementation((workspaceId, knowledgePointId) => {
+      const currentWorkspaceId = workspaceId ?? "workspace-1";
+      return Promise.resolve({
+        page: { ...page, workspace_id: currentWorkspaceId, knowledge_point_id: knowledgePointId, content_markdown: `当前工作区：${currentWorkspaceId}` },
+      });
+    });
+    const view = render(<KnowledgeBookPanel workspaceId="workspace-1" />);
+
+    expect(await screen.findByText("当前工作区：workspace-1")).toBeInTheDocument();
+    view.rerender(<KnowledgeBookPanel workspaceId="workspace-2" />);
+
+    expect(await screen.findByText("当前工作区：workspace-2")).toBeInTheDocument();
+    expect(api.getLearningBookPage).toHaveBeenCalledWith("workspace-2", "point-1");
   });
 
   it("offers an explicit Nova action for selected article text", async () => {
