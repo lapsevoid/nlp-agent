@@ -4,15 +4,105 @@ from __future__ import annotations
 
 import json
 import time
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from configs.settings import settings
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 
-from server.infrastructure.mysql.models import SandboxLeaseModel, SandboxRuntimeInstanceModel
+from server.infrastructure.mysql.models import (
+    RoleModel,
+    SandboxLeaseModel,
+    SandboxRuntimeInstanceModel,
+    UserRoleModel,
+)
 
 from .faults import SandboxFaultInjector
-from .optimization import AdaptivePoolPolicy
+from .optimization import AdaptivePoolPolicy, SANDBOX_ROLE_PRIORITY
+
+
+@dataclass(frozen=True, slots=True)
+class SandboxLeaseDemand:
+    """Online Lease demand split from already-assigned Runtime capacity."""
+
+    online_count: int
+    unassigned_count: int
+    role_demand: dict[str, int]
+
+
+def summarize_sandbox_lease_demand(
+    lease_rows: Any,
+) -> SandboxLeaseDemand:
+    """Collapse each active Lease to its highest effective role."""
+    online_count = 0
+    unassigned_count = 0
+    role_demand: dict[str, int] = {}
+    for role_codes, assigned in lease_rows:
+        online_count += 1
+        if assigned:
+            continue
+        unassigned_count += 1
+        if isinstance(role_codes, str):
+            normalized_roles = (role_codes,)
+        else:
+            normalized_roles = tuple(role_codes)
+        role = min(
+            (str(code).strip().lower() for code in normalized_roles),
+            key=lambda code: SANDBOX_ROLE_PRIORITY.get(code, SANDBOX_ROLE_PRIORITY["guest"]),
+            default="guest",
+        )
+        if role not in SANDBOX_ROLE_PRIORITY:
+            role = "guest"
+        role_demand[role] = role_demand.get(role, 0) + 1
+    return SandboxLeaseDemand(
+        online_count=online_count,
+        unassigned_count=unassigned_count,
+        role_demand=role_demand,
+    )
+
+
+async def collect_sandbox_lease_demand(
+    session: Any,
+    *,
+    now: datetime | None = None,
+) -> SandboxLeaseDemand:
+    """Read active online Leases and resolve one effective role per user."""
+    current_time = (now or datetime.now(UTC)).replace(tzinfo=None)
+    active_rows = (
+        await session.execute(
+            select(SandboxLeaseModel.user_id, SandboxLeaseModel.runtime_instance_id).where(
+                SandboxLeaseModel.state == "active",
+                SandboxLeaseModel.expires_at > current_time,
+            )
+        )
+    ).all()
+    user_ids = {str(user_id) for user_id, _runtime_id in active_rows}
+    roles_by_user: dict[str, set[str]] = {}
+    if user_ids:
+        role_rows = (
+            await session.execute(
+                select(UserRoleModel.user_id, RoleModel.code)
+                .join(RoleModel, RoleModel.id == UserRoleModel.role_id)
+                .where(
+                    UserRoleModel.user_id.in_(user_ids),
+                    RoleModel.status == "active",
+                    or_(
+                        UserRoleModel.expires_at.is_(None),
+                        UserRoleModel.expires_at > current_time,
+                    ),
+                )
+            )
+        ).all()
+        for user_id, role_code in role_rows:
+            roles_by_user.setdefault(str(user_id), set()).add(str(role_code))
+    return summarize_sandbox_lease_demand(
+        (
+            roles_by_user.get(str(user_id), {"guest"}),
+            runtime_id is not None,
+        )
+        for user_id, runtime_id in active_rows
+    )
 
 
 def sandbox_arrival_rate_per_min(*, new_lease_count: int, window_seconds: int) -> float:
@@ -164,6 +254,7 @@ async def record_sandbox_capacity_sample(session_factory: Any, *, store: Any | N
     cutoff = datetime.now(UTC).replace(tzinfo=None) - timedelta(minutes=5)
     async with session_factory() as session:
         states = list((await session.scalars(select(SandboxRuntimeInstanceModel.state))).all())
+        demand = await collect_sandbox_lease_demand(session)
         new_leases = int(
             await session.scalar(
                 select(func.count()).select_from(SandboxLeaseModel).where(
@@ -181,6 +272,7 @@ async def record_sandbox_capacity_sample(session_factory: Any, *, store: Any | N
     adaptive_target = policy.target_for(
         arrival_rate_per_min=arrival_rate,
         refill_p95_s=settings.NLP_AGENT_SANDBOX_REFILL_P95_S,
+        unassigned_lease_count=demand.unassigned_count,
     )
     sample = {
         "timestamp": now,
@@ -189,6 +281,9 @@ async def record_sandbox_capacity_sample(session_factory: Any, *, store: Any | N
         "assigned": sum(state == "assigned" for state in states),
         "total": sum(state in {"ready_unbound", "creating", "claiming", "assigned", "draining"} for state in states),
         "total_max": settings.NLP_AGENT_SANDBOX_RUNTIME_TOTAL_MAX,
+        "online_count": demand.online_count,
+        "unassigned_count": demand.unassigned_count,
+        "role_demand": demand.role_demand,
         "target": settings.NLP_AGENT_SANDBOX_WARM_POOL_READY_TARGET,
         "adaptive_target": adaptive_target,
         "deficit": max(0, adaptive_target - sum(state == "ready_unbound" for state in states)),

@@ -18,7 +18,7 @@ const sampledNow = now / 1000;
 
 const overview: SandboxOverview = {
   runtime_states: { creating: 1, ready_unbound: 4, claiming: 0, assigned: 3, draining: 1, failed: 0 },
-  capacity: { ready: 4, creating: 1, target: 5, deficit: 0, adaptive_target: 5, arrival_rate_per_min: 1.2 },
+  capacity: { ready: 4, creating: 1, target: 5, deficit: 0, adaptive_target: 5, arrival_rate_per_min: 1.2, online_count: 7, unassigned_count: 2 },
   execution_latency: { sample_count: 42, p50_ms: 320, p95_ms: 860, p99_ms: 1200 },
   active_executions: 3,
   recent_failures: 1,
@@ -117,6 +117,7 @@ describe("SandboxMonitorPage", () => {
     expect(chart.textContent).toContain(expectedTime);
     expect(chart.textContent).not.toContain("1970");
     expect(screen.getByText("运行中")).toBeVisible();
+    expect(screen.getByText(/在线 7/)).toBeVisible();
     expect(screen.getByText("近期故障")).toBeVisible();
     expect(screen.getByText("运行日志")).toBeVisible();
     expect(screen.getByText("运行时异常")).toBeVisible();

@@ -16,6 +16,32 @@ from pathlib import Path
 from typing import Iterable
 
 
+SANDBOX_ROLE_PRIORITY: dict[str, int] = {
+    "developer": 0,
+    "teacher": 1,
+    "student": 2,
+    "guest": 3,
+}
+
+
+def _role_priority(role_codes: Iterable[str]) -> int:
+    ranks = [SANDBOX_ROLE_PRIORITY.get(str(role).strip().lower(), SANDBOX_ROLE_PRIORITY["guest"]) for role in role_codes]
+    return min(ranks, default=SANDBOX_ROLE_PRIORITY["guest"])
+
+
+def should_defer_claim(
+    *,
+    current_role_codes: Iterable[str],
+    waiting_role_codes: Iterable[Iterable[str]],
+) -> bool:
+    """Return whether a lower-priority claim should yield to a waiting one."""
+    current_priority = _role_priority(current_role_codes)
+    return any(
+        _role_priority(waiting_roles) < current_priority
+        for waiting_roles in waiting_role_codes
+    )
+
+
 def refill_count(
     *,
     target: int,
@@ -77,11 +103,19 @@ class AdaptivePoolPolicy:
         if self.cooldown < timedelta(0):
             raise ValueError("cooldown must be non-negative")
 
-    def target_for(self, *, arrival_rate_per_min: float, refill_p95_s: float) -> int:
-        """Estimate ready slots as arrival rate × refill latency + burst buffer."""
-        if arrival_rate_per_min < 0 or refill_p95_s < 0:
-            raise ValueError("arrival rate and refill latency must be non-negative")
-        required = ceil(arrival_rate_per_min * refill_p95_s / 60.0) + self.burst_buffer
+    def target_for(
+        self,
+        *,
+        arrival_rate_per_min: float,
+        refill_p95_s: float,
+        unassigned_lease_count: int = 0,
+    ) -> int:
+        """Estimate ready slots from refill latency and waiting online leases."""
+        if arrival_rate_per_min < 0 or refill_p95_s < 0 or unassigned_lease_count < 0:
+            raise ValueError("arrival rate, refill latency, and unassigned leases must be non-negative")
+        forecast_required = ceil(arrival_rate_per_min * refill_p95_s / 60.0) + self.burst_buffer
+        online_required = unassigned_lease_count + self.burst_buffer
+        required = max(forecast_required, online_required)
         return min(self.ready_max, max(self.ready_min, required))
 
     def target_before_class(self, *, expected_sessions: int, sessions_per_runtime: int = 1) -> int:

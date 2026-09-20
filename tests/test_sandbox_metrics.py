@@ -1,6 +1,55 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
+
+
+def test_sandbox_lease_demand_counts_online_waiters_once_at_highest_role() -> None:
+    from server.sandbox.metrics import summarize_sandbox_lease_demand
+
+    demand = summarize_sandbox_lease_demand(
+        lease_rows=(
+            (frozenset({"developer", "student"}), False),
+            (frozenset({"teacher"}), False),
+            (frozenset({"student"}), True),
+            (frozenset({"guest"}), False),
+        )
+    )
+
+    assert demand.online_count == 4
+    assert demand.unassigned_count == 3
+    assert demand.role_demand == {"developer": 1, "teacher": 1, "guest": 1}
+
+
+def test_collect_sandbox_lease_demand_resolves_active_roles() -> None:
+    from server.sandbox.metrics import collect_sandbox_lease_demand
+
+    class Result:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def all(self):
+            return self._rows
+
+    class Session:
+        calls = 0
+
+        async def execute(self, _query):
+            self.calls += 1
+            if self.calls == 1:
+                return Result([("developer-user", None), ("student-user", "runtime-1")])
+            return Result([("developer-user", "developer"), ("student-user", "student")])
+
+    demand = asyncio.run(
+        collect_sandbox_lease_demand(
+            Session(),
+            now=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+    )
+
+    assert demand.online_count == 2
+    assert demand.unassigned_count == 1
+    assert demand.role_demand == {"developer": 1}
 
 
 def test_arrival_rate_uses_new_sandbox_leases_not_code_execution_count() -> None:
@@ -8,6 +57,54 @@ def test_arrival_rate_uses_new_sandbox_leases_not_code_execution_count() -> None
 
     assert sandbox_arrival_rate_per_min(new_lease_count=15, window_seconds=300) == 3.0
     assert sandbox_arrival_rate_per_min(new_lease_count=0, window_seconds=300) == 0.0
+
+
+def test_capacity_sample_contains_online_waiters_and_role_demand() -> None:
+    from server.sandbox.metrics import record_sandbox_capacity_sample
+
+    class ScalarResult:
+        def __init__(self, value):
+            self.value = value
+
+        def all(self):
+            return self.value
+
+    class Session:
+        async def scalars(self, _query):
+            return ScalarResult([])
+
+        async def scalar(self, _query):
+            return 0
+
+        async def execute(self, query):
+            if "nlp_sandbox_leases" in str(query):
+                return ScalarResult([("developer-user", None), ("guest-user", "runtime-1")])
+            return ScalarResult([("developer-user", "developer"), ("guest-user", "guest")])
+
+    class Factory:
+        def __call__(self):
+            class Context:
+                async def __aenter__(self):
+                    return Session()
+
+                async def __aexit__(self, *_args):
+                    return False
+
+            return Context()
+
+    class Store:
+        def __init__(self):
+            self.sample = None
+
+        async def record(self, sample):
+            self.sample = sample
+
+    store = Store()
+    asyncio.run(record_sandbox_capacity_sample(Factory(), store=store))
+
+    assert store.sample["online_count"] == 2
+    assert store.sample["unassigned_count"] == 1
+    assert store.sample["role_demand"] == {"developer": 1}
 
 
 def test_redis_metrics_store_keeps_bounded_history() -> None:

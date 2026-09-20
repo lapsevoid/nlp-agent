@@ -233,12 +233,19 @@ class WarmPoolManager:
             # fail closed when its optional writer is unavailable.
             return
 
-    def recommended_ready_target(self, *, arrival_rate_per_min: float, refill_p95_s: float) -> int:
+    def recommended_ready_target(
+        self,
+        *,
+        arrival_rate_per_min: float,
+        refill_p95_s: float,
+        unassigned_lease_count: int = 0,
+    ) -> int:
         if self._adaptive_policy is None:
             return self._ready_target
         return self._adaptive_policy.target_for(
             arrival_rate_per_min=arrival_rate_per_min,
             refill_p95_s=refill_p95_s,
+            unassigned_lease_count=unassigned_lease_count,
         )
 
     async def _effective_ready_target(self) -> int:
@@ -246,6 +253,7 @@ class WarmPoolManager:
             return self._requested_target
         arrival_rate = settings.NLP_AGENT_SANDBOX_ARRIVAL_RATE_PER_MIN
         refill_p95 = settings.NLP_AGENT_SANDBOX_REFILL_P95_S
+        unassigned_lease_count = 0
         latest = getattr(self._metrics_store, "latest", None)
         if latest is not None:
             try:
@@ -255,6 +263,7 @@ class WarmPoolManager:
                     if stamp <= 0 or datetime.now(UTC).timestamp() - stamp <= 300:
                         arrival_rate = max(0.0, float(sample.get("arrival_rate_per_min", arrival_rate)))
                         refill_p95 = max(0.0, float(sample.get("refill_p95_s", refill_p95)))
+                        unassigned_lease_count = max(0, int(sample.get("unassigned_count", 0) or 0))
                     else:
                         self._trace("sandbox.manager.metrics.stale", age_seconds=round(datetime.now(UTC).timestamp() - stamp, 1))
             except Exception as error:
@@ -262,6 +271,7 @@ class WarmPoolManager:
         desired = self.recommended_ready_target(
             arrival_rate_per_min=arrival_rate,
             refill_p95_s=refill_p95,
+            unassigned_lease_count=unassigned_lease_count,
         )
         if self._adaptive_policy is None or self._adaptive_state_store is None:
             return desired
@@ -464,7 +474,7 @@ class WarmPoolManager:
             environment = await session.get(SandboxEnvironmentModel, lease.environment_id)
             if environment is None or lease.generation != environment.generation:
                 return None
-            claim = await warm_pool_service.claim(session, scope)
+            claim = await warm_pool_service.claim(session, scope, lease_id=lease_id)
             if claim is not None:
                 lease.runtime_instance_id = claim.runtime.id
             return claim

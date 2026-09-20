@@ -18,6 +18,9 @@ export interface SandboxCapacitySample {
   assigned?: number;
   total?: number;
   total_max?: number;
+  online_count?: number;
+  unassigned_count?: number;
+  role_demand?: Record<string, number>;
   adaptive_target?: number;
   arrival_rate_per_min?: number;
 }
@@ -33,6 +36,9 @@ export interface SandboxOverview {
     total?: number;
     total_max?: number;
     execution_limit?: number;
+    online_count?: number;
+    unassigned_count?: number;
+    role_demand?: Record<string, number>;
     adaptive_target?: number;
     arrival_rate_per_min?: number;
   };
@@ -139,6 +145,8 @@ export function normalizeSandboxCapacitySamples(
       ...(Number.isFinite(finiteNumber(raw.assigned, Number.NaN)) ? { assigned: Math.max(0, finiteNumber(raw.assigned)) } : {}),
       ...(Number.isFinite(finiteNumber(raw.total, Number.NaN)) ? { total: Math.max(0, finiteNumber(raw.total)) } : {}),
       ...(Number.isFinite(finiteNumber(raw.total_max, Number.NaN)) ? { total_max: Math.max(0, finiteNumber(raw.total_max)) } : {}),
+      ...(Number.isFinite(finiteNumber(raw.online_count, Number.NaN)) ? { online_count: Math.max(0, finiteNumber(raw.online_count)) } : {}),
+      ...(Number.isFinite(finiteNumber(raw.unassigned_count, Number.NaN)) ? { unassigned_count: Math.max(0, finiteNumber(raw.unassigned_count)) } : {}),
       ...(Number.isFinite(adaptiveTarget) ? { adaptive_target: Math.max(0, adaptiveTarget) } : {}),
       ...(Number.isFinite(finiteNumber(raw.arrival_rate_per_min, Number.NaN))
         ? { arrival_rate_per_min: Math.max(0, finiteNumber(raw.arrival_rate_per_min)) }
@@ -314,7 +322,7 @@ export function SandboxMonitorPage({
     {loading && !overview ? <div className="sandbox-monitor-loading"><RefreshCw className="spin" /><span>正在读取沙箱运行状态…</span></div> : overview && <>
       <div className="sandbox-metric-grid">
         <MetricCard icon={Cpu} label="预热池" value={`${number(overview.capacity.ready)} / ${number(overview.capacity.target)}`} hint={overview.capacity.deficit ? `缺口 ${overview.capacity.deficit} 个` : `总上限 ${number(overview.capacity.total_max)}`} tone={overview.capacity.deficit ? "warning" : "success"} />
-        <MetricCard icon={Activity} label="运行中" value={number(overview.active_executions)} hint={`Runtime ${number(overview.capacity.assigned)} · 到达率 ${number(overview.capacity.arrival_rate_per_min, " /min")}`} tone="accent" />
+        <MetricCard icon={Activity} label="运行中" value={number(overview.active_executions)} hint={`在线 ${number(overview.capacity.online_count)} · Runtime ${number(overview.capacity.assigned)} · 到达率 ${number(overview.capacity.arrival_rate_per_min, " /min")}`} tone="accent" />
         <MetricCard icon={TimerReset} label="P95 执行耗时" value={number(overview.execution_latency.p95_ms, " ms")} hint={`P50 ${number(overview.execution_latency.p50_ms, " ms")}`} />
         <MetricCard icon={ShieldAlert} label="近期故障" value={number(overview.recent_failures)} hint={`${overview.execution_latency.sample_count} 个完成样本`} tone={overview.recent_failures ? "danger" : "success"} />
       </div>

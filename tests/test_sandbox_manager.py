@@ -55,6 +55,90 @@ def test_manager_host_guard_blocks_new_runtime_when_headroom_is_low() -> None:
     assert asyncio.run(manager._host_allows_create(total_count=1)) is False
 
 
+def test_manager_recommended_target_includes_unassigned_online_leases() -> None:
+    from server.sandbox.manager import WarmPoolManager
+    from server.sandbox.optimization import AdaptivePoolPolicy
+
+    class Docker:
+        runtime_kind = "docker"
+        image_digest = "registry.example/nova@sha256:" + "a" * 64
+
+    manager = WarmPoolManager(
+        session_factory=object(),
+        docker=Docker(),
+        resource_profile_id="python-base",
+        ready_target=1,
+        adaptive_policy=AdaptivePoolPolicy(ready_min=1, ready_max=3, burst_buffer=1),
+    )
+
+    assert manager.recommended_ready_target(
+        arrival_rate_per_min=0,
+        refill_p95_s=4,
+        unassigned_lease_count=2,
+    ) == 3
+
+
+def test_manager_effective_target_reads_recent_unassigned_demand_sample() -> None:
+    from server.sandbox.manager import WarmPoolManager
+    from server.sandbox.optimization import AdaptivePoolPolicy
+
+    class Docker:
+        runtime_kind = "docker"
+        image_digest = "registry.example/nova@sha256:" + "a" * 64
+
+    class Metrics:
+        async def latest(self):
+            return {
+                "timestamp": datetime.now(UTC).timestamp(),
+                "arrival_rate_per_min": 0,
+                "refill_p95_s": 4,
+                "unassigned_count": 2,
+            }
+
+    manager = WarmPoolManager(
+        session_factory=object(),
+        docker=Docker(),
+        resource_profile_id="python-base",
+        ready_target=1,
+        adaptive_policy=AdaptivePoolPolicy(ready_min=1, ready_max=3, burst_buffer=1),
+        metrics_store=Metrics(),
+    )
+
+    assert asyncio.run(manager._effective_ready_target()) == 3
+
+
+def test_claim_priority_defers_student_when_teacher_is_waiting() -> None:
+    from server.sandbox.warm_pool import warm_pool_service
+
+    class Result:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def all(self):
+            return self.rows
+
+    class Session:
+        def __init__(self):
+            self.calls = 0
+
+        async def scalars(self, _query):
+            self.calls += 1
+            if self.calls == 1:
+                return Result(["student"])
+            return Result(["teacher-user"])
+
+        async def execute(self, _query):
+            return Result([("teacher-user", "teacher")])
+
+    assert asyncio.run(
+        warm_pool_service._has_higher_priority_waiter(
+            Session(),
+            current_lease_id="student-lease",
+            current_user_id="student-user",
+        )
+    ) is True
+
+
 def test_kernel_ready_finalization_promotes_cached_image_slots() -> None:
     from server.sandbox.manager import ready_state_after_kernel_check
 

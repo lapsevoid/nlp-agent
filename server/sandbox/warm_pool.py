@@ -5,15 +5,23 @@ from __future__ import annotations
 import hashlib
 import hmac
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import StrEnum
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from server.infrastructure.mysql.models import SandboxEnvironmentModel, SandboxRuntimeInstanceModel
+from server.infrastructure.mysql.models import (
+    RoleModel,
+    SandboxEnvironmentModel,
+    SandboxLeaseModel,
+    SandboxRuntimeInstanceModel,
+    UserRoleModel,
+)
 
 from .contracts import SandboxScope
+from .optimization import should_defer_claim
 
 
 class RuntimeState(StrEnum):
@@ -82,7 +90,78 @@ class WarmPoolService:
     def validate_nonce(stored_hash: str, supplied_nonce: str) -> bool:
         return validate_claim_nonce(stored_hash, supplied_nonce)
 
-    async def claim(self, session: AsyncSession, scope: SandboxScope) -> RuntimeClaim | None:
+    async def _has_higher_priority_waiter(
+        self,
+        session: AsyncSession,
+        *,
+        current_lease_id: str,
+        current_user_id: str,
+    ) -> bool:
+        now = datetime.now(UTC).replace(tzinfo=None)
+        current_roles = set(
+            (
+                await session.scalars(
+                    select(RoleModel.code)
+                    .join(UserRoleModel, UserRoleModel.role_id == RoleModel.id)
+                    .where(
+                        UserRoleModel.user_id == current_user_id,
+                        RoleModel.status == "active",
+                        or_(
+                            UserRoleModel.expires_at.is_(None),
+                            UserRoleModel.expires_at > now,
+                        ),
+                    )
+                )
+            ).all()
+        )
+        waiting_user_ids = list(
+            (
+                await session.scalars(
+                    select(SandboxLeaseModel.user_id)
+                    .where(
+                        SandboxLeaseModel.id != current_lease_id,
+                        SandboxLeaseModel.state == "active",
+                        SandboxLeaseModel.runtime_instance_id.is_(None),
+                        SandboxLeaseModel.expires_at > now,
+                    )
+                    .limit(100)
+                )
+            ).all()
+        )
+        if not waiting_user_ids:
+            return False
+        role_rows = (
+            await session.execute(
+                select(UserRoleModel.user_id, RoleModel.code)
+                .join(RoleModel, RoleModel.id == UserRoleModel.role_id)
+                .where(
+                    UserRoleModel.user_id.in_(waiting_user_ids),
+                    RoleModel.status == "active",
+                    or_(
+                        UserRoleModel.expires_at.is_(None),
+                        UserRoleModel.expires_at > now,
+                    ),
+                )
+            )
+        ).all()
+        roles_by_user: dict[str, set[str]] = {}
+        for user_id, role_code in role_rows:
+            roles_by_user.setdefault(str(user_id), set()).add(str(role_code))
+        waiting_roles = (
+            roles_by_user.get(str(user_id), {"guest"}) for user_id in waiting_user_ids
+        )
+        return should_defer_claim(
+            current_role_codes=current_roles or {"guest"},
+            waiting_role_codes=waiting_roles,
+        )
+
+    async def claim(
+        self,
+        session: AsyncSession,
+        scope: SandboxScope,
+        *,
+        lease_id: str | None = None,
+    ) -> RuntimeClaim | None:
         environment = await session.scalar(
             select(SandboxEnvironmentModel)
             .where(SandboxEnvironmentModel.owner_user_id == scope.owner_user_id)
@@ -108,6 +187,12 @@ class WarmPoolService:
             nonce = str(uuid4())
             existing.claim_nonce_hash = claim_nonce_hash(nonce)
             return RuntimeClaim(runtime=existing, nonce=nonce)
+        if lease_id is not None and await self._has_higher_priority_waiter(
+            session,
+            current_lease_id=lease_id,
+            current_user_id=scope.owner_user_id,
+        ):
+            return None
         runtime = await session.scalar(
             select(SandboxRuntimeInstanceModel)
             .where(

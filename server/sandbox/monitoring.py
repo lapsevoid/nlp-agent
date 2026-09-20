@@ -16,7 +16,11 @@ from server.rbac.service import rbac_service
 from .commands import create_sandbox_manager_command_store
 from .developer import capacity_snapshot, summarize_execution_latency, summarize_runtime_states
 from .events import default_sandbox_event_store
-from .metrics import default_sandbox_metrics_store, sandbox_arrival_rate_per_min
+from .metrics import (
+    collect_sandbox_lease_demand,
+    default_sandbox_metrics_store,
+    sandbox_arrival_rate_per_min,
+)
 from .optimization import AdaptivePoolPolicy, load_preload_matrix
 
 
@@ -185,6 +189,7 @@ async def sandbox_overview(db: AsyncSession, request: Any) -> dict[str, object]:
         )
         or 0
     )
+    lease_demand = await collect_sandbox_lease_demand(db, now=sampled_now)
     observed_arrival_rate = sandbox_arrival_rate_per_min(
         new_lease_count=new_lease_count,
         window_seconds=300,
@@ -208,6 +213,7 @@ async def sandbox_overview(db: AsyncSession, request: Any) -> dict[str, object]:
     ).target_for(
         arrival_rate_per_min=observed_arrival_rate,
         refill_p95_s=settings.NLP_AGENT_SANDBOX_REFILL_P95_S,
+        unassigned_lease_count=lease_demand.unassigned_count,
     )
     capacity["adaptive_target"] = adaptive_target
     manager = getattr(request.app.state, "sandbox_manager", None)
@@ -218,9 +224,12 @@ async def sandbox_overview(db: AsyncSession, request: Any) -> dict[str, object]:
             for key in (
                 "ready", "creating", "target", "deficit", "adaptive_target",
                 "assigned", "total", "total_max", "execution_limit",
+                "online_count", "unassigned_count",
             ):
                 if key in manager_capacity:
                     capacity[key] = int(manager_capacity[key])
+            if isinstance(manager_capacity.get("role_demand"), dict):
+                capacity["role_demand"] = dict(manager_capacity["role_demand"])
             adaptive_target = int(capacity["adaptive_target"])
         except Exception:
             # The monitor remains useful during a Manager restart; the database
@@ -240,6 +249,9 @@ async def sandbox_overview(db: AsyncSession, request: Any) -> dict[str, object]:
         "assigned": capacity.get("assigned", runtime_states.get("assigned", 0)),
         "total": capacity.get("total", sum(runtime_states.values())),
         "total_max": capacity.get("total_max", settings.NLP_AGENT_SANDBOX_RUNTIME_TOTAL_MAX),
+        "online_count": capacity.get("online_count", lease_demand.online_count),
+        "unassigned_count": capacity.get("unassigned_count", lease_demand.unassigned_count),
+        "role_demand": capacity.get("role_demand", lease_demand.role_demand),
         "target": capacity["target"],
         "deficit": capacity["deficit"],
         "adaptive_target": adaptive_target,
