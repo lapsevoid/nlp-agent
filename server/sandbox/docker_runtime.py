@@ -9,7 +9,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 import asyncio
 import json
+import os
 import re
+import shutil
 from uuid import uuid4
 
 from .runtime_profile import DEFAULT_SANDBOX_RUNTIME_LIMITS
@@ -17,6 +19,18 @@ from .runtime_profile import DEFAULT_SANDBOX_RUNTIME_LIMITS
 
 DOCKER_COMMAND_TIMEOUT_SECONDS = 15
 PROCESS_REAP_TIMEOUT_SECONDS = 2
+
+
+def _available_memory_mb() -> float | None:
+    """Return Linux host available memory when the platform exposes it."""
+    try:
+        available_pages = os.sysconf("SC_AVPHYS_PAGES")
+        page_size = os.sysconf("SC_PAGE_SIZE")
+    except (AttributeError, OSError, ValueError):
+        return None
+    if available_pages <= 0 or page_size <= 0:
+        return None
+    return available_pages * page_size / (1024 * 1024)
 
 
 async def _kill_and_reap(process: asyncio.subprocess.Process) -> None:
@@ -80,6 +94,14 @@ class DockerRuntimeAdapter:
     def image_digest(self) -> str:
         """Expose immutable image identity without leaking backend config."""
         return self.config.image
+
+    def host_resources(self) -> dict[str, float | None]:
+        """Expose only coarse host headroom needed by the Manager guard."""
+        disk = shutil.disk_usage("/")
+        return {
+            "available_memory_mb": _available_memory_mb(),
+            "disk_free_gb": disk.free / (1024**3),
+        }
 
     def create_command(self, *, name: str, claim_nonce: str) -> tuple[str, ...]:
         return (

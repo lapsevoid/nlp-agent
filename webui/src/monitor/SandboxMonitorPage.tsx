@@ -7,7 +7,7 @@ import { useState } from "react";
 export const MAX_SANDBOX_LOGS = 120;
 export const SANDBOX_LOG_RETENTION_MS = 10 * 60 * 1000;
 export const MAX_SANDBOX_CAPACITY_SAMPLES = 60;
-export const SANDBOX_REFRESH_INTERVAL_MS = 2_000;
+export const SANDBOX_REFRESH_INTERVAL_MS = 5_000;
 
 export interface SandboxCapacitySample {
   timestamp: number;
@@ -15,6 +15,9 @@ export interface SandboxCapacitySample {
   creating: number;
   target: number;
   deficit: number;
+  assigned?: number;
+  total?: number;
+  total_max?: number;
   adaptive_target?: number;
   arrival_rate_per_min?: number;
 }
@@ -26,6 +29,10 @@ export interface SandboxOverview {
     creating: number;
     target: number;
     deficit: number;
+    assigned?: number;
+    total?: number;
+    total_max?: number;
+    execution_limit?: number;
     adaptive_target?: number;
     arrival_rate_per_min?: number;
   };
@@ -129,6 +136,9 @@ export function normalizeSandboxCapacitySamples(
       creating: Math.max(0, finiteNumber(raw.creating)),
       target: Math.max(0, finiteNumber(raw.target)),
       deficit: Math.max(0, finiteNumber(raw.deficit)),
+      ...(Number.isFinite(finiteNumber(raw.assigned, Number.NaN)) ? { assigned: Math.max(0, finiteNumber(raw.assigned)) } : {}),
+      ...(Number.isFinite(finiteNumber(raw.total, Number.NaN)) ? { total: Math.max(0, finiteNumber(raw.total)) } : {}),
+      ...(Number.isFinite(finiteNumber(raw.total_max, Number.NaN)) ? { total_max: Math.max(0, finiteNumber(raw.total_max)) } : {}),
       ...(Number.isFinite(adaptiveTarget) ? { adaptive_target: Math.max(0, adaptiveTarget) } : {}),
       ...(Number.isFinite(finiteNumber(raw.arrival_rate_per_min, Number.NaN))
         ? { arrival_rate_per_min: Math.max(0, finiteNumber(raw.arrival_rate_per_min)) }
@@ -141,7 +151,7 @@ export function normalizeSandboxCapacitySamples(
 export function mergeSandboxCapacitySamples(
   current: SandboxCapacitySample[],
   incoming: SandboxCapacitySample[],
-  now = Date.now(),
+  _now = Date.now(),
 ): SandboxCapacitySample[] {
   const normalizedCurrent = normalizeSandboxCapacitySamples(current);
   const normalizedIncoming = normalizeSandboxCapacitySamples(incoming);
@@ -150,12 +160,6 @@ export function mergeSandboxCapacitySamples(
     unique.set(sample.timestamp, sample);
   }
 
-  const latestCurrent = normalizedCurrent.at(-1);
-  const latestIncoming = normalizedIncoming.at(-1);
-  if (latestIncoming && (!latestCurrent || latestIncoming.timestamp <= latestCurrent.timestamp)) {
-    const syntheticTimestamp = Math.max(capacityTimestamp(now), (latestCurrent?.timestamp ?? 0) + 0.001);
-    unique.set(syntheticTimestamp, { ...latestIncoming, timestamp: syntheticTimestamp });
-  }
   return [...unique.values()]
     .sort((left, right) => left.timestamp - right.timestamp)
     .slice(-MAX_SANDBOX_CAPACITY_SAMPLES);
@@ -309,12 +313,12 @@ export function SandboxMonitorPage({
     {error && <div className="sandbox-monitor-error"><AlertTriangle size={17} /><span>{error}</span></div>}
     {loading && !overview ? <div className="sandbox-monitor-loading"><RefreshCw className="spin" /><span>正在读取沙箱运行状态…</span></div> : overview && <>
       <div className="sandbox-metric-grid">
-        <MetricCard icon={Cpu} label="预热池" value={`${number(overview.capacity.ready)} / ${number(overview.capacity.target)}`} hint={overview.capacity.deficit ? `缺口 ${overview.capacity.deficit} 个` : "容量在目标范围内"} tone={overview.capacity.deficit ? "warning" : "success"} />
-        <MetricCard icon={Activity} label="运行中" value={number(overview.active_executions)} hint={`到达率 ${number(overview.capacity.arrival_rate_per_min, " /min")}`} tone="accent" />
+        <MetricCard icon={Cpu} label="预热池" value={`${number(overview.capacity.ready)} / ${number(overview.capacity.target)}`} hint={overview.capacity.deficit ? `缺口 ${overview.capacity.deficit} 个` : `总上限 ${number(overview.capacity.total_max)}`} tone={overview.capacity.deficit ? "warning" : "success"} />
+        <MetricCard icon={Activity} label="运行中" value={number(overview.active_executions)} hint={`Runtime ${number(overview.capacity.assigned)} · 到达率 ${number(overview.capacity.arrival_rate_per_min, " /min")}`} tone="accent" />
         <MetricCard icon={TimerReset} label="P95 执行耗时" value={number(overview.execution_latency.p95_ms, " ms")} hint={`P50 ${number(overview.execution_latency.p50_ms, " ms")}`} />
         <MetricCard icon={ShieldAlert} label="近期故障" value={number(overview.recent_failures)} hint={`${overview.execution_latency.sample_count} 个完成样本`} tone={overview.recent_failures ? "danger" : "success"} />
       </div>
-      <section className="sandbox-monitor-panel sandbox-capacity-panel"><header><div><span className="sandbox-section-kicker">CAPACITY SIGNAL</span><h3>容量实时趋势</h3><p>客户端持续保留最近 60 个采样点，服务端短暂无历史时曲线也不会重置。</p></div><span className="sandbox-refresh-hint"><Wifi size={14} />每 2 秒同步 · {dateTime(overview.sampled_at)}</span></header><CapacityChart samples={overview.capacity_history} /></section>
+      <section className="sandbox-monitor-panel sandbox-capacity-panel"><header><div><span className="sandbox-section-kicker">CAPACITY SIGNAL</span><h3>容量实时趋势</h3><p>服务端按真实采样点更新，页面刷新不会制造伪造的时间点。</p></div><span className="sandbox-refresh-hint"><Wifi size={14} />每 5 秒同步 · {dateTime(overview.sampled_at)}</span></header><CapacityChart samples={overview.capacity_history} /></section>
       <div className="sandbox-monitor-columns">
         <section className="sandbox-monitor-panel sandbox-health-panel"><header><div><span className="sandbox-section-kicker">RUNTIME HEALTH</span><h3>运行时健康</h3><p>当前实例按生命周期状态聚合。</p></div><span className="sandbox-health-total"><TerminalSquare size={14} />{runtimes.length} 实例</span></header><div className="sandbox-state-grid">{visibleStates.map(([state, count]) => <div key={state}><span className={`sandbox-state-dot ${state}`} /><span>{STATE_LABELS[state] ?? state}</span><strong>{count}</strong></div>)}</div>{overview.alerts.length > 0 && <div className="sandbox-alert-list">{overview.alerts.map((alert) => <div key={alert.code} className={alert.severity === "critical" ? "critical" : "warning"}><AlertTriangle size={15} /><span><strong>{alert.message}</strong><small>{alert.severity === "critical" ? "需要立即处理" : "需要关注"}</small></span></div>)}</div>}{!overview.alerts.length && <div className="sandbox-all-clear"><CheckCircle2 size={17} /><span>当前没有容量告警</span></div>}</section>
         <section className="sandbox-monitor-panel sandbox-log-panel"><header><div><span className="sandbox-section-kicker">SIGNAL STREAM</span><h3>运行日志</h3><p>只显示异常和状态变化，自动清理 10 分钟以前的记录。</p></div><span className="sandbox-log-count">{logLoading ? "同步中…" : `${visibleLogs.length} 条`}</span></header><div className="sandbox-log-list" aria-live="polite">{visibleLogs.map((item) => <article key={item.id}><span className={`sandbox-log-level ${item.level}`}>{levelLabel(item.level)}</span><div><strong>{item.message}</strong><small>{dateTime(item.timestamp)} · {item.event_type}{item.runtime_id ? ` · ${item.runtime_id.slice(0, 10)}` : ""}</small></div></article>)}{!visibleLogs.length && <EmptyState text="暂无需要关注的运行日志" />}</div></section>

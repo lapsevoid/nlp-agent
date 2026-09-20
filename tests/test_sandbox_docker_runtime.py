@@ -1,9 +1,25 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+
+def test_docker_runtime_reports_host_headroom_for_capacity_guard(monkeypatch) -> None:
+    from server.sandbox.docker_runtime import DockerRuntimeAdapter, DockerRuntimeConfig
+
+    monkeypatch.setattr("server.sandbox.docker_runtime._available_memory_mb", lambda: 4096.0)
+    monkeypatch.setattr(
+        "server.sandbox.docker_runtime.shutil.disk_usage",
+        lambda _path: SimpleNamespace(free=20 * 1024**3),
+    )
+    adapter = DockerRuntimeAdapter(
+        DockerRuntimeConfig(image="ghcr.io/example/runtime@sha256:" + "a" * 64)
+    )
+
+    assert adapter.host_resources() == {"available_memory_mb": 4096.0, "disk_free_gb": 20.0}
 
 
 def test_docker_runtime_command_has_no_host_or_network_escape_hatches() -> None:

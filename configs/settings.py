@@ -80,7 +80,11 @@ class Settings(BaseSettings):
     NLP_AGENT_SANDBOX_WARM_POOL_READY_TARGET: int = 0
     NLP_AGENT_SANDBOX_ADAPTIVE_POOL_ENABLED: bool = False
     NLP_AGENT_SANDBOX_WARM_POOL_READY_MIN: int = 1
-    NLP_AGENT_SANDBOX_WARM_POOL_READY_MAX: int = 5
+    NLP_AGENT_SANDBOX_WARM_POOL_READY_MAX: int = 3
+    NLP_AGENT_SANDBOX_RUNTIME_TOTAL_MAX: int = 4
+    NLP_AGENT_SANDBOX_EXECUTION_CONCURRENCY_MAX: int = 2
+    NLP_AGENT_SANDBOX_HOST_MEMORY_RESERVE_MB: int = 3072
+    NLP_AGENT_SANDBOX_HOST_DISK_RESERVE_GB: int = 15
     NLP_AGENT_SANDBOX_BURST_BUFFER: int = 1
     NLP_AGENT_SANDBOX_ARRIVAL_RATE_PER_MIN: float = 0.0
     NLP_AGENT_SANDBOX_REFILL_P95_S: float = 4.0
@@ -94,6 +98,7 @@ class Settings(BaseSettings):
     # limit so a valid long-running execution cannot outlive its Web request.
     NLP_AGENT_SANDBOX_MANAGER_RPC_TIMEOUT_S: float = 75.0
     NLP_AGENT_SANDBOX_METRICS_RETENTION_S: int = 7 * 24 * 3600
+    NLP_AGENT_SANDBOX_METRICS_SAMPLE_INTERVAL_S: int = 30
     NLP_AGENT_SANDBOX_ARTIFACT_ORIGIN: str = ""
     # Public Nova origin allowed to embed artifact documents.  It is kept
     # separate from the artifact host so the delivery service can emit a

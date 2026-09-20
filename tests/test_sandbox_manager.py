@@ -35,6 +35,26 @@ def test_refill_plan_counts_only_pristine_ready_slots() -> None:
     assert refill_deficit(target=2, ready_count=3, creating_count=0) == 0
 
 
+def test_manager_host_guard_blocks_new_runtime_when_headroom_is_low() -> None:
+    from server.sandbox.manager import WarmPoolManager
+
+    class Docker:
+        runtime_kind = "docker"
+        image_digest = "registry.example/nova@sha256:" + "a" * 64
+
+        def host_resources(self) -> dict[str, float]:
+            return {"available_memory_mb": 3500.0, "disk_free_gb": 20.0}
+
+    manager = WarmPoolManager(
+        session_factory=object(),
+        docker=Docker(),
+        resource_profile_id="python-base",
+        ready_target=2,
+    )
+
+    assert asyncio.run(manager._host_allows_create(total_count=1)) is False
+
+
 def test_kernel_ready_finalization_promotes_cached_image_slots() -> None:
     from server.sandbox.manager import ready_state_after_kernel_check
 

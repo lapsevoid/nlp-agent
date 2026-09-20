@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+import time
 from uuid import uuid4
 
 from sqlalchemy import exists, select, text
@@ -19,8 +20,9 @@ from server.infrastructure.mysql.models import SandboxEnvironmentModel, SandboxL
 
 from .contracts import SandboxScope
 from .faults import SandboxFaultInjector
-from .optimization import AdaptivePoolPolicy
+from .optimization import AdaptivePoolPolicy, host_capacity_allows_create, refill_count
 from .runtime_adapters import SandboxRuntimeAdapter
+from .runtime_profile import DEFAULT_SANDBOX_RUNTIME_LIMITS
 from .warm_pool import RuntimeClaim, RuntimeState, reconcile_runtime_ids, runtime_container_name, warm_pool_service
 
 
@@ -28,9 +30,22 @@ def _utc_now() -> datetime:
     return datetime.now(UTC).replace(tzinfo=None)
 
 
-def refill_deficit(*, target: int, ready_count: int, creating_count: int) -> int:
-    """Count work needed without treating assigned/dirty instances as reusable capacity."""
-    return max(0, target - ready_count - creating_count)
+def refill_deficit(
+    *,
+    target: int,
+    ready_count: int,
+    creating_count: int,
+    total_count: int | None = None,
+    total_max: int | None = None,
+) -> int:
+    """Count work needed without exceeding the host-wide Runtime cap."""
+    return refill_count(
+        target=target,
+        ready_count=ready_count,
+        creating_count=creating_count,
+        total_count=total_count,
+        total_max=total_max,
+    )
 
 
 def ready_state_after_kernel_check(current_state: str) -> str:
@@ -202,6 +217,10 @@ class WarmPoolManager:
         self._adaptive_state_store = adaptive_state_store
         self._metrics_store = metrics_store
         self._requested_target: int | None = None
+        self._execution_semaphore = asyncio.Semaphore(
+            max(1, int(settings.NLP_AGENT_SANDBOX_EXECUTION_CONCURRENCY_MAX))
+        )
+        self._last_metrics_sample_at = 0.0
 
     @staticmethod
     def _trace(name: str, **payload: object) -> None:
@@ -305,8 +324,18 @@ class WarmPoolManager:
                     target=target,
                     ready_count=counts.ready_count,
                     creating_count=counts.creating_count,
+                    total_count=counts.total_count,
+                    total_max=settings.NLP_AGENT_SANDBOX_RUNTIME_TOTAL_MAX,
                 )
                 for _ in range(deficit):
+                    if not await self._host_allows_create(
+                        total_count=counts.total_count + len(reserved_runtime_ids)
+                    ):
+                        self._trace(
+                            "sandbox.manager.capacity.host_guard",
+                            total_count=counts.total_count + len(reserved_runtime_ids),
+                        )
+                        break
                     runtime_id = str(uuid4())
                     lock_session.add(
                         SandboxRuntimeInstanceModel(
@@ -330,12 +359,45 @@ class WarmPoolManager:
         )
         return len(reserved_runtime_ids)
 
-    async def capacity_snapshot(self) -> dict[str, int | str]:
+    async def _host_resources(self) -> dict[str, float | None] | None:
+        probe = getattr(self._docker, "host_resources", None)
+        if probe is None:
+            return None
+        result = probe()
+        if asyncio.iscoroutine(result):
+            result = await result
+        return result if isinstance(result, dict) else None
+
+    async def _host_allows_create(self, *, total_count: int) -> bool:
+        resources = await self._host_resources()
+        if resources is None:
+            # Non-Docker adapters may not expose host telemetry. The global
+            # Runtime cap still protects those adapters.
+            return total_count < settings.NLP_AGENT_SANDBOX_RUNTIME_TOTAL_MAX
+        available_memory = resources.get("available_memory_mb")
+        disk_free = resources.get("disk_free_gb")
+        if available_memory is not None and disk_free is not None:
+            return host_capacity_allows_create(
+                total_count=total_count,
+                total_max=settings.NLP_AGENT_SANDBOX_RUNTIME_TOTAL_MAX,
+                available_memory_mb=float(available_memory),
+                memory_reserve_mb=settings.NLP_AGENT_SANDBOX_HOST_MEMORY_RESERVE_MB,
+                runtime_memory_mb=DEFAULT_SANDBOX_RUNTIME_LIMITS.memory_mb,
+                disk_free_gb=float(disk_free),
+                disk_reserve_gb=settings.NLP_AGENT_SANDBOX_HOST_DISK_RESERVE_GB,
+            )
+        if disk_free is not None and float(disk_free) < settings.NLP_AGENT_SANDBOX_HOST_DISK_RESERVE_GB:
+            return False
+        if available_memory is not None and float(available_memory) < settings.NLP_AGENT_SANDBOX_HOST_MEMORY_RESERVE_MB + DEFAULT_SANDBOX_RUNTIME_LIMITS.memory_mb:
+            return False
+        return total_count < settings.NLP_AGENT_SANDBOX_RUNTIME_TOTAL_MAX
+
+    async def capacity_snapshot(self) -> dict[str, object]:
         """Management-plane capacity data for dashboards and alert thresholds."""
         async with self._session_factory() as session:
             counts = await self._counts(session)
         target = await self._effective_ready_target()
-        return {
+        snapshot: dict[str, object] = {
             "resource_profile": self._resource_profile_id,
             "ready": counts.ready_count,
             "creating": counts.creating_count,
@@ -344,11 +406,21 @@ class WarmPoolManager:
                 target=target,
                 ready_count=counts.ready_count,
                 creating_count=counts.creating_count,
+                total_count=counts.total_count,
+                total_max=settings.NLP_AGENT_SANDBOX_RUNTIME_TOTAL_MAX,
             ),
+            "assigned": counts.assigned_count,
+            "total": counts.total_count,
+            "total_max": settings.NLP_AGENT_SANDBOX_RUNTIME_TOTAL_MAX,
+            "execution_limit": max(1, int(settings.NLP_AGENT_SANDBOX_EXECUTION_CONCURRENCY_MAX)),
             # Report the target actually selected after reading the durable
             # metrics/cooldown state, not the static environment estimate.
             "adaptive_target": target,
         }
+        resources = await self._host_resources()
+        if resources is not None:
+            snapshot["host"] = resources
+        return snapshot
 
     async def claim(self, scope: SandboxScope, *, lease_id: str) -> RuntimeClaim | None:
         self._trace("sandbox.manager.claim.started", lease_id=lease_id)
@@ -609,7 +681,12 @@ class WarmPoolManager:
                 pass
         await self._retry_draining_runtimes()
         await self._destroy_unleased_assigned_runtimes()
-        if self._metrics_store is not None:
+        if (
+            self._metrics_store is not None
+            and time.monotonic() - self._last_metrics_sample_at
+            >= max(5, int(settings.NLP_AGENT_SANDBOX_METRICS_SAMPLE_INTERVAL_S))
+        ):
+            self._last_metrics_sample_at = time.monotonic()
             try:
                 from .metrics import record_sandbox_capacity_sample
 
@@ -701,7 +778,8 @@ class WarmPoolManager:
         if not external_id:
             raise RuntimeError("claimed runtime has no container id")
         try:
-            result = await self._docker.execute(external_id, source=source)
+            async with self._execution_semaphore:
+                result = await self._docker.execute(external_id, source=source)
             self._trace(
                 "sandbox.manager.execute.completed",
                 runtime_id=runtime_id,
@@ -862,17 +940,29 @@ class WarmPoolManager:
     class _Counts:
         ready_count: int
         creating_count: int
+        assigned_count: int
+        total_count: int
 
     async def _counts(self, session: AsyncSession) -> _Counts:
         rows = list(
             (await session.scalars(
                 select(SandboxRuntimeInstanceModel.state).where(
                     SandboxRuntimeInstanceModel.resource_profile_id == self._resource_profile_id,
-                    SandboxRuntimeInstanceModel.state.in_((RuntimeState.READY_UNBOUND, "creating")),
+                    SandboxRuntimeInstanceModel.state.in_(
+                        (
+                            RuntimeState.READY_UNBOUND,
+                            "creating",
+                            RuntimeState.CLAIMING,
+                            RuntimeState.ASSIGNED,
+                            RuntimeState.DRAINING,
+                        )
+                    ),
                 )
             )).all()
         )
         return self._Counts(
             ready_count=sum(state == RuntimeState.READY_UNBOUND for state in rows),
             creating_count=sum(state == "creating" for state in rows),
+            assigned_count=sum(state == RuntimeState.ASSIGNED for state in rows),
+            total_count=len(rows),
         )

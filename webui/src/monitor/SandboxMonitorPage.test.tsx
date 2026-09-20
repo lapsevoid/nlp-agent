@@ -71,7 +71,7 @@ describe("SandboxMonitorPage", () => {
     expect(visible).toEqual([]);
   });
 
-  it("keeps a rolling capacity timeline when the server repeats its latest sample", () => {
+  it("replaces a repeated server sample instead of inventing a new timestamp", () => {
     const current: SandboxCapacitySample[] = [
       { timestamp: sampledNow - 4, ready: 2, creating: 1, target: 5, deficit: 2 },
       { timestamp: sampledNow - 2, ready: 3, creating: 1, target: 5, deficit: 1 },
@@ -82,17 +82,16 @@ describe("SandboxMonitorPage", () => {
 
     const visible = mergeSandboxCapacitySamples(current, incoming, now);
 
-    expect(visible).toHaveLength(3);
-    expect(visible.at(-1)).toMatchObject({ timestamp: sampledNow, ready: 4, creating: 0 });
+    expect(visible).toHaveLength(2);
+    expect(visible.at(-1)).toMatchObject({ timestamp: sampledNow - 2, ready: 4, creating: 0 });
     expect(visible.map((sample) => sample.timestamp)).toEqual([
       sampledNow - 4,
       sampledNow - 2,
-      sampledNow,
     ]);
   });
 
-  it("refreshes the sandbox signal at a realtime cadence", () => {
-    expect(SANDBOX_REFRESH_INTERVAL_MS).toBe(2_000);
+  it("refreshes the sandbox signal without turning the chart into a ticker", () => {
+    expect(SANDBOX_REFRESH_INTERVAL_MS).toBe(5_000);
   });
 
   it("renders an accessible live capacity chart and concise operational cards", () => {

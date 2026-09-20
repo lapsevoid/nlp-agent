@@ -13,6 +13,46 @@ def test_adaptive_pool_target_is_bounded_and_uses_refill_p95() -> None:
     assert policy.target_for(arrival_rate_per_min=10_000, refill_p95_s=60) == 5
 
 
+def test_refill_count_respects_the_global_runtime_cap() -> None:
+    from server.sandbox.optimization import refill_count
+
+    assert refill_count(target=3, ready_count=1, creating_count=0, total_count=1, total_max=4) == 2
+    assert refill_count(target=3, ready_count=1, creating_count=0, total_count=3, total_max=4) == 1
+    assert refill_count(target=3, ready_count=1, creating_count=0, total_count=4, total_max=4) == 0
+
+
+def test_host_resource_guard_blocks_creation_below_memory_or_disk_reserve() -> None:
+    from server.sandbox.optimization import host_capacity_allows_create
+
+    assert host_capacity_allows_create(
+        total_count=1,
+        total_max=4,
+        available_memory_mb=4096,
+        memory_reserve_mb=3072,
+        runtime_memory_mb=768,
+        disk_free_gb=20,
+        disk_reserve_gb=15,
+    ) is True
+    assert host_capacity_allows_create(
+        total_count=1,
+        total_max=4,
+        available_memory_mb=3700,
+        memory_reserve_mb=3072,
+        runtime_memory_mb=768,
+        disk_free_gb=20,
+        disk_reserve_gb=15,
+    ) is False
+    assert host_capacity_allows_create(
+        total_count=1,
+        total_max=4,
+        available_memory_mb=4096,
+        memory_reserve_mb=3072,
+        runtime_memory_mb=768,
+        disk_free_gb=14.9,
+        disk_reserve_gb=15,
+    ) is False
+
+
 def test_class_forecast_and_cooldown_are_deterministic() -> None:
     from server.sandbox.optimization import AdaptivePoolPolicy
 

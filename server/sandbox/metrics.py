@@ -9,10 +9,21 @@ from typing import Any
 from configs.settings import settings
 from sqlalchemy import func, select
 
-from server.infrastructure.mysql.models import SandboxExecutionModel, SandboxRuntimeInstanceModel
+from server.infrastructure.mysql.models import SandboxLeaseModel, SandboxRuntimeInstanceModel
 
 from .faults import SandboxFaultInjector
 from .optimization import AdaptivePoolPolicy
+
+
+def sandbox_arrival_rate_per_min(*, new_lease_count: int, window_seconds: int) -> float:
+    """Convert newly-created Sandbox leases into a bounded per-minute rate.
+
+    Code executions on an already-assigned Kernel are deliberately excluded:
+    they do not create demand for another warm Runtime.
+    """
+    if new_lease_count < 0 or window_seconds <= 0:
+        raise ValueError("lease count must be non-negative and window must be positive")
+    return round(new_lease_count * 60.0 / window_seconds, 3)
 
 
 class RedisSandboxMetricsStore:
@@ -153,15 +164,15 @@ async def record_sandbox_capacity_sample(session_factory: Any, *, store: Any | N
     cutoff = datetime.now(UTC).replace(tzinfo=None) - timedelta(minutes=5)
     async with session_factory() as session:
         states = list((await session.scalars(select(SandboxRuntimeInstanceModel.state))).all())
-        arrivals = int(
+        new_leases = int(
             await session.scalar(
-                select(func.count()).select_from(SandboxExecutionModel).where(
-                    SandboxExecutionModel.started_at >= cutoff
+                select(func.count()).select_from(SandboxLeaseModel).where(
+                    SandboxLeaseModel.created_at >= cutoff
                 )
             )
             or 0
         )
-    arrival_rate = round(arrivals / 5.0, 3)
+    arrival_rate = sandbox_arrival_rate_per_min(new_lease_count=new_leases, window_seconds=300)
     policy = AdaptivePoolPolicy(
         ready_min=settings.NLP_AGENT_SANDBOX_WARM_POOL_READY_MIN,
         ready_max=settings.NLP_AGENT_SANDBOX_WARM_POOL_READY_MAX,
@@ -175,10 +186,14 @@ async def record_sandbox_capacity_sample(session_factory: Any, *, store: Any | N
         "timestamp": now,
         "ready": sum(state == "ready_unbound" for state in states),
         "creating": sum(state == "creating" for state in states),
+        "assigned": sum(state == "assigned" for state in states),
+        "total": sum(state in {"ready_unbound", "creating", "claiming", "assigned", "draining"} for state in states),
+        "total_max": settings.NLP_AGENT_SANDBOX_RUNTIME_TOTAL_MAX,
         "target": settings.NLP_AGENT_SANDBOX_WARM_POOL_READY_TARGET,
         "adaptive_target": adaptive_target,
         "deficit": max(0, adaptive_target - sum(state == "ready_unbound" for state in states)),
         "arrival_rate_per_min": arrival_rate,
+        "new_lease_count": new_leases,
         "refill_p95_s": settings.NLP_AGENT_SANDBOX_REFILL_P95_S,
     }
     try:

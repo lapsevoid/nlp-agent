@@ -10,13 +10,13 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from configs.settings import settings
-from server.infrastructure.mysql.models import SandboxExecutionModel, SandboxRuntimeInstanceModel
+from server.infrastructure.mysql.models import SandboxExecutionModel, SandboxLeaseModel, SandboxRuntimeInstanceModel
 from server.rbac.service import rbac_service
 
 from .commands import create_sandbox_manager_command_store
 from .developer import capacity_snapshot, summarize_execution_latency, summarize_runtime_states
 from .events import default_sandbox_event_store
-from .metrics import default_sandbox_metrics_store
+from .metrics import default_sandbox_metrics_store, sandbox_arrival_rate_per_min
 from .optimization import AdaptivePoolPolicy, load_preload_matrix
 
 
@@ -119,6 +119,8 @@ def _runtime_state_counts_query():
 
 
 async def sandbox_overview(db: AsyncSession, request: Any) -> dict[str, object]:
+    sampled_now = datetime.now(UTC)
+    recent_failure_cutoff = sampled_now.replace(tzinfo=None) - timedelta(minutes=15)
     rows = (
         await db.execute(
             _runtime_state_counts_query()
@@ -147,7 +149,14 @@ async def sandbox_overview(db: AsyncSession, request: Any) -> dict[str, object]:
     failed_execution_rows = (
         await db.execute(
             select(SandboxExecutionModel)
-            .where(SandboxExecutionModel.status.in_(("failed", "error", "timeout")))
+            .where(
+                SandboxExecutionModel.status.in_(("failed", "error", "timeout")),
+                func.coalesce(
+                    SandboxExecutionModel.completed_at,
+                    SandboxExecutionModel.started_at,
+                    SandboxExecutionModel.created_at,
+                ) >= recent_failure_cutoff,
+            )
             .order_by(SandboxExecutionModel.created_at.desc())
             .limit(50)
         )
@@ -155,20 +164,32 @@ async def sandbox_overview(db: AsyncSession, request: Any) -> dict[str, object]:
     failed_runtime_rows = (
         await db.execute(
             select(SandboxRuntimeInstanceModel)
-            .where(SandboxRuntimeInstanceModel.state == "failed")
+            .where(
+                SandboxRuntimeInstanceModel.state == "failed",
+                func.coalesce(
+                    SandboxRuntimeInstanceModel.updated_at,
+                    SandboxRuntimeInstanceModel.created_at,
+                ) >= recent_failure_cutoff,
+            )
             .order_by(SandboxRuntimeInstanceModel.updated_at.desc())
             .limit(50)
         )
     ).scalars().all()
 
     durations: list[float] = []
-    sampled_now = datetime.now(UTC)
-    observed_arrivals = 0
+    new_lease_count = int(
+        await db.scalar(
+            select(func.count()).select_from(SandboxLeaseModel).where(
+                SandboxLeaseModel.created_at >= sampled_now.replace(tzinfo=None) - timedelta(minutes=5)
+            )
+        )
+        or 0
+    )
+    observed_arrival_rate = sandbox_arrival_rate_per_min(
+        new_lease_count=new_lease_count,
+        window_seconds=300,
+    )
     for started_at, completed_at in execution_rows:
-        if started_at is not None:
-            started_for_rate = started_at.replace(tzinfo=UTC) if started_at.tzinfo is None else started_at
-            if timedelta(0) <= sampled_now - started_for_rate <= timedelta(minutes=5):
-                observed_arrivals += 1
         if started_at is None or completed_at is None:
             continue
         start = started_at.replace(tzinfo=UTC) if started_at.tzinfo is None else started_at
@@ -185,7 +206,7 @@ async def sandbox_overview(db: AsyncSession, request: Any) -> dict[str, object]:
         ready_max=settings.NLP_AGENT_SANDBOX_WARM_POOL_READY_MAX,
         burst_buffer=settings.NLP_AGENT_SANDBOX_BURST_BUFFER,
     ).target_for(
-        arrival_rate_per_min=round(observed_arrivals / 5.0, 3),
+        arrival_rate_per_min=observed_arrival_rate,
         refill_p95_s=settings.NLP_AGENT_SANDBOX_REFILL_P95_S,
     )
     capacity["adaptive_target"] = adaptive_target
@@ -194,7 +215,10 @@ async def sandbox_overview(db: AsyncSession, request: Any) -> dict[str, object]:
     if snapshot is not None:
         try:
             manager_capacity = await snapshot()
-            for key in ("ready", "creating", "target", "deficit", "adaptive_target"):
+            for key in (
+                "ready", "creating", "target", "deficit", "adaptive_target",
+                "assigned", "total", "total_max", "execution_limit",
+            ):
                 if key in manager_capacity:
                     capacity[key] = int(manager_capacity[key])
             adaptive_target = int(capacity["adaptive_target"])
@@ -213,10 +237,14 @@ async def sandbox_overview(db: AsyncSession, request: Any) -> dict[str, object]:
         "timestamp": sampled_now.timestamp(),
         "ready": capacity["ready"],
         "creating": capacity["creating"],
+        "assigned": capacity.get("assigned", runtime_states.get("assigned", 0)),
+        "total": capacity.get("total", sum(runtime_states.values())),
+        "total_max": capacity.get("total_max", settings.NLP_AGENT_SANDBOX_RUNTIME_TOTAL_MAX),
         "target": capacity["target"],
         "deficit": capacity["deficit"],
         "adaptive_target": adaptive_target,
-        "arrival_rate_per_min": round(observed_arrivals / 5.0, 3),
+        "arrival_rate_per_min": observed_arrival_rate,
+        "new_lease_count": new_lease_count,
         "refill_p95_s": settings.NLP_AGENT_SANDBOX_REFILL_P95_S,
     }
     if default_sandbox_metrics_store is not None:

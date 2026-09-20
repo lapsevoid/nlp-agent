@@ -16,6 +16,52 @@ from pathlib import Path
 from typing import Iterable
 
 
+def refill_count(
+    *,
+    target: int,
+    ready_count: int,
+    creating_count: int,
+    total_count: int | None = None,
+    total_max: int | None = None,
+) -> int:
+    """Return the number of new runtimes allowed by both pool and host caps.
+
+    ``target`` describes desired *ready* capacity while ``total_max`` protects
+    the host from unbounded assigned/creating/ready growth.  Keeping this
+    arithmetic pure gives the Manager one auditable capacity gate.
+    """
+    if min(target, ready_count, creating_count) < 0:
+        raise ValueError("capacity counts must be non-negative")
+    if (total_count is None) != (total_max is None):
+        raise ValueError("total_count and total_max must be provided together")
+    desired = max(0, target - ready_count - creating_count)
+    if total_count is None or total_max is None:
+        return desired
+    if total_count < 0 or total_max < 0:
+        raise ValueError("capacity totals must be non-negative")
+    return min(desired, max(0, total_max - total_count))
+
+
+def host_capacity_allows_create(
+    *,
+    total_count: int,
+    total_max: int,
+    available_memory_mb: float,
+    memory_reserve_mb: int,
+    runtime_memory_mb: int,
+    disk_free_gb: float,
+    disk_reserve_gb: int,
+) -> bool:
+    """Check the host safety gate before starting one more Runtime."""
+    if min(total_count, total_max, memory_reserve_mb, runtime_memory_mb, disk_reserve_gb) < 0:
+        raise ValueError("resource limits must be non-negative")
+    return bool(
+        total_count < total_max
+        and available_memory_mb >= memory_reserve_mb + runtime_memory_mb
+        and disk_free_gb >= disk_reserve_gb
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class AdaptivePoolPolicy:
     ready_min: int = 1

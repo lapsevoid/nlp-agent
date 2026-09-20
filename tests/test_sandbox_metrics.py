@@ -3,6 +3,13 @@ from __future__ import annotations
 import asyncio
 
 
+def test_arrival_rate_uses_new_sandbox_leases_not_code_execution_count() -> None:
+    from server.sandbox.metrics import sandbox_arrival_rate_per_min
+
+    assert sandbox_arrival_rate_per_min(new_lease_count=15, window_seconds=300) == 3.0
+    assert sandbox_arrival_rate_per_min(new_lease_count=0, window_seconds=300) == 0.0
+
+
 def test_redis_metrics_store_keeps_bounded_history() -> None:
     from server.sandbox.metrics import RedisSandboxMetricsStore
 
