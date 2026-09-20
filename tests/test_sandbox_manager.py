@@ -107,6 +107,53 @@ def test_manager_effective_target_reads_recent_unassigned_demand_sample() -> Non
     assert asyncio.run(manager._effective_ready_target()) == 3
 
 
+def test_manager_effective_target_reads_a_demand_window_before_latest_sample() -> None:
+    from server.sandbox.manager import WarmPoolManager
+    from server.sandbox.optimization import AdaptivePoolPolicy
+
+    class Docker:
+        runtime_kind = "docker"
+        image_digest = "registry.example/nova@sha256:" + "a" * 64
+
+    class Metrics:
+        async def recent(self, limit: int):
+            assert limit == 12
+            return [
+                {
+                    "timestamp": datetime.now(UTC).timestamp(),
+                    "arrival_rate_per_min": 12,
+                    "refill_p95_s": 10,
+                    "unassigned_count": 1,
+                },
+                {
+                    "timestamp": datetime.now(UTC).timestamp(),
+                    "arrival_rate_per_min": 0,
+                    "refill_p95_s": 1,
+                    "unassigned_count": 0,
+                },
+                {
+                    "timestamp": datetime.now(UTC).timestamp(),
+                    "arrival_rate_per_min": 0,
+                    "refill_p95_s": 1,
+                    "unassigned_count": 0,
+                },
+            ]
+
+        async def latest(self):
+            raise AssertionError("the Manager should prefer the rolling demand window")
+
+    manager = WarmPoolManager(
+        session_factory=object(),
+        docker=Docker(),
+        resource_profile_id="python-base",
+        ready_target=1,
+        adaptive_policy=AdaptivePoolPolicy(ready_min=1, ready_max=5, burst_buffer=1),
+        metrics_store=Metrics(),
+    )
+
+    assert asyncio.run(manager._effective_ready_target()) == 3
+
+
 def test_claim_priority_defers_student_when_teacher_is_waiting() -> None:
     from server.sandbox.warm_pool import warm_pool_service
 

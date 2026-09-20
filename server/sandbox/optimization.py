@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 import json
-from math import ceil
+from math import ceil, isfinite
 from pathlib import Path
 from typing import Iterable
 
@@ -88,6 +88,17 @@ def host_capacity_allows_create(
     )
 
 
+def _percentile(values: list[float], quantile: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    position = (len(ordered) - 1) * quantile
+    lower = int(position)
+    upper = min(lower + 1, len(ordered) - 1)
+    fraction = position - lower
+    return ordered[lower] + (ordered[upper] - ordered[lower]) * fraction
+
+
 @dataclass(frozen=True, slots=True)
 class AdaptivePoolPolicy:
     ready_min: int = 1
@@ -117,6 +128,56 @@ class AdaptivePoolPolicy:
         online_required = unassigned_lease_count + self.burst_buffer
         required = max(forecast_required, online_required)
         return min(self.ready_max, max(self.ready_min, required))
+
+    def target_for_samples(
+        self,
+        samples: Iterable[dict[str, object]],
+        *,
+        fallback_arrival_rate_per_min: float = 0.0,
+        fallback_refill_p95_s: float = 0.0,
+    ) -> int:
+        """Choose a bounded target from a recent, noisy demand window.
+
+        The Manager samples capacity independently of dashboard traffic.  A
+        single latest sample is too easy to under-read just after a burst, so
+        use the rolling P95 of arrival/refill signals and the maximum number
+        of currently waiting leases.  Invalid values are ignored and an empty
+        window safely falls back to the policy minimum.
+        """
+
+        def values(name: str) -> list[float]:
+            result: list[float] = []
+            for sample in samples_list:
+                raw = sample.get(name)
+                if raw is None:
+                    continue
+                try:
+                    value = float(raw or 0)
+                except (TypeError, ValueError):
+                    continue
+                if isfinite(value):
+                    result.append(max(0.0, value))
+            return result
+
+        samples_list = [sample for sample in samples if isinstance(sample, dict)]
+        if not samples_list:
+            return self.ready_min
+        arrival_values = values("arrival_rate_per_min")
+        refill_values = values("refill_p95_s")
+        unassigned_values = values("unassigned_count")
+        return self.target_for(
+            arrival_rate_per_min=(
+                _percentile(arrival_values, 0.95)
+                if arrival_values
+                else max(0.0, fallback_arrival_rate_per_min)
+            ),
+            refill_p95_s=(
+                _percentile(refill_values, 0.95)
+                if refill_values
+                else max(0.0, fallback_refill_p95_s)
+            ),
+            unassigned_lease_count=int(max(unassigned_values, default=0)),
+        )
 
     def target_before_class(self, *, expected_sessions: int, sessions_per_runtime: int = 1) -> int:
         """Reserve capacity for a scheduled class without exceeding hard bounds."""

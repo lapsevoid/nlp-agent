@@ -29,6 +29,29 @@ def test_adaptive_pool_target_covers_unassigned_online_leases() -> None:
     ) == 3
 
 
+def test_adaptive_pool_target_uses_a_recent_demand_window() -> None:
+    from server.sandbox.optimization import AdaptivePoolPolicy
+
+    policy = AdaptivePoolPolicy(ready_min=1, ready_max=5, burst_buffer=1)
+    samples = [
+        {"arrival_rate_per_min": 12, "refill_p95_s": 10, "unassigned_count": 1},
+        {"arrival_rate_per_min": 0, "refill_p95_s": 1, "unassigned_count": 0},
+        {"arrival_rate_per_min": 0, "refill_p95_s": 1, "unassigned_count": 0},
+    ]
+
+    assert policy.target_for(
+        arrival_rate_per_min=0,
+        refill_p95_s=1,
+        unassigned_lease_count=0,
+    ) == 1
+    assert policy.target_for_samples(samples) == 3
+    assert policy.target_for_samples(
+        [{"unassigned_count": 0}],
+        fallback_arrival_rate_per_min=30,
+        fallback_refill_p95_s=4,
+    ) == 3
+
+
 def test_sandbox_claim_priority_is_developer_teacher_student_guest() -> None:
     from server.sandbox.optimization import should_defer_claim
 

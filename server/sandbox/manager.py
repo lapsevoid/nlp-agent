@@ -254,8 +254,39 @@ class WarmPoolManager:
         arrival_rate = settings.NLP_AGENT_SANDBOX_ARRIVAL_RATE_PER_MIN
         refill_p95 = settings.NLP_AGENT_SANDBOX_REFILL_P95_S
         unassigned_lease_count = 0
+        recent = getattr(self._metrics_store, "recent", None)
         latest = getattr(self._metrics_store, "latest", None)
-        if latest is not None:
+        sample_window: list[dict[str, object]] = []
+        if recent is not None and self._adaptive_policy is not None:
+            try:
+                now_timestamp = datetime.now(UTC).timestamp()
+                for sample in await recent(limit=12):
+                    if not isinstance(sample, dict):
+                        continue
+                    stamp = float(sample.get("timestamp", 0) or 0)
+                    if stamp <= 0 or now_timestamp - stamp <= 300:
+                        sample_window.append(sample)
+                if sample_window:
+                    desired = self._adaptive_policy.target_for_samples(
+                        sample_window,
+                        fallback_arrival_rate_per_min=arrival_rate,
+                        fallback_refill_p95_s=refill_p95,
+                    )
+                else:
+                    self._trace("sandbox.manager.metrics.stale")
+                    desired = self.recommended_ready_target(
+                        arrival_rate_per_min=arrival_rate,
+                        refill_p95_s=refill_p95,
+                        unassigned_lease_count=unassigned_lease_count,
+                    )
+            except Exception as error:
+                self._trace("sandbox.manager.metrics.unavailable", error=type(error).__name__)
+                desired = self.recommended_ready_target(
+                    arrival_rate_per_min=arrival_rate,
+                    refill_p95_s=refill_p95,
+                    unassigned_lease_count=unassigned_lease_count,
+                )
+        elif latest is not None:
             try:
                 sample = await latest()
                 if sample:
@@ -268,11 +299,17 @@ class WarmPoolManager:
                         self._trace("sandbox.manager.metrics.stale", age_seconds=round(datetime.now(UTC).timestamp() - stamp, 1))
             except Exception as error:
                 self._trace("sandbox.manager.metrics.unavailable", error=type(error).__name__)
-        desired = self.recommended_ready_target(
-            arrival_rate_per_min=arrival_rate,
-            refill_p95_s=refill_p95,
-            unassigned_lease_count=unassigned_lease_count,
-        )
+            desired = self.recommended_ready_target(
+                arrival_rate_per_min=arrival_rate,
+                refill_p95_s=refill_p95,
+                unassigned_lease_count=unassigned_lease_count,
+            )
+        else:
+            desired = self.recommended_ready_target(
+                arrival_rate_per_min=arrival_rate,
+                refill_p95_s=refill_p95,
+                unassigned_lease_count=unassigned_lease_count,
+            )
         if self._adaptive_policy is None or self._adaptive_state_store is None:
             return desired
         load = getattr(self._adaptive_state_store, "load", None)
