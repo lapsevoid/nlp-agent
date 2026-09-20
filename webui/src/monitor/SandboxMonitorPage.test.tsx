@@ -18,7 +18,7 @@ const sampledNow = now / 1000;
 
 const overview: SandboxOverview = {
   runtime_states: { creating: 1, ready_unbound: 4, claiming: 0, assigned: 3, draining: 1, failed: 0 },
-  capacity: { ready: 4, creating: 1, target: 5, deficit: 0, adaptive_target: 5, arrival_rate_per_min: 1.2, online_count: 7, unassigned_count: 2 },
+  capacity: { ready: 4, creating: 1, target: 5, deficit: 0, adaptive_target: 5, arrival_rate_per_min: 1.2, online_count: 7, unassigned_count: 2, role_demand: { developer: 1, student: 1 } },
   execution_latency: { sample_count: 42, p50_ms: 320, p95_ms: 860, p99_ms: 1200 },
   active_executions: 3,
   recent_failures: 1,
@@ -118,9 +118,34 @@ describe("SandboxMonitorPage", () => {
     expect(chart.textContent).not.toContain("1970");
     expect(screen.getByText("运行中")).toBeVisible();
     expect(screen.getByText(/在线 7/)).toBeVisible();
+    expect(screen.getByText(/开发者 1/)).toBeVisible();
     expect(screen.getByText("近期故障")).toBeVisible();
     expect(screen.getByText("运行日志")).toBeVisible();
     expect(screen.getByText("运行时异常")).toBeVisible();
+  });
+
+  it("offers explicit capacity history windows without changing the page refresh loop", () => {
+    const onWindowChange = vi.fn();
+    render(
+      <SandboxMonitorPage
+        overview={overview}
+        logs={[]}
+        runtimes={[]}
+        executions={[]}
+        historyMinutes={30}
+        onHistoryMinutesChange={onWindowChange}
+        live
+        loading={false}
+        logLoading={false}
+        onRefresh={() => undefined}
+        onDrain={() => undefined}
+      />,
+    );
+
+    const group = screen.getByRole("group", { name: "容量趋势时间范围" });
+    expect(group).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "2 小时" }));
+    expect(onWindowChange).toHaveBeenCalledWith(120);
   });
 
   it("keeps rendering the chart when serialized timestamps arrive as strings", () => {

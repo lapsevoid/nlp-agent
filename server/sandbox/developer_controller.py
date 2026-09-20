@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,9 +15,10 @@ from configs.settings import settings
 from server.infrastructure.mysql.models import SandboxExecutionModel, SandboxLeaseModel, SandboxRuntimeInstanceModel
 from server.rbac.service import rbac_service
 
-from .developer import capacity_snapshot, summarize_execution_latency, summarize_runtime_states
+from .developer import capacity_alerts, capacity_snapshot, summarize_execution_latency, summarize_runtime_states
 from .events import default_sandbox_event_store
 from .metrics import (
+    aggregate_sandbox_capacity_samples,
     collect_sandbox_lease_demand,
     default_sandbox_metrics_store,
     sandbox_arrival_rate_per_min,
@@ -81,8 +82,14 @@ def _execution_payload(row: SandboxExecutionModel) -> dict[str, object | None]:
 
 
 @router.get("/overview")
-async def sandbox_overview(request: Request, db: DbSession, principal: Principal) -> dict[str, object]:
+async def sandbox_overview(
+    request: Request,
+    db: DbSession,
+    principal: Principal,
+    history_window_minutes: int = Query(default=30, ge=10, le=24 * 60),
+) -> dict[str, object]:
     _require_monitor(principal)
+    history_window_minutes = max(10, min(24 * 60, int(history_window_minutes)))
     sampled_now = datetime.now(UTC)
     recent_failure_cutoff = sampled_now.replace(tzinfo=None) - timedelta(minutes=15)
     rows = (await db.execute(select(SandboxRuntimeInstanceModel.state, func.count()).group_by(SandboxRuntimeInstanceModel.state))).all()
@@ -177,11 +184,11 @@ async def sandbox_overview(request: Request, db: DbSession, principal: Principal
             # The dashboard remains useful during a Manager restart; the
             # database-derived sample above is the safe fallback.
             pass
-    alerts: list[dict[str, str]] = []
-    if capacity["deficit"] > 0:
-        alerts.append({"code": "pool_deficit", "severity": "warning", "message": "Warm Pool ready capacity is below target."})
-    if runtime_states["failed"] > 0:
-        alerts.append({"code": "runtime_failed", "severity": "critical", "message": "Sandbox runtimes require reconciliation."})
+    alerts = capacity_alerts(
+        deficit=capacity["deficit"],
+        failed_runtime_count=runtime_states["failed"],
+        unassigned_count=lease_demand.unassigned_count,
+    )
     sample = {
         "timestamp": sampled_now.timestamp(),
         "ready": capacity["ready"], "creating": capacity["creating"],
@@ -201,8 +208,23 @@ async def sandbox_overview(request: Request, db: DbSession, principal: Principal
     if default_sandbox_metrics_store is not None:
         try:
             history = await default_sandbox_metrics_store.record(sample)
+            sample_interval = max(1, int(settings.NLP_AGENT_SANDBOX_METRICS_SAMPLE_INTERVAL_S))
+            history_limit = min(
+                2_000,
+                max(60, history_window_minutes * 60 // sample_interval + 60),
+            )
+            recent = getattr(default_sandbox_metrics_store, "recent", None)
+            if recent is not None:
+                history = await recent(limit=history_limit)
         except Exception:
             history = [sample]
+    history = aggregate_sandbox_capacity_samples(
+        history,
+        now=sampled_now.timestamp(),
+        window_seconds=history_window_minutes * 60,
+        bucket_seconds=max(30, (history_window_minutes * 60 + 59) // 60),
+        max_points=60,
+    )
     return {
         "runtime_states": runtime_states,
         "capacity": capacity,
@@ -222,6 +244,7 @@ async def sandbox_overview(request: Request, db: DbSession, principal: Principal
         ],
         "alerts": alerts,
         "capacity_history": history,
+        "capacity_history_window_minutes": history_window_minutes,
         "sampled_at": datetime.now(UTC).isoformat(),
     }
 

@@ -124,7 +124,7 @@ export const monitorApi = {
     return request<ErrorAnalysis>(`/observability/errors?${query.toString()}`);
   },
   storage: () => request<Record<string, unknown>>("/observability/storage"),
-  sandboxOverview: () => request<SandboxOverview>("/observability/sandbox/overview"),
+  sandboxOverview: (historyMinutes = 30) => request<SandboxOverview>(`/observability/sandbox/overview?history_window_minutes=${historyMinutes}`),
   sandboxLogs: (limit = 80, sinceSeconds = 600) => request<{ items: SandboxLogEntry[]; retention_seconds: number; sampled_at: string }>(`/observability/sandbox/logs?limit=${limit}&since_seconds=${sinceSeconds}`),
   sandboxRuntimes: (limit = 12, offset = 0) => request<SandboxPage<SandboxRuntime>>(`/observability/sandbox/runtimes?limit=${limit}&offset=${offset}`),
   sandboxRuntime: (runtimeId: string) => request<SandboxRuntime>(`/observability/sandbox/runtimes/${encodeURIComponent(runtimeId)}`),

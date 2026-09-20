@@ -21,6 +21,45 @@ def test_sandbox_lease_demand_counts_online_waiters_once_at_highest_role() -> No
     assert demand.role_demand == {"developer": 1, "teacher": 1, "guest": 1}
 
 
+def test_aggregate_sandbox_capacity_samples_keeps_latest_real_point_per_bucket() -> None:
+    from server.sandbox.metrics import aggregate_sandbox_capacity_samples
+
+    samples = [
+        {"timestamp": 100, "ready": 1},
+        {"timestamp": 239, "ready": 2},
+        {"timestamp": 300, "ready": 3},
+        {"timestamp": 359, "ready": 4},
+        {"timestamp": 420, "ready": 5},
+        {"timestamp": 500, "ready": 6},
+    ]
+
+    result = aggregate_sandbox_capacity_samples(
+        samples,
+        now=500,
+        window_seconds=300,
+        bucket_seconds=60,
+        max_points=60,
+    )
+
+    assert [(row["timestamp"], row["ready"]) for row in result] == [
+        (239.0, 2),
+        (359.0, 4),
+        (420.0, 5),
+        (500.0, 6),
+    ]
+
+
+def test_aggregate_sandbox_capacity_samples_rejects_invalid_window() -> None:
+    import pytest
+
+    from server.sandbox.metrics import aggregate_sandbox_capacity_samples
+
+    with pytest.raises(ValueError):
+        aggregate_sandbox_capacity_samples([], window_seconds=0)
+    with pytest.raises(ValueError):
+        aggregate_sandbox_capacity_samples([], bucket_seconds=0)
+
+
 def test_collect_sandbox_lease_demand_resolves_active_roles() -> None:
     from server.sandbox.metrics import collect_sandbox_lease_demand
 

@@ -14,9 +14,10 @@ from server.infrastructure.mysql.models import SandboxExecutionModel, SandboxLea
 from server.rbac.service import rbac_service
 
 from .commands import create_sandbox_manager_command_store
-from .developer import capacity_snapshot, summarize_execution_latency, summarize_runtime_states
+from .developer import capacity_alerts, capacity_snapshot, summarize_execution_latency, summarize_runtime_states
 from .events import default_sandbox_event_store
 from .metrics import (
+    aggregate_sandbox_capacity_samples,
     collect_sandbox_lease_demand,
     default_sandbox_metrics_store,
     sandbox_arrival_rate_per_min,
@@ -122,7 +123,13 @@ def _runtime_state_counts_query():
     ).group_by(SandboxRuntimeInstanceModel.state)
 
 
-async def sandbox_overview(db: AsyncSession, request: Any) -> dict[str, object]:
+async def sandbox_overview(
+    db: AsyncSession,
+    request: Any,
+    *,
+    history_window_minutes: int = 30,
+) -> dict[str, object]:
+    history_window_minutes = max(10, min(24 * 60, int(history_window_minutes)))
     sampled_now = datetime.now(UTC)
     recent_failure_cutoff = sampled_now.replace(tzinfo=None) - timedelta(minutes=15)
     rows = (
@@ -236,11 +243,11 @@ async def sandbox_overview(db: AsyncSession, request: Any) -> dict[str, object]:
             # sample above is the safe fallback.
             pass
 
-    alerts: list[dict[str, str]] = []
-    if capacity["deficit"] > 0:
-        alerts.append({"code": "pool_deficit", "severity": "warning", "message": "预热池容量低于目标。"})
-    if runtime_states["failed"] > 0:
-        alerts.append({"code": "runtime_failed", "severity": "critical", "message": "存在需要重新协调的沙箱运行时。"})
+    alerts = capacity_alerts(
+        deficit=capacity["deficit"],
+        failed_runtime_count=runtime_states["failed"],
+        unassigned_count=lease_demand.unassigned_count,
+    )
 
     sample = {
         "timestamp": sampled_now.timestamp(),
@@ -261,14 +268,24 @@ async def sandbox_overview(db: AsyncSession, request: Any) -> dict[str, object]:
     }
     if default_sandbox_metrics_store is not None:
         try:
-            history = await default_sandbox_metrics_store.recent()
+            sample_interval = max(1, int(settings.NLP_AGENT_SANDBOX_METRICS_SAMPLE_INTERVAL_S))
+            history_limit = min(
+                2_000,
+                max(60, history_window_minutes * 60 // sample_interval + 60),
+            )
+            history = await default_sandbox_metrics_store.recent(limit=history_limit)
         except Exception:
             history = []
     else:
         history = []
     history.append(sample)
-    history.sort(key=lambda item: float(item.get("timestamp", 0) or 0))
-    history = history[-60:]
+    history = aggregate_sandbox_capacity_samples(
+        history,
+        now=sampled_now.timestamp(),
+        window_seconds=history_window_minutes * 60,
+        bucket_seconds=max(30, (history_window_minutes * 60 + 59) // 60),
+        max_points=60,
+    )
 
     return {
         "runtime_states": runtime_states,
@@ -278,6 +295,7 @@ async def sandbox_overview(db: AsyncSession, request: Any) -> dict[str, object]:
         "recent_failures": len(failed_execution_rows) + len(failed_runtime_rows),
         "alerts": alerts,
         "capacity_history": history,
+        "capacity_history_window_minutes": history_window_minutes,
         "sampled_at": sampled_now.isoformat(),
     }
 

@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Iterable
 
 from configs.settings import settings
 from sqlalchemy import func, or_, select
@@ -29,6 +30,44 @@ class SandboxLeaseDemand:
     online_count: int
     unassigned_count: int
     role_demand: dict[str, int]
+
+
+def aggregate_sandbox_capacity_samples(
+    samples: Iterable[dict[str, object]],
+    *,
+    now: float | None = None,
+    window_seconds: int = 30 * 60,
+    bucket_seconds: int = 30,
+    max_points: int = 60,
+) -> list[dict[str, object]]:
+    """Return a stable, bounded view of real capacity samples.
+
+    Capacity gauges are sampled more frequently than a human can read.  The
+    dashboard therefore keeps the newest real sample in each time bucket,
+    instead of drawing every short-lived fluctuation or inventing empty
+    points.  The returned timestamp always came from an input sample.
+    """
+    if window_seconds <= 0 or bucket_seconds <= 0 or max_points <= 0:
+        raise ValueError("window, bucket, and point limits must be positive")
+    end = time.time() if now is None else float(now)
+    if not math.isfinite(end):
+        raise ValueError("now must be finite")
+    cutoff = end - window_seconds
+    buckets: dict[int, tuple[float, dict[str, object]]] = {}
+    for raw in samples:
+        try:
+            timestamp = float(raw.get("timestamp", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(timestamp) or timestamp < cutoff or timestamp > end:
+            continue
+        bucket = int(timestamp // bucket_seconds)
+        previous = buckets.get(bucket)
+        if previous is None or timestamp >= previous[0]:
+            sample = dict(raw)
+            sample["timestamp"] = timestamp
+            buckets[bucket] = (timestamp, sample)
+    return [sample for _timestamp, sample in sorted(buckets.values())[-max_points:]]
 
 
 def summarize_sandbox_lease_demand(
@@ -167,7 +206,7 @@ class RedisSandboxMetricsStore:
     async def recent(self, limit: int = 60) -> list[dict[str, object]]:
         """Read recent samples without extending or mutating the series."""
         self._faults.fail_if_configured("redis.metrics.read")
-        bounded_limit = min(max(1, limit), self._max_samples, 60)
+        bounded_limit = min(max(1, limit), self._max_samples)
         rows = await self._client.zrange(self._key, -bounded_limit, -1)
         return self._decode_rows(rows)
 

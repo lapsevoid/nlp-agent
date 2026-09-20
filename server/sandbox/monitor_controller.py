@@ -48,9 +48,14 @@ def create_sandbox_monitor_router(
         request: Request,
         db: AsyncSession = Depends(db_session_dependency),
         identity: AuthenticatedPrincipal = Depends(principal_dependency),
+        history_window_minutes: int = Query(default=30, ge=10, le=24 * 60),
     ):
         require_monitor(identity)
-        return await sandbox_overview(db, request)
+        return await sandbox_overview(
+            db,
+            request,
+            history_window_minutes=history_window_minutes,
+        )
 
     @router.get("/logs")
     async def logs(

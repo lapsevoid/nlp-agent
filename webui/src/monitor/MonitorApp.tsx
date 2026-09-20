@@ -155,6 +155,7 @@ export function MonitorApp() {
   const liveEventIds = useRef(new Set<string>());
   const [storage, setStorage] = useState<Record<string, unknown>>({});
   const [sandboxOverview, setSandboxOverview] = useState<SandboxOverview | null>(null);
+  const [sandboxHistoryMinutes, setSandboxHistoryMinutes] = useState(30);
   const [sandboxRuntimes, setSandboxRuntimes] = useState<SandboxRuntime[]>([]);
   const [sandboxExecutions, setSandboxExecutions] = useState<SandboxExecution[]>([]);
   const [sandboxRuntimePage, setSandboxRuntimePage] = useState({ total: 0, has_more: false });
@@ -177,7 +178,7 @@ export function MonitorApp() {
   const loadEvents = useCallback(async () => { setEventsLoading(true); setEventsError(""); try { const result = await monitorApi.events(100); setEvents((current) => { const merged = new Map(result.items.map((item) => [item.event_id, item])); for (const item of current) if (liveEventIds.current.has(item.event_id)) merged.set(item.event_id, item); return [...merged.values()].sort((left, right) => Date.parse(right.timestamp) - Date.parse(left.timestamp)).slice(0, 100); }); } catch (reason) { if (authStatus(reason) === 401 || authStatus(reason) === 403) { setAuthState("login"); setAuthMessageText(authMessage(reason)); } else { setEventsError(reason instanceof Error ? reason.message : String(reason)); } } finally { setEventsLoading(false); } }, []);
   const login = useCallback(async (username: string, password: string) => { setAuthMessageText(""); try { await monitorApi.login(username, password); setAuthState("checking"); await load(); } catch (reason) { setAuthState("login"); setAuthMessageText(authMessage(reason)); throw reason; } }, [load]);
   const handleAuthFailure = useCallback((reason: unknown) => { setAuthState("login"); setAuthMessageText(authMessage(reason)); }, []);
-  const loadSandbox = useCallback(async (initial = false) => {
+  const loadSandbox = useCallback(async (initial = false, historyMinutes = sandboxHistoryMinutes) => {
     if (sandboxRefreshInFlight.current) return;
     sandboxRefreshInFlight.current = true;
     if (initial) setSandboxLoading(true);
@@ -185,11 +186,13 @@ export function MonitorApp() {
     setSandboxError("");
     try {
       const [nextOverview, nextRuntimes, nextExecutions, nextLogs] = await Promise.all([
-        monitorApi.sandboxOverview(), monitorApi.sandboxRuntimes(), monitorApi.sandboxExecutions(), monitorApi.sandboxLogs(),
+        monitorApi.sandboxOverview(historyMinutes), monitorApi.sandboxRuntimes(), monitorApi.sandboxExecutions(), monitorApi.sandboxLogs(),
       ]);
       setSandboxOverview((current) => ({
         ...nextOverview,
-        capacity_history: mergeSandboxCapacitySamples(current?.capacity_history ?? [], nextOverview.capacity_history),
+        capacity_history: initial
+          ? nextOverview.capacity_history
+          : mergeSandboxCapacitySamples(current?.capacity_history ?? [], nextOverview.capacity_history),
       }));
       setSandboxRuntimes((current) => initial
         ? nextRuntimes.items
@@ -209,7 +212,7 @@ export function MonitorApp() {
       if (initial) setSandboxLoading(false);
       else setSandboxLogLoading(false);
     }
-  }, []);
+  }, [sandboxHistoryMinutes]);
   const loadSandboxMore = useCallback(async (kind: "runtimes" | "executions") => {
     if (sandboxRefreshInFlight.current) return;
     const isRuntimes = kind === "runtimes";
@@ -291,7 +294,7 @@ export function MonitorApp() {
   const traceFocus = traceSearch.get("focus") === "errors" || traceSearch.get("focus") === "slow" ? traceSearch.get("focus") as "errors" | "slow" : "all";
   const traceQuery = traceSearch.get("query") ?? "";
   const pageContent = useMemo(() => {
-    if (page === "sandbox") return <SandboxMonitorPage overview={sandboxOverview} logs={sandboxLogs} runtimes={sandboxRuntimes} executions={sandboxExecutions} runtimeTotal={sandboxRuntimePage.total} executionTotal={sandboxExecutionPage.total} runtimeHasMore={sandboxRuntimePage.has_more} executionHasMore={sandboxExecutionPage.has_more} listLoading={sandboxListLoading} live={sandboxLive} loading={sandboxLoading} logLoading={sandboxLogLoading} error={sandboxError} onRefresh={() => void loadSandbox(false)} onLoadMoreRuntimes={() => void loadSandboxMore("runtimes")} onLoadMoreExecutions={() => void loadSandboxMore("executions")} onDrain={(runtimeId) => void drainSandbox(runtimeId)} />;
+    if (page === "sandbox") return <SandboxMonitorPage overview={sandboxOverview} logs={sandboxLogs} runtimes={sandboxRuntimes} executions={sandboxExecutions} runtimeTotal={sandboxRuntimePage.total} executionTotal={sandboxExecutionPage.total} runtimeHasMore={sandboxRuntimePage.has_more} executionHasMore={sandboxExecutionPage.has_more} historyMinutes={sandboxHistoryMinutes} onHistoryMinutesChange={setSandboxHistoryMinutes} listLoading={sandboxListLoading} live={sandboxLive} loading={sandboxLoading} logLoading={sandboxLogLoading} error={sandboxError} onRefresh={() => void loadSandbox(false)} onLoadMoreRuntimes={() => void loadSandboxMore("runtimes")} onLoadMoreExecutions={() => void loadSandboxMore("executions")} onDrain={(runtimeId) => void drainSandbox(runtimeId)} />;
     if (page === "audit") return <AuthorizationAuditPage onAuthFailure={handleAuthFailure} />;
     if (!overview) return null;
     if (page === "traces") return <TraceExplorerPage days={days} initialFocus={traceFocus} initialQuery={traceQuery} />;
