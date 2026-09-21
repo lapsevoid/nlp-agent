@@ -282,6 +282,8 @@ def test_deploy_workflows_overlay_published_digests_without_mutating_server_env(
         ) in workflow
         assert 'rm -f "$DEPLOY_ENV_FILE"' in workflow
         assert "The deployment directory" in workflow
+        assert 'python3 - "$COMPOSE_CONFIG_JSON" <<\'PY\'' in workflow
+        assert 'python - "$COMPOSE_CONFIG_JSON" <<\'PY\'' not in workflow
 
 
 def test_test_deploy_does_not_prune_shared_docker_resources() -> None:
