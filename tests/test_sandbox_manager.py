@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+
+import pytest
 
 
 def _auth_fixture(**overrides: object) -> tuple[SimpleNamespace, SimpleNamespace, SimpleNamespace]:
@@ -87,6 +90,57 @@ def test_host_budget_lock_is_optional_for_local_single_process_development() -> 
             return True
 
     assert asyncio.run(exercise()) is True
+
+
+def test_docker_manager_fails_closed_without_shared_host_lock(monkeypatch) -> None:
+    from configs.settings import settings
+    from server.sandbox.manager import WarmPoolManager
+
+    monkeypatch.setattr(settings, "NLP_AGENT_SANDBOX_HOST_LOCK_FILE", "")
+    manager = WarmPoolManager(
+        session_factory=object(),
+        docker=SimpleNamespace(runtime_kind="docker"),
+        resource_profile_id="python-base",
+        ready_target=1,
+        require_host_lock=True,
+    )
+
+    with pytest.raises(RuntimeError, match="host capacity lock is required"):
+        asyncio.run(manager.refill())
+
+
+def test_manager_refill_keeps_host_lock_until_docker_provisioning_finishes(monkeypatch) -> None:
+    from configs.settings import settings
+    from server.sandbox.manager import WarmPoolManager
+
+    events: list[str] = []
+
+    @asynccontextmanager
+    async def fake_host_lock(_path: str):
+        events.append("acquired")
+        try:
+            yield
+        finally:
+            events.append("released")
+
+    class ProbeManager(WarmPoolManager):
+        async def _refill_locked(self) -> int:
+            assert events == ["acquired"]
+            events.append("docker-provisioned")
+            return 1
+
+    monkeypatch.setattr(settings, "NLP_AGENT_SANDBOX_HOST_LOCK_FILE", "probe.lock")
+    monkeypatch.setattr("server.sandbox.manager.host_budget_lock", fake_host_lock)
+    manager = ProbeManager(
+        session_factory=object(),
+        docker=SimpleNamespace(runtime_kind="docker"),
+        resource_profile_id="python-base",
+        ready_target=1,
+        require_host_lock=True,
+    )
+
+    assert asyncio.run(manager.refill()) == 1
+    assert events == ["acquired", "docker-provisioned", "released"]
 
 
 def test_manager_recommended_target_includes_unassigned_online_leases() -> None:

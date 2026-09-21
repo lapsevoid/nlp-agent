@@ -190,6 +190,7 @@ services:
     environment:
       NLP_AGENT_MONITOR_HOST: 0.0.0.0
       NLP_AGENT_MONITOR_PORT: 8766
+      NLP_AGENT_REDIS_URL: redis://redis:6379/0
       NLP_AGENT_LOG_DIR: /app/logs
       NLP_AGENT_LOG_SERVICE: nova-monitor
       NLP_AGENT_LOG_STDOUT: "${NLP_AGENT_LOG_STDOUT:-true}"
@@ -205,6 +206,8 @@ services:
     depends_on:
       nova-migrate:
         condition: service_completed_successfully
+      redis:
+        condition: service_healthy
 
 volumes:
   mysql-data:

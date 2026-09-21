@@ -143,6 +143,7 @@ async def run_forever() -> None:
         docker=runtime,
         resource_profile_id="python-base",
         ready_target=target,
+        require_host_lock=backend in {"runsc", "gvisor", "docker"},
         adaptive_policy=(
             AdaptivePoolPolicy(
                 ready_min=settings.NLP_AGENT_SANDBOX_WARM_POOL_READY_MIN,

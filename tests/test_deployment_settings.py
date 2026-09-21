@@ -224,6 +224,9 @@ def test_compose_requires_deployment_ports_and_scopes_manager_runtime_namespace(
         "${NLP_AGENT_SANDBOX_NAMESPACE:?"
     )
     assert any("/run/nova-sandbox-lock" in volume for volume in manager["volumes"])
+    monitor = compose["services"]["nova-monitor"]
+    assert monitor["environment"]["NLP_AGENT_REDIS_URL"] == "redis://redis:6379/0"
+    assert monitor["depends_on"]["redis"]["condition"] == "service_healthy"
 
 
 def test_environment_templates_declare_distinct_sandbox_namespaces():
@@ -234,3 +237,16 @@ def test_environment_templates_declare_distinct_sandbox_namespaces():
     assert 'NLP_AGENT_SANDBOX_NAMESPACE="prod"' in prod_env
     assert 'NOVA_SANDBOX_HOST_LOCK_DIR="/var/lock/nova-sandbox"' in test_env
     assert 'NOVA_SANDBOX_HOST_LOCK_DIR="/var/lock/nova-sandbox"' in prod_env
+
+
+def test_builtin_nginx_routes_monitor_spa_api_and_websocket_to_monitor_service():
+    root = Path(__file__).resolve().parents[1]
+    nginx = (root / "nginx" / "nginx.conf").read_text(encoding="utf-8")
+
+    assert "upstream nova_monitor" in nginx
+    assert "location /monitor-api/" in nginx
+    assert "proxy_pass http://nova_monitor/api/;" in nginx
+    assert "location /monitor/" in nginx
+    assert "proxy_pass http://nova_monitor/;" in nginx
+    assert "location = /ws/observability" in nginx
+    assert "proxy_pass http://nova_monitor;" in nginx

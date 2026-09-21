@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,9 @@ from .metrics import (
     sandbox_arrival_rate_per_min,
 )
 from .optimization import AdaptivePoolPolicy, load_preload_matrix
+
+
+_MANAGER_CAPACITY_TIMEOUT_SECONDS = 3.0
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -236,7 +240,12 @@ async def sandbox_overview(
     snapshot = getattr(manager, "capacity_snapshot", None)
     if snapshot is not None:
         try:
-            manager_capacity = await snapshot()
+            # Capacity is an operational enhancement, not a reason to stall the
+            # whole monitor page while Manager is restarting or Redis is down.
+            manager_capacity = await asyncio.wait_for(
+                snapshot(),
+                timeout=_MANAGER_CAPACITY_TIMEOUT_SECONDS,
+            )
             for key in (
                 "ready", "creating", "target", "deficit", "adaptive_target",
                 "assigned", "total", "total_max", "execution_limit",

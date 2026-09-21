@@ -216,6 +216,7 @@ class WarmPoolManager:
         fault_injector: SandboxFaultInjector | None = None,
         adaptive_state_store: object | None = None,
         metrics_store: object | None = None,
+        require_host_lock: bool = False,
     ) -> None:
         self._session_factory = session_factory
         self._docker = docker
@@ -226,6 +227,11 @@ class WarmPoolManager:
         self._faults = fault_injector or SandboxFaultInjector.from_env()
         self._adaptive_state_store = adaptive_state_store
         self._metrics_store = metrics_store
+        # Docker-backed managers in a shared host must fail closed when the
+        # deployment forgot to mount the cross-Compose lock.  The default is
+        # intentionally false so deterministic in-process/local adapters can
+        # still be used without a host filesystem dependency.
+        self._require_host_lock = require_host_lock
         self._requested_target: int | None = None
         self._requested_target_expires_at: float | None = None
         self._host_budget_blocked_count = 0
@@ -374,11 +380,23 @@ class WarmPoolManager:
         self._requested_target_expires_at = time.time() + ttl
 
     async def refill(self) -> int:
+        if self._require_host_lock and not settings.NLP_AGENT_SANDBOX_HOST_LOCK_FILE.strip():
+            raise RuntimeError(
+                "Sandbox Manager host capacity lock is required for Docker-backed refills"
+            )
+        # Keep this scope around both the database reservation and every
+        # Docker create.  A second Compose project cannot observe the same
+        # host count and reserve capacity until provisioning has completed.
         async with host_budget_lock(settings.NLP_AGENT_SANDBOX_HOST_LOCK_FILE):
             return await self._refill_locked()
 
     async def _refill_locked(self) -> int:
-        """Create only the deficit. Docker runs outside every database transaction."""
+        """Reserve and provision the deficit while the host lock is held.
+
+        Docker runs outside every database transaction, but remains inside the
+        caller's shared host-budget lock.  The per-profile MySQL advisory lock
+        is released before Docker I/O; the host lock is deliberately not.
+        """
         self._trace("sandbox.manager.refill.started", profile=self._resource_profile_id)
         lock_name = f"nova.sandbox.pool.{self._resource_profile_id}"
         reserved_runtime_ids: list[str] = []
