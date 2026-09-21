@@ -242,6 +242,43 @@ def test_manager_effective_target_reads_a_demand_window_before_latest_sample() -
     assert asyncio.run(manager._effective_ready_target()) == 3
 
 
+def test_manager_demand_window_timestamps_are_captured_after_recent_query() -> None:
+    from server.sandbox.manager import WarmPoolManager
+    from server.sandbox.optimization import AdaptivePoolPolicy
+
+    class Docker:
+        runtime_kind = "docker"
+        image_digest = "registry.example/nova@sha256:" + "a" * 64
+
+    class Metrics:
+        async def recent(self, limit: int):
+            assert limit == 12
+            # A real Redis round trip can finish after the caller starts the
+            # query. Samples created at return time must not be rejected as
+            # future data merely because the pre-query clock was earlier.
+            await asyncio.sleep(0.01)
+            timestamp = datetime.now(UTC).timestamp()
+            return [
+                {
+                    "timestamp": timestamp,
+                    "arrival_rate_per_min": 12,
+                    "refill_p95_s": 10,
+                    "unassigned_count": 1,
+                }
+            ]
+
+    manager = WarmPoolManager(
+        session_factory=object(),
+        docker=Docker(),
+        resource_profile_id="python-base",
+        ready_target=1,
+        adaptive_policy=AdaptivePoolPolicy(ready_min=1, ready_max=5, burst_buffer=1),
+        metrics_store=Metrics(),
+    )
+
+    assert asyncio.run(manager._effective_ready_target()) == 3
+
+
 def test_manager_ignores_future_or_malformed_capacity_samples() -> None:
     from server.sandbox.manager import WarmPoolManager
     from server.sandbox.optimization import AdaptivePoolPolicy

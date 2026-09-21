@@ -280,8 +280,13 @@ class WarmPoolManager:
         sample_window: list[dict[str, object]] = []
         if recent is not None and self._adaptive_policy is not None:
             try:
+                recent_samples = await recent(limit=12)
+                # Redis/network latency means samples are often timestamped
+                # while the query is in flight. Capture the cutoff after the
+                # query completes, otherwise valid fresh samples can look like
+                # future data and collapse the adaptive target to its minimum.
                 now_timestamp = datetime.now(UTC).timestamp()
-                for sample in await recent(limit=12):
+                for sample in recent_samples:
                     if not isinstance(sample, dict):
                         continue
                     if _is_recent_capacity_sample(
