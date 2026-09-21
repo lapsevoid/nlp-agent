@@ -309,6 +309,8 @@ def test_test_deploy_does_not_prune_shared_docker_resources() -> None:
     assert 'docker image inspect "$SANDBOX_CONFIGURED_REF"' in deploy["run"]
     assert 'NLP_AGENT_SANDBOX_NAMESPACE=\\"test\\"' in deploy["run"]
     assert 'NLP_AGENT_SANDBOX_HOST_RUNTIME_TOTAL_MAX=\\"4\\"' in deploy["run"]
+    assert 'NOVA_WEB_HOST_PORT=\\"18765\\"' in deploy["run"]
+    assert 'NOVA_MONITOR_HOST_PORT=\\"18766\\"' in deploy["run"]
     assert "config --format json" in deploy["run"]
     assert "18765, 18766" in deploy["run"]
     assert "timeout-minutes" not in workflow["jobs"]["deploy"]
@@ -318,6 +320,8 @@ def test_release_deploy_overlays_production_namespace_and_validates_ports() -> N
     workflow = (ROOT / ".github" / "workflows" / "release-prod.yml").read_text(encoding="utf-8")
     assert 'NLP_AGENT_SANDBOX_NAMESPACE=\\"prod\\"' in workflow
     assert 'NLP_AGENT_SANDBOX_HOST_RUNTIME_TOTAL_MAX=\\"4\\"' in workflow
+    assert 'NOVA_WEB_HOST_PORT=\\"8765\\"' in workflow
+    assert 'NOVA_MONITOR_HOST_PORT=\\"8766\\"' in workflow
     assert "config --format json" in workflow
     assert "8765, 8766" in workflow
 
