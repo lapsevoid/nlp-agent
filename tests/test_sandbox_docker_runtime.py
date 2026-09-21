@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from io import StringIO
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -22,6 +23,23 @@ def test_docker_runtime_reports_host_headroom_for_capacity_guard(monkeypatch) ->
     assert adapter.host_resources() == {"available_memory_mb": 4096.0, "disk_free_gb": 20.0}
 
 
+def test_docker_runtime_uses_linux_memavailable_for_capacity_guard(monkeypatch) -> None:
+    from server.sandbox.docker_runtime import DockerRuntimeAdapter, DockerRuntimeConfig
+
+    meminfo = "MemFree:        242428 kB\nMemAvailable:  4289836 kB\n"
+
+    def fake_open(_path, _mode="r", *, encoding=None):
+        assert encoding == "ascii"
+        return StringIO(meminfo)
+
+    monkeypatch.setattr("builtins.open", fake_open)
+    adapter = DockerRuntimeAdapter(
+        DockerRuntimeConfig(image="ghcr.io/example/runtime@sha256:" + "b" * 64)
+    )
+
+    assert adapter.host_resources()["available_memory_mb"] == pytest.approx(4289836 / 1024)
+
+
 def test_docker_runtime_command_has_no_host_or_network_escape_hatches() -> None:
     from server.sandbox.docker_runtime import DockerRuntimeConfig, DockerRuntimeAdapter
 
@@ -39,7 +57,8 @@ def test_docker_runtime_command_has_no_host_or_network_escape_hatches() -> None:
     assert "--volume" not in command
     assert "/run/nova:rw,nosuid,nodev,uid=10001,gid=10001,mode=700,size=16m" in command
     assert command[-1] == "registry.example/nova@sha256:" + "a" * 64
-    assert "nova.sandbox.managed=true" in command
+    assert "nova.sandbox.managed=local" in command
+    assert "nova.sandbox.managed=true" not in command
     assert "nova.sandbox.namespace=local" in command
 
 
@@ -164,7 +183,7 @@ def test_managed_runtime_listing_preserves_full_container_ids() -> None:
     assert ids == {"full-container-id"}
     assert command == (
         "docker", "ps", "--all", "--no-trunc", "--quiet",
-        "--filter", "label=nova.sandbox.managed=true",
+        "--filter", "label=nova.sandbox.managed=local",
         "--filter", "label=nova.sandbox.namespace=local",
     )
 
@@ -228,7 +247,7 @@ def test_managed_runtime_count_includes_all_namespaces_for_host_budget() -> None
     assert count == 2
     assert command == (
         "docker", "ps", "--all", "--no-trunc", "--quiet",
-        "--filter", "label=nova.sandbox.managed=true",
+        "--filter", "label=nova.sandbox.managed",
     )
 
 

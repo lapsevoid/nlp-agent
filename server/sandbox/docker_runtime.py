@@ -22,7 +22,25 @@ PROCESS_REAP_TIMEOUT_SECONDS = 2
 
 
 def _available_memory_mb() -> float | None:
-    """Return Linux host available memory when the platform exposes it."""
+    """Return Linux host available memory when the platform exposes it.
+
+    ``SC_AVPHYS_PAGES`` reports immediately free pages on Linux, not the
+    reclaimable memory represented by ``MemAvailable``.  Using the former
+    makes a healthy host with filesystem cache look exhausted and prevents
+    every warm-runtime refill.  Prefer the kernel's ``MemAvailable`` metric
+    and retain the sysconf path for non-Linux platforms.
+    """
+    try:
+        with open("/proc/meminfo", "r", encoding="ascii") as meminfo:
+            for line in meminfo:
+                key, separator, raw_value = line.partition(":")
+                if separator and key.strip() == "MemAvailable":
+                    value_kb = float(raw_value.strip().split()[0])
+                    if value_kb > 0:
+                        return value_kb / 1024
+                    break
+    except (OSError, ValueError, IndexError):
+        pass
     try:
         available_pages = os.sysconf("SC_AVPHYS_PAGES")
         page_size = os.sysconf("SC_PAGE_SIZE")
@@ -110,7 +128,10 @@ class DockerRuntimeAdapter:
         return (
             "docker", "run", "--detach", "--name", name,
             "--runtime", self.config.runtime,
-            "--label", "nova.sandbox.managed=true",
+            # Scope the managed marker to this deployment namespace.  A
+            # rolling upgrade can leave an older Manager on the same host;
+            # its legacy ``managed=true`` filter must not see this runtime.
+            "--label", f"nova.sandbox.managed={self.config.namespace}",
             "--label", f"nova.sandbox.namespace={self.config.namespace}",
             "--label", "nova.sandbox.state=ready_unbound",
             "--read-only", "--network", "none", "--cap-drop", "ALL",
@@ -321,7 +342,7 @@ class DockerRuntimeAdapter:
         """List only this deployment's containers; unknown namespaces are untouched."""
         process = await asyncio.create_subprocess_exec(
             "docker", "ps", "--all", "--no-trunc", "--quiet",
-            "--filter", "label=nova.sandbox.managed=true",
+            "--filter", f"label=nova.sandbox.managed={self.config.namespace}",
             "--filter", f"label=nova.sandbox.namespace={self.config.namespace}",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -335,7 +356,9 @@ class DockerRuntimeAdapter:
         """Count all managed namespaces for the shared host budget guard."""
         process = await asyncio.create_subprocess_exec(
             "docker", "ps", "--all", "--no-trunc", "--quiet",
-            "--filter", "label=nova.sandbox.managed=true",
+            # ``label=key`` matches both legacy ``managed=true`` containers
+            # and namespace-scoped values used by the current Manager.
+            "--filter", "label=nova.sandbox.managed",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
