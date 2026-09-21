@@ -1,4 +1,4 @@
-import { Check, Copy, ExternalLink, MessageCircleQuestion } from "lucide-react";
+import { Check, Copy, Download, ExternalLink, FileText, MessageCircleQuestion } from "lucide-react";
 import { Children, Fragment, isValidElement, lazy, memo, Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { renderToString } from "katex";
 import ReactMarkdown from "react-markdown";
@@ -8,6 +8,8 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 
 import "katex/dist/katex.min.css";
+
+import type { LearningBookFile } from "@/shared/types";
 
 import { KnowledgeBookPromptComposer } from "./KnowledgeBookPromptComposer";
 
@@ -26,6 +28,31 @@ const LazyCode = lazy(async () => {
 export interface MarkdownCodeActions {
   onAskNova?: (code: string, language: string, prompt: string) => void;
   onOpenInSandbox?: (code: string, language: string) => void;
+}
+
+function formatBookFileSize(sizeBytes: number): string {
+  if (sizeBytes < 1024) return `${sizeBytes} B`;
+  if (sizeBytes < 1024 * 1024) return `${(sizeBytes / 1024).toFixed(1)} KB`;
+  return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function MarkdownBookFileCard({ file, onPreview }: { file: LearningBookFile; onPreview?: (file: LearningBookFile) => void }) {
+  const preview = onPreview
+    ? <button type="button" className="knowledge-book-file-preview" onClick={() => onPreview(file)} aria-label={`预览教材文件：${file.display_name}`} title="在文件工具中预览">
+      <strong>{file.display_name}</strong>
+      <span>{file.media_type} · {formatBookFileSize(file.size_bytes)}</span>
+    </button>
+    : <a className="knowledge-book-file-preview" href={file.preview_url} target="_blank" rel="noopener noreferrer" aria-label={`预览教材文件：${file.display_name}`}>
+      <strong>{file.display_name}</strong>
+      <span>{file.media_type} · {formatBookFileSize(file.size_bytes)}</span>
+    </a>;
+  return <span className="knowledge-book-file markdown-book-file-card" role="group" aria-label={`教材文件：${file.display_name}`}>
+    <FileText size={18} aria-hidden="true" />
+    {preview}
+    <a className="knowledge-book-file-download" href={file.download_url} download aria-label={`下载教材附件：${file.display_name}`} title="下载到本地">
+      <Download size={16} aria-hidden="true" />
+    </a>
+  </span>;
 }
 
 async function copyText(text: string): Promise<void> {
@@ -540,7 +567,7 @@ export function stripInternalChatMetadata(content: string): string {
   return content.replace(/\s*<!--\s*guided-result\s*:\s*(?:\{[\s\S]*?\}\s*-->|[\s\S]*$)/gi, "").trimEnd();
 }
 
-export function MarkdownContent({ children, streaming = false, streamRenderIntervalMs = 30, headingIds, headingIdsByLine, codeActions, allowDataImages = false, bookFileLinks }: { children: string; streaming?: boolean; streamRenderIntervalMs?: number; headingIds?: string[]; headingIdsByLine?: Record<number, string>; codeActions?: MarkdownCodeActions; allowDataImages?: boolean; bookFileLinks?: Record<string, string> }) {
+export function MarkdownContent({ children, streaming = false, streamRenderIntervalMs = 30, headingIds, headingIdsByLine, codeActions, allowDataImages = false, bookFileLinks, onPreviewBookFile }: { children: string; streaming?: boolean; streamRenderIntervalMs?: number; headingIds?: string[]; headingIdsByLine?: Record<number, string>; codeActions?: MarkdownCodeActions; allowDataImages?: boolean; bookFileLinks?: Record<string, LearningBookFile>; onPreviewBookFile?: (file: LearningBookFile) => void }) {
   const renderedChildren = useThrottledValue(children, streaming, Math.max(0, streamRenderIntervalMs));
   const renderedMarkdown = useMemo(() => {
     if (streaming) return null;
@@ -592,9 +619,9 @@ export function MarkdownContent({ children, streaming = false, streamRenderInter
             return <LessonCodeBlock language={match[1]} code={content} actions={codeActions} streaming={streaming} />;
           },
           a: ({ children: value, href, ...props }) => {
-            const resolvedBookFileHref = href ? bookFileLinks?.[href] ?? bookFileLinks?.[href.toLowerCase()] : undefined;
-            if (resolvedBookFileHref && isSafeMarkdownLink(resolvedBookFileHref)) {
-              return <a {...props} href={resolvedBookFileHref} target="_blank" rel="noopener noreferrer">{value}</a>;
+            const resolvedBookFile = href ? bookFileLinks?.[href.toLowerCase()] : undefined;
+            if (resolvedBookFile) {
+              return <MarkdownBookFileCard file={resolvedBookFile} onPreview={onPreviewBookFile} />;
             }
             if (isSafeMarkdownLink(href)) {
               if (isExternalMarkdownLink(href)) {
@@ -621,7 +648,7 @@ export function MarkdownContent({ children, streaming = false, streamRenderInter
         {normalizeLatexDelimiters(stripInternalChatMetadata(renderedChildren) || (streaming ? "" : "暂无内容"))}
       </ReactMarkdown>
     );
-  }, [allowDataImages, bookFileLinks, codeActions, headingIds, headingIdsByLine, renderedChildren, streaming]);
+  }, [allowDataImages, bookFileLinks, codeActions, headingIds, headingIdsByLine, onPreviewBookFile, renderedChildren, streaming]);
 
   return (
     <div className="markdown-content prose prose-zinc max-w-none dark:prose-invert prose-headings:scroll-mt-20 prose-pre:p-0">

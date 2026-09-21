@@ -25,6 +25,7 @@ function upload(files: File[]) {
 
 afterEach(() => {
   localStorage.clear();
+  vi.unstubAllGlobals();
 });
 
 describe("FilesPanel", () => {
@@ -48,6 +49,30 @@ describe("FilesPanel", () => {
     render(<FilesPanel userId="alice" workspaceId="workspace-1" />);
     expect(screen.getByRole("button", { name: "预览 notes.md" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "预览 demo.py" })).toBeInTheDocument();
+  });
+
+  it("previews a published textbook file inside the file tool", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, text: async () => "# 教材内容" });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<FilesPanel
+      userId="alice"
+      workspaceId="workspace-1"
+      previewRequest={{
+        id: "book-file-1",
+        name: "教材.md",
+        url: "/api/v1/learning/book/workspace-1/files/book-file-1",
+        mediaType: "text/markdown",
+        bytes: 20,
+      }}
+    />);
+
+    expect(await screen.findByText("来自知识教材")).toBeInTheDocument();
+    expect(await screen.findByTestId("markdown-preview")).toHaveTextContent("# 教材内容");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/learning/book/workspace-1/files/book-file-1",
+      expect.objectContaining({ credentials: "include" }),
+    );
   });
 
   it("keeps only plain-text previews for text files", async () => {

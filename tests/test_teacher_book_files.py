@@ -30,6 +30,9 @@ def test_validate_knowledge_book_file_returns_safe_metadata() -> None:
 
 
 def test_validate_knowledge_book_file_rejects_unsafe_or_unsupported_input() -> None:
+    assert MAX_KNOWLEDGE_BOOK_FILE_BYTES == 10 * 1024 * 1024
+    accepted = validate_knowledge_book_file("ten-megabytes.txt", "text/plain", b"x" * MAX_KNOWLEDGE_BOOK_FILE_BYTES)
+    assert accepted["size_bytes"] == MAX_KNOWLEDGE_BOOK_FILE_BYTES
     with pytest.raises(ValueError, match="文件名不能包含路径"):
         validate_knowledge_book_file("../secret.py", "text/x-python", b"x")
 

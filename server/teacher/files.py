@@ -7,7 +7,7 @@ import re
 from typing import Final
 
 
-MAX_KNOWLEDGE_BOOK_FILE_BYTES: Final = 3 * 1024 * 1024
+MAX_KNOWLEDGE_BOOK_FILE_BYTES: Final = 10 * 1024 * 1024
 MAX_KNOWLEDGE_BOOK_FILE_NAME_LENGTH: Final = 255
 
 # Keep this allow-list aligned with the existing local Files tool.  These are
