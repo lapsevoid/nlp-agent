@@ -353,6 +353,7 @@ def test_ci_workflow_can_be_dispatched_after_a_skip_ci_metadata_commit() -> None
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
 
     assert "  workflow_dispatch:" in workflow
+    assert '"fix/**"' in workflow
 
 
 def test_test_deploy_workflow_exposes_the_monitor_on_the_test_host_port() -> None:
