@@ -53,8 +53,8 @@ export interface SystemUsageSnapshot { scope: "system"; period_days: number; fro
 export interface SystemUsageUserPage { scope: "system"; period_days: number; from: string; to: string; items: SystemUsageDimension[]; total: number; offset: number; limit: number; has_more: boolean; }
 export interface SystemUsageDimensionPage extends SystemUsageUserPage { dimension: "users" | "workspaces" | "providers" | "purposes" | "models"; }
 export interface MonitorSession { user_id: string; roles: string[]; permissions: string[]; csrf_token: string; expires_at: number; }
-export type { SandboxExecution, SandboxLogEntry, SandboxOverview, SandboxPage, SandboxRuntime } from "./SandboxMonitorPage";
-import type { SandboxExecution, SandboxLogEntry, SandboxOverview, SandboxPage, SandboxRuntime } from "./SandboxMonitorPage";
+export type { SandboxExecution, SandboxExecutionEvent, SandboxLogEntry, SandboxOverview, SandboxPage, SandboxPreloadCompatibility, SandboxRuntime } from "./SandboxMonitorPage";
+import type { SandboxExecution, SandboxExecutionEvent, SandboxLogEntry, SandboxOverview, SandboxPage, SandboxPreloadCompatibility, SandboxRuntime } from "./SandboxMonitorPage";
 import type { AuthorizationAuditListResponse, AuthorizationAuditSummary } from "@/shared/types";
 
 let csrf = "";
@@ -124,17 +124,19 @@ export const monitorApi = {
     return request<ErrorAnalysis>(`/observability/errors?${query.toString()}`);
   },
   storage: () => request<Record<string, unknown>>("/observability/storage"),
-  sandboxOverview: () => request<SandboxOverview>("/observability/sandbox/overview"),
+  sandboxOverview: (historyMinutes = 30) => request<SandboxOverview>(`/observability/sandbox/overview?history_window_minutes=${historyMinutes}`),
   sandboxLogs: (limit = 80, sinceSeconds = 600) => request<{ items: SandboxLogEntry[]; retention_seconds: number; sampled_at: string }>(`/observability/sandbox/logs?limit=${limit}&since_seconds=${sinceSeconds}`),
   sandboxRuntimes: (limit = 12, offset = 0) => request<SandboxPage<SandboxRuntime>>(`/observability/sandbox/runtimes?limit=${limit}&offset=${offset}`),
   sandboxRuntime: (runtimeId: string) => request<SandboxRuntime>(`/observability/sandbox/runtimes/${encodeURIComponent(runtimeId)}`),
   drainSandboxRuntime: (runtimeId: string) => request<{ id: string; state: string }>(`/observability/sandbox/runtimes/${encodeURIComponent(runtimeId)}/drain`, { method: "POST", body: "{}" }),
+  sandboxPreloadCompatibility: () => request<SandboxPreloadCompatibility>("/observability/sandbox/preload-compatibility"),
+  prewarmSandbox: (body: { expected_sessions: number; sessions_per_runtime?: number; profile_id?: string; execute_at?: string; ttl_seconds?: number }) => request<{ command_id: string; target: number; ttl_seconds: number }>("/observability/sandbox/capacity/prewarm", { method: "POST", body: JSON.stringify(body) }),
   sandboxExecutions: (status?: string, limit = 12, offset = 0) => {
     const query = new URLSearchParams({ limit: String(limit), offset: String(offset) });
     if (status) query.set("status_filter", status);
     return request<SandboxPage<SandboxExecution>>(`/observability/sandbox/executions?${query.toString()}`);
   },
-  sandboxExecutionEvents: (executionId: string, afterEventId?: string) => request<{ execution_id: string; events: Array<{ event_id: string; seq: number | string; type: string; payload: Record<string, unknown> }> }>(`/observability/sandbox/executions/${encodeURIComponent(executionId)}/events${afterEventId ? `?after_event_id=${encodeURIComponent(afterEventId)}` : ""}`),
+  sandboxExecutionEvents: (executionId: string, afterEventId?: string) => request<{ execution_id: string; events: SandboxExecutionEvent[] }>(`/observability/sandbox/executions/${encodeURIComponent(executionId)}/events${afterEventId ? `?after_event_id=${encodeURIComponent(afterEventId)}` : ""}`),
   prune: (traceDays?: number, eventDays?: number) => request<Record<string, unknown>>(`/observability/storage/prune${traceDays != null && eventDays != null ? `?trace_days=${traceDays}&event_days=${eventDays}` : ""}`, { method: "POST" }),
   reset: () => request<Record<string, unknown>>("/observability/storage/reset", { method: "POST" }),
 };
