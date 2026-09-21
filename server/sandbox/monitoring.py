@@ -285,15 +285,30 @@ async def sandbox_logs(
     }
 
 
-async def list_runtimes(db: AsyncSession, *, limit: int = 200) -> list[dict[str, object | None]]:
+async def list_runtimes(
+    db: AsyncSession, *, limit: int = 50, offset: int = 0
+) -> dict[str, object]:
+    page_limit = min(max(1, limit), 100)
+    page_offset = max(0, offset)
+    total = int((await db.execute(
+        select(func.count()).select_from(SandboxRuntimeInstanceModel)
+    )).scalar_one() or 0)
     rows = (
         await db.execute(
             select(SandboxRuntimeInstanceModel)
             .order_by(SandboxRuntimeInstanceModel.updated_at.desc())
-            .limit(min(max(1, limit), 500))
+            .offset(page_offset)
+            .limit(page_limit)
         )
     ).scalars().all()
-    return [runtime_payload(row) for row in rows]
+    items = [runtime_payload(row) for row in rows]
+    return {
+        "items": items,
+        "total": total,
+        "offset": page_offset,
+        "limit": page_limit,
+        "has_more": page_offset + len(items) < total,
+    }
 
 
 async def get_runtime(db: AsyncSession, runtime_id: str) -> dict[str, object | None] | None:
@@ -302,13 +317,30 @@ async def get_runtime(db: AsyncSession, runtime_id: str) -> dict[str, object | N
 
 
 async def list_executions(
-    db: AsyncSession, *, status_filter: str | None = None, limit: int = 200
-) -> list[dict[str, object | None]]:
-    query = select(SandboxExecutionModel).order_by(SandboxExecutionModel.created_at.desc()).limit(min(max(1, limit), 500))
+    db: AsyncSession,
+    *,
+    status_filter: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> dict[str, object]:
+    page_limit = min(max(1, limit), 100)
+    page_offset = max(0, offset)
+    count_query = select(func.count()).select_from(SandboxExecutionModel)
+    query = select(SandboxExecutionModel).order_by(SandboxExecutionModel.created_at.desc())
     if status_filter:
+        count_query = count_query.where(SandboxExecutionModel.status == status_filter)
         query = query.where(SandboxExecutionModel.status == status_filter)
+    total = int((await db.execute(count_query)).scalar_one() or 0)
+    query = query.offset(page_offset).limit(page_limit)
     rows = (await db.execute(query)).scalars().all()
-    return [execution_payload(row) for row in rows]
+    items = [execution_payload(row) for row in rows]
+    return {
+        "items": items,
+        "total": total,
+        "offset": page_offset,
+        "limit": page_limit,
+        "has_more": page_offset + len(items) < total,
+    }
 
 
 async def drain_runtime(db: AsyncSession, runtime_id: str, principal: Any) -> dict[str, str]:

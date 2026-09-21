@@ -24,6 +24,7 @@ from gateway.contracts import (
     TurnStatus,
 )
 from core.learning import ExerciseState, LearningContext, LearningProgress, knowledge_point_ids
+from gateway.analytics_time import localize_turn_time
 
 
 def _now() -> str:
@@ -95,6 +96,15 @@ class GatewayRepository:
                     settings_json TEXT NOT NULL DEFAULT '{}',
                     updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS gateway_whiteboard_library_items (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    item_json TEXT NOT NULL,
+                    created_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_gateway_whiteboard_library_created
+                    ON gateway_whiteboard_library_items(created_at, id);
                 -- Teaching assets are deliberately independent from chat sessions,
                 -- turns, and user UI settings.  Editing a course cannot mutate a
                 -- learner transcript or LangGraph checkpoint.
@@ -231,6 +241,14 @@ class GatewayRepository:
         guided_session_status: str | None = None,
         exercise_state: ExerciseState | None = None,
         dispatch_payload: str | None = None,
+        # The MySQL repository performs quota admission in the same
+        # transaction as turn creation.  Keep the in-memory repository
+        # compatible with that gateway contract; quota-aware callers may use
+        # this repository in tests and local development where admission is
+        # intentionally disabled.
+        quota_admission: Any = None,
+        quota_role_codes: tuple[str, ...] = (),
+        quota_classroom_ids: tuple[str, ...] = (),
     ) -> tuple[TurnRecord, bool]:
         with self._lock, self._conn:
             if idempotency_key:
@@ -306,12 +324,32 @@ class GatewayRepository:
             fields["exercise_state_json"] = exercise_state.model_dump_json()
         assignments = ",".join(f"{key}=?" for key in fields)
         with self._lock, self._conn:
-            cursor = self._conn.execute(
+            current = self._conn.execute(
+                "SELECT * FROM gateway_turns WHERE turn_id=?", (turn_id,)
+            ).fetchone()
+            if current is None:
+                raise KeyError(turn_id)
+            terminal_statuses = {
+                TurnStatus.COMPLETED.value,
+                TurnStatus.FAILED.value,
+                TurnStatus.CANCELLED.value,
+                TurnStatus.INTERRUPTED.value,
+            }
+            retrying_dispatch_failure = (
+                current["status"] == TurnStatus.FAILED.value
+                and current["error_kind"] == "dispatch_failed"
+                and status == TurnStatus.ACCEPTED
+            )
+            if (
+                current["status"] in terminal_statuses
+                and current["status"] != status.value
+                and not retrying_dispatch_failure
+            ):
+                return self._turn(current)
+            self._conn.execute(
                 f"UPDATE gateway_turns SET {assignments} WHERE turn_id=?",
                 (*fields.values(), turn_id),
             )
-            if cursor.rowcount != 1:
-                raise KeyError(turn_id)
             row = self._conn.execute(
                 "SELECT * FROM gateway_turns WHERE turn_id=?", (turn_id,)
             ).fetchone()
@@ -602,6 +640,7 @@ class GatewayRepository:
         *,
         workspace_id: str,
         since: str,
+        timezone_name: str = "UTC",
     ) -> list[dict[str, Any]]:
         """Teacher read model: structured question rows (no question text).
 
@@ -622,6 +661,10 @@ class GatewayRepository:
                 created_at = datetime.fromisoformat(created.replace("Z", "+00:00"))
             except ValueError:
                 created_at = None
+            if created_at is None:
+                day, hour, weekday = created[:10], None, None
+            else:
+                day, hour, weekday = localize_turn_time(created_at, timezone_name)
             result.append(
                 {
                     "session_id": row["session_id"],
@@ -633,9 +676,9 @@ class GatewayRepository:
                     "topic_id": context.get("topic_id"),
                     "level": context.get("level"),
                     "mode": context.get("mode"),
-                    "day": created[:10],
-                    "hour": created_at.hour if created_at else None,
-                    "weekday": created_at.weekday() if created_at else None,
+                    "day": day,
+                    "hour": hour,
+                    "weekday": weekday,
                 }
             )
         return result
@@ -657,7 +700,8 @@ class GatewayRepository:
         since: str,
         until: str | None = None,
         limit: int = 10_000,
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], bool]:
+        cap = min(max(1, limit), 10_000)
         with self._lock:
             rows = self._conn.execute(
                 """SELECT e.normalized_score,e.passed,e.knowledge_point_ids_json,e.blueprint_snapshot_json,q.id AS question_id,q.question,s.user_id,s.topic_id,s.mode,s.completed_at
@@ -666,8 +710,10 @@ class GatewayRepository:
                    JOIN gateway_exercise_sessions s ON s.id=e.exercise_session_id
                    WHERE s.workspace_id=? AND s.completed_at>=? AND (? IS NULL OR s.completed_at<?)
                    ORDER BY s.completed_at DESC LIMIT ?""",
-                (workspace_id, since, until, until, min(max(1, limit), 10_000)),
+                (workspace_id, since, until, until, cap + 1),
             ).fetchall()
+        truncated = len(rows) > cap
+        rows = rows[:cap]
         result: list[dict[str, Any]] = []
         for row in rows:
             kp_ids = json.loads(row["knowledge_point_ids_json"] or "[]") if row["knowledge_point_ids_json"] else []
@@ -687,7 +733,7 @@ class GatewayRepository:
                     "completed_at": row["completed_at"],
                 }
             )
-        return result
+        return result, truncated
 
     def exercise_criterion_stats(
         self,
@@ -696,7 +742,8 @@ class GatewayRepository:
         since: str,
         until: str | None = None,
         limit: int = 20_000,
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], bool]:
+        cap = min(max(1, limit), 50_000)
         with self._lock:
             rows = self._conn.execute(
                 """SELECT a.rubric_matches_json,s.user_id,s.topic_id,s.blueprint_snapshot_json,s.completed_at
@@ -705,8 +752,10 @@ class GatewayRepository:
                    JOIN gateway_exercise_sessions s ON s.id=q.exercise_session_id
                    WHERE s.workspace_id=? AND s.completed_at>=? AND (? IS NULL OR s.completed_at<?)
                    ORDER BY s.completed_at DESC LIMIT ?""",
-                (workspace_id, since, until, until, min(max(1, limit), 50_000)),
+                (workspace_id, since, until, until, cap + 1),
             ).fetchall()
+        truncated = len(rows) > cap
+        rows = rows[:cap]
         result: list[dict[str, Any]] = []
         for row in rows:
             blueprint = json.loads(row["blueprint_snapshot_json"] or "{}") if row["blueprint_snapshot_json"] else {}
@@ -720,7 +769,7 @@ class GatewayRepository:
                     "completed_at": row["completed_at"],
                 }
             )
-        return result
+        return result, truncated
 
     def guided_session_stats(
         self,
@@ -796,6 +845,42 @@ class GatewayRepository:
                 ),
             )
         return {"revision": revision, "settings": merged, "updated_at": updated_at}
+
+    def list_whiteboard_library(self) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT item_json FROM gateway_whiteboard_library_items "
+                "ORDER BY created_at ASC, id ASC"
+            ).fetchall()
+        return [json.loads(row["item_json"]) for row in rows]
+
+    def create_whiteboard_library_item(
+        self,
+        *,
+        name: str,
+        elements: list[dict[str, Any]],
+        created_by: str,
+    ) -> dict[str, Any]:
+        item = {
+            "id": str(uuid.uuid4()),
+            "status": "published",
+            "created": int(datetime.now(timezone.utc).timestamp() * 1000),
+            "name": name,
+            "elements": elements,
+        }
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO gateway_whiteboard_library_items "
+                "(id,name,item_json,created_by,created_at) VALUES (?,?,?,?,?)",
+                (
+                    item["id"],
+                    name,
+                    json.dumps(item, ensure_ascii=False, separators=(",", ":"), allow_nan=False),
+                    created_by,
+                    _now(),
+                ),
+            )
+        return item
 
     def get_teaching_catalog(self, workspace_id: str) -> dict[str, Any]:
         with self._lock:
