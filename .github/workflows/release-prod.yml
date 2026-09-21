@@ -157,7 +157,7 @@ jobs:
           compose_config_json="$(mktemp)"
           COMPOSE_CONFIG_JSON="$compose_config_json"
           docker compose --profile monitor -p "$COMPOSE_PROJECT_NAME" --env-file "$DEPLOY_ENV_FILE" -f compose.yaml config --format json > "$COMPOSE_CONFIG_JSON"
-          python - "$COMPOSE_CONFIG_JSON" <<'PY'
+          python3 - "$COMPOSE_CONFIG_JSON" <<'PY'
           import json
           import sys
 
