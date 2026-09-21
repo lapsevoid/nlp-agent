@@ -2,7 +2,7 @@ import { BookOpenCheck, BookOpenText, Code2, Contrast, Copy, Cpu, Download, File
 import { Fragment, useEffect, useRef, useState } from "react";
 import type { CSSProperties, DragEvent, KeyboardEvent, PointerEvent, ReactNode } from "react";
 import { api, type SandboxRuntimeProfile, type SandboxRuntimeUsage } from "@/platform/http/api";
-import { FilesPanel } from "./FilesPanel";
+import { FilesPanel, type FilesPanelPreviewRequest } from "./FilesPanel";
 import { SandboxArtifactFrame } from "./SandboxArtifactFrame";
 
 export type ToolDockTool = "files" | "learning" | "book" | "sandbox" | "whiteboard";
@@ -453,7 +453,7 @@ function ToolPicker({ onOpenTool }: { onOpenTool: (tool: ToolDockTool) => void }
   </nav>;
 }
 
-export function ToolDock({ open, expanded, openTools, activeTool, toolMenuOpen, onToolMenuOpenChange, onOpenTool, onReorderTools, onCloseTool, onActiveToolChange, onExplainCode, learningPanel, knowledgeBookPanel, whiteboardPanel, sandboxSource, filesUserId, filesWorkspaceId }: {
+export function ToolDock({ open, expanded, openTools, activeTool, toolMenuOpen, onToolMenuOpenChange, onOpenTool, onReorderTools, onCloseTool, onActiveToolChange, onExplainCode, learningPanel, knowledgeBookPanel, whiteboardPanel, sandboxSource, filesUserId, filesWorkspaceId, filesPreview }: {
   open: boolean;
   expanded: boolean;
   openTools: ToolDockTool[];
@@ -471,6 +471,7 @@ export function ToolDock({ open, expanded, openTools, activeTool, toolMenuOpen, 
   sandboxSource?: SandboxSourceRequest | null;
   filesUserId: string | null;
   filesWorkspaceId: string;
+  filesPreview?: FilesPanelPreviewRequest | null;
 }) {
   const [width, setWidth] = useState(() =>
   Math.min(DEFAULT_DOCK_WIDTH, getMaxDockWidth()),
@@ -657,7 +658,7 @@ export function ToolDock({ open, expanded, openTools, activeTool, toolMenuOpen, 
           const panelShare = currentPanelWidths[index] ?? 0;
           return <Fragment key={tool}>
             <div className="tool-dock-panel" data-active={tool === activeTool ? "true" : "false"}>
-              {tool === "files" ? <FilesPanel key={filesUserId + ":" + filesWorkspaceId} userId={filesUserId} workspaceId={filesWorkspaceId} /> : tool === "learning" ? learningPanel : tool === "book" ? knowledgeBookPanel : tool === "whiteboard" ? whiteboardPanel : <SandboxPhaseZeroPanel onExplainCode={onExplainCode} sourceRequest={sandboxSource} />}
+              {tool === "files" ? <FilesPanel key={filesUserId + ":" + filesWorkspaceId} userId={filesUserId} workspaceId={filesWorkspaceId} previewRequest={filesPreview} /> : tool === "learning" ? learningPanel : tool === "book" ? knowledgeBookPanel : tool === "whiteboard" ? whiteboardPanel : <SandboxPhaseZeroPanel onExplainCode={onExplainCode} sourceRequest={sandboxSource} />}
             </div>
             {index < openTools.length - 1 && <div className="tool-dock-panel-resizer" role="separator" aria-label={`调整${item.label}与${tools.find((candidate) => candidate.id === openTools[index + 1])?.label ?? "下个页面"}面板宽度`} aria-orientation="vertical" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(panelShare)} tabIndex={0} onPointerDown={(event) => beginPanelResize(index, event)} onKeyDown={(event) => resizePanelWithKeyboard(index, event)}><i /></div>}
           </Fragment>;

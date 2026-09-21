@@ -52,10 +52,12 @@ describe("KnowledgeBookPanel", () => {
     expect(api.getLearningBookPage).toHaveBeenCalledWith("workspace-1", "point-1");
   });
 
-  it("renders published教材 attachments with preview and download actions", async () => {
+  it("renders published教材 files as standalone cards with preview and download actions", async () => {
+    const openFilePreview = vi.fn();
     vi.mocked(api.getLearningBookPage).mockResolvedValue({
       page: {
         ...page,
+        content_markdown: "## 核心概念\n\n[演示.py](book-file:file-1)",
         files: [{
           id: "file-1",
           token: "book-file:file-1",
@@ -70,21 +72,21 @@ describe("KnowledgeBookPanel", () => {
       },
     });
 
-    render(<KnowledgeBookPanel workspaceId="workspace-1" />);
+    render(<KnowledgeBookPanel workspaceId="workspace-1" onOpenFilePreview={openFilePreview} />);
 
-    expect(await screen.findByText("教材附件")).toBeInTheDocument();
-    expect(screen.getByText("演示.py")).toBeInTheDocument();
-    const previewLink = screen.getByRole("link", { name: "预览教材附件：演示.py" });
-    expect(previewLink).toHaveAttribute("href", "/api/v1/learning/book/workspace-1/files/file-1");
-    expect(previewLink).toHaveAttribute("target", "_blank");
-    expect(previewLink).toHaveAttribute("rel", "noopener noreferrer");
+    expect(screen.queryByText("教材附件")).not.toBeInTheDocument();
+    expect(await screen.findByText("演示.py")).toBeInTheDocument();
+    const previewButton = await screen.findByRole("button", { name: "预览教材文件：演示.py" });
+    await userEvent.setup().click(previewButton);
+    expect(openFilePreview).toHaveBeenCalledWith(expect.objectContaining({ id: "file-1", display_name: "演示.py" }));
     const downloadLink = screen.getByRole("link", { name: "下载教材附件：演示.py" });
     expect(downloadLink).toHaveAttribute("href", "/api/v1/learning/book/workspace-1/files/file-1/download");
     expect(downloadLink).toHaveAttribute("download");
   });
 
-  it("turns a teacher-inserted book-file reference into a preview link in the article", async () => {
+  it("turns a teacher-inserted book-file reference into an inline file card", async () => {
     const fileToken = "book-file:550e8400-e29b-41d4-a716-446655440000";
+    const openFilePreview = vi.fn();
     vi.mocked(api.getLearningBookPage).mockResolvedValue({
       page: {
         ...page,
@@ -103,12 +105,12 @@ describe("KnowledgeBookPanel", () => {
       },
     });
 
-    render(<KnowledgeBookPanel workspaceId="workspace-1" />);
+    render(<KnowledgeBookPanel workspaceId="workspace-1" onOpenFilePreview={openFilePreview} />);
 
-    const inlineLink = await screen.findByRole("link", { name: "演示.py" });
-    expect(inlineLink).toHaveAttribute("href", "/api/v1/learning/book/workspace-1/files/file-1");
-    expect(inlineLink).toHaveAttribute("target", "_blank");
-    expect(inlineLink).toHaveAttribute("rel", "noopener noreferrer");
+    const inlineCard = await screen.findByRole("button", { name: "预览教材文件：演示.py" });
+    expect(screen.queryByRole("link", { name: "演示.py" })).not.toBeInTheDocument();
+    await userEvent.setup().click(inlineCard);
+    expect(openFilePreview).toHaveBeenCalledWith(expect.objectContaining({ id: "file-1", display_name: "演示.py" }));
   });
 
   it("lets Markdown own the article title without showing teacher-only metadata", async () => {

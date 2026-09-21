@@ -16,9 +16,10 @@ import { SettingsDialog } from "@/modules/student/components/SettingsDialog";
 import { SchoolLogo } from "@/shared/ui/SchoolLogo";
 import { Sidebar, SidebarToggle } from "@/modules/student/components/Sidebar";
 import { ToolDock, type SandboxSourceRequest, type ToolDockTabDropPosition, type ToolDockTool } from "@/modules/student/components/ToolDock";
+import type { FilesPanelPreviewRequest } from "@/modules/student/components/FilesPanel";
 import { useStudentWorkspace } from "@/modules/student/workspace/public";
 import { useSessionScrollRestoration } from "@/modules/student/workspace/hooks/useSessionScrollRestoration";
-import type { CourseTopic, TeacherCatalog } from "@/shared/types";
+import type { CourseTopic, LearningBookFile, TeacherCatalog } from "@/shared/types";
 
 const WhiteboardPanel = lazy(() => import("@/modules/student/components/whiteboard/WhiteboardPanel").then(({ WhiteboardPanel: panel }) => ({ default: panel })));
 
@@ -35,6 +36,9 @@ export function StudentWorkspace({ onNavigateTo, onOpenInSandbox }: { onNavigate
   const [openTools, setOpenTools] = useState<ToolDockTool[]>(() => typeof window !== "undefined" && readKnowledgeBookUrl(window.location.search).tool === "knowledge-book" ? ["book"] : []);
   const [activeTool, setActiveTool] = useState<ToolDockTool | null>(() => typeof window !== "undefined" && readKnowledgeBookUrl(window.location.search).tool === "knowledge-book" ? "book" : null);
   const [sandboxSource, setSandboxSource] = useState<SandboxSourceRequest | null>(null);
+  const [filesPreview, setFilesPreview] = useState<FilesPanelPreviewRequest | null>(null);
+  const [filesPreviewWorkspaceId, setFilesPreviewWorkspaceId] = useState(workspace.workspaceId);
+  const [filesPreviewUserId, setFilesPreviewUserId] = useState<string | null>(workspace.authSession?.user_id ?? null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
   const [loginOpen, setLoginOpen] = useState(false);
@@ -102,6 +106,16 @@ export function StudentWorkspace({ onNavigateTo, onOpenInSandbox }: { onNavigate
     setOpenTools((current) => current.includes("sandbox") ? current : [...current, "sandbox"]);
     setActiveTool("sandbox");
   }, [onOpenInSandbox]);
+  const openKnowledgeBookFile = useCallback((file: LearningBookFile) => {
+    setFilesPreview({ id: file.id, name: file.display_name, url: file.preview_url, mediaType: file.media_type, bytes: file.size_bytes });
+    setFilesPreviewWorkspaceId(workspace.workspaceId);
+    setFilesPreviewUserId(workspace.authSession?.user_id ?? null);
+    setToolDockOpen(true);
+    setToolDockExpanded(false);
+    setToolMenuOpen(false);
+    setOpenTools((current) => current.includes("files") ? current : [...current, "files"]);
+    setActiveTool("files");
+  }, [workspace.authSession?.user_id, workspace.workspaceId]);
   const closeTool = (tool: ToolDockTool) => {
     const next = openTools.filter((item) => item !== tool);
     setOpenTools(next);
@@ -199,15 +213,16 @@ export function StudentWorkspace({ onNavigateTo, onOpenInSandbox }: { onNavigate
         void workspace.send("请解释以下 Python 代码：\n\n```python\n" + source + "\n```");
       }}
       learningPanel={<LearningPanel open onClose={() => closeTool("learning")} title={activeTitle} context={workspace.preferences.context} meta={workspace.activeMeta} messages={workspace.messages} catalog={learningCatalog} onPrompt={(content) => { setToolDockOpen(false); setToolDockExpanded(false); setToolMenuOpen(false); void workspace.send(content); }} onMeta={(patch) => { if (workspace.activeSessionId) workspace.updateSessionMeta(workspace.activeSessionId, patch); }} />}
-      knowledgeBookPanel={<KnowledgeBookPanel workspaceId={workspace.workspaceId} onAskNova={statusOnline && !workspace.isRunning ? (prompt: string, context: KnowledgeBookContext) => { setToolDockExpanded(false); setToolMenuOpen(false); void workspace.send(prompt, undefined, context); } : undefined} onOpenInSandbox={openCodeInSandbox} />}
+      knowledgeBookPanel={<KnowledgeBookPanel workspaceId={workspace.workspaceId} onAskNova={statusOnline && !workspace.isRunning ? (prompt: string, context: KnowledgeBookContext) => { setToolDockExpanded(false); setToolMenuOpen(false); void workspace.send(prompt, undefined, context); } : undefined} onOpenInSandbox={openCodeInSandbox} onOpenFilePreview={openKnowledgeBookFile} />}
       whiteboardPanel={<Suspense fallback={<div className="whiteboard-loading" role="status">正在加载白板…</div>}><WhiteboardPanel userId={workspace.authSession?.user_id ?? null} canManageLibrary={workspace.authSession?.roles?.some((role) => role === "teacher" || role === "developer") ?? false} /></Suspense>}
       sandboxSource={sandboxSource}
       filesUserId={workspace.authSession?.user_id ?? null}
       filesWorkspaceId={workspace.workspaceId}
+      filesPreview={filesPreviewWorkspaceId === workspace.workspaceId && filesPreviewUserId === (workspace.authSession?.user_id ?? null) ? filesPreview : null}
     />
     <div className="student-school-logo"><SchoolLogo /></div>
     <SettingsDialog open={settingsOpen} settings={workspace.settings} learningContext={workspace.preferences.context} roles={workspace.authSession?.roles} permissions={workspace.authSession?.permissions} userId={workspace.authSession?.user_id} workspaceIds={workspace.authSession?.workspace_ids} onClose={() => setSettingsOpen(false)} onChange={(patch) => void workspace.patchSettings(patch)} onReset={workspace.resetSettings} onLearningContextChange={workspace.setLearningContext} onOpenDeveloper={() => { if (onNavigateTo) onNavigateTo("/developer"); else location.href = "/developer"; }} onOpenTeacher={() => { if (onNavigateTo) onNavigateTo("/teacher"); else location.href = "/teacher"; }} />
-    <AccountDialog open={accountOpen} session={workspace.authSession} onClose={() => setAccountOpen(false)} onLogout={async () => { await workspace.logout(); setAccountOpen(false); }} />
+    <AccountDialog open={accountOpen} session={workspace.authSession} onClose={() => setAccountOpen(false)} onLogout={async () => { await workspace.logout(); setFilesPreview(null); setFilesPreviewUserId(null); setFilesPreviewWorkspaceId(""); setAccountOpen(false); }} />
     <ConfirmDialog
   open={!!deleteTarget}
   title={

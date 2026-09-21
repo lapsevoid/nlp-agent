@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronRight, Download, FileText, Menu, PanelLeftClose, PanelRightClose, RefreshCw, Search, X } from "lucide-react";
+import { ChevronDown, ChevronRight, Menu, PanelLeftClose, PanelRightClose, RefreshCw, Search, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 
@@ -34,47 +34,7 @@ interface SelectionPrompt {
 
 function isExcludedSelectionNode(node: Node | null): boolean {
   const element = node instanceof Element ? node : node?.parentElement;
-  return !!element?.closest("code,button,input,textarea,select,.knowledge-book-page-nav,.knowledge-book-files,.knowledge-book-toc");
-}
-
-function formatKnowledgeBookFileSize(sizeBytes: number): string {
-  if (sizeBytes < 1024) return `${sizeBytes} B`;
-  if (sizeBytes < 1024 * 1024) return `${(sizeBytes / 1024).toFixed(1)} KB`;
-  return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function KnowledgeBookFiles({ files }: { files?: LearningBookFile[] }) {
-  if (!files?.length) return null;
-  return <section className="knowledge-book-files" aria-labelledby="knowledge-book-files-title">
-    <div className="knowledge-book-files-heading">
-      <h2 id="knowledge-book-files-title">教材附件</h2>
-      <span>{files.length} 个文件</span>
-    </div>
-    <ul className="knowledge-book-file-list">
-      {files.map((file) => <li className="knowledge-book-file" key={file.id}>
-        <FileText size={18} aria-hidden="true" />
-        <a
-          className="knowledge-book-file-preview"
-          href={file.preview_url}
-          target="_blank"
-          rel="noopener noreferrer"
-          aria-label={`预览教材附件：${file.display_name}`}
-        >
-          <strong>{file.display_name}</strong>
-          <span>{file.media_type} · {formatKnowledgeBookFileSize(file.size_bytes)}</span>
-        </a>
-        <a
-          className="knowledge-book-file-download"
-          href={file.download_url}
-          download
-          aria-label={`下载教材附件：${file.display_name}`}
-          title="下载到本地"
-        >
-          <Download size={16} aria-hidden="true" />
-        </a>
-      </li>)}
-    </ul>
-  </section>;
+  return !!element?.closest("code,button,input,textarea,select,.knowledge-book-page-nav,.markdown-book-file-card,.knowledge-book-toc");
 }
 
 function headingBeforeSelection(article: HTMLElement, range: Range): string | undefined {
@@ -156,7 +116,7 @@ function keepFocusInDrawer(event: ReactKeyboardEvent<HTMLElement>) {
   }
 }
 
-export function KnowledgeBookPanel({ workspaceId, onAskNova, onOpenInSandbox }: { workspaceId: string; onAskNova?: (prompt: string, context: KnowledgeBookContext) => void; onOpenInSandbox?: (code: string, language: string) => void }) {
+export function KnowledgeBookPanel({ workspaceId, onAskNova, onOpenInSandbox, onOpenFilePreview }: { workspaceId: string; onAskNova?: (prompt: string, context: KnowledgeBookContext) => void; onOpenInSandbox?: (code: string, language: string) => void; onOpenFilePreview?: (file: LearningBookFile) => void }) {
   const [initialViewState] = useState(() => readBookViewState(workspaceId));
   const [initialDeepLink] = useState(() => readKnowledgeBookUrl(window.location.search));
   const demoMode = initialDeepLink.demo;
@@ -197,7 +157,7 @@ export function KnowledgeBookPanel({ workspaceId, onAskNova, onOpenInSandbox }: 
   const orderedNavigation = useMemo(() => orderNavigation(navigation), [navigation]);
   const visiblePage = page?.knowledge_point_id === selectedId && (demoMode || page.workspace_id === workspaceId) ? page : null;
   const headingIndex = useMemo(() => indexMarkdownHeadings(visiblePage?.content_markdown ?? ""), [visiblePage?.content_markdown]);
-  const bookFileLinks = useMemo(() => Object.fromEntries((visiblePage?.files ?? []).map((file) => [file.token.toLowerCase(), file.preview_url])), [visiblePage?.files]);
+  const bookFileLinks = useMemo(() => Object.fromEntries((visiblePage?.files ?? []).map((file) => [file.token.toLowerCase(), file])), [visiblePage?.files]);
   const markdownHasTitle = useMemo(() => /^(?: {0,3})#(?!#)[ \t]+.+/m.test(visiblePage?.content_markdown ?? ""), [visiblePage?.content_markdown]);
   useEffect(() => {
     visiblePageRef.current = visiblePage;
@@ -512,8 +472,7 @@ export function KnowledgeBookPanel({ workspaceId, onAskNova, onOpenInSandbox }: 
         <div className="knowledge-book-page-scroll" ref={contentRef} onScroll={handlePageScroll}>
           {loadingPage ? <div className="knowledge-book-state"><span className="spin">⟳</span><p>正在打开知识点……</p></div> : visiblePage ? <article ref={articleRef} tabIndex={-1} className="knowledge-book-article" onPointerUp={updateSelectionPrompt} onKeyUp={updateSelectionPrompt}>
             {!markdownHasTitle && <header className="knowledge-book-fallback-title"><h1>{visiblePage.title}</h1></header>}
-            <MarkdownContent headingIds={headingIndex.headingIds} headingIdsByLine={headingIndex.headingIdsByLine} codeActions={codeActions} bookFileLinks={bookFileLinks}>{visiblePage.content_markdown}</MarkdownContent>
-            <KnowledgeBookFiles files={visiblePage.files} />
+            <MarkdownContent headingIds={headingIndex.headingIds} headingIdsByLine={headingIndex.headingIdsByLine} codeActions={codeActions} bookFileLinks={bookFileLinks} onPreviewBookFile={onOpenFilePreview}>{visiblePage.content_markdown}</MarkdownContent>
             <footer className="knowledge-book-page-nav">
               <button type="button" disabled={selectedIndex <= 0} onClick={() => selectKnowledgePoint(orderedNavigation[selectedIndex - 1].knowledge_point_id)}>上一节</button>
               <button type="button" disabled={selectedIndex < 0 || selectedIndex >= orderedNavigation.length - 1} onClick={() => selectKnowledgePoint(orderedNavigation[selectedIndex + 1].knowledge_point_id)}>下一节</button>
