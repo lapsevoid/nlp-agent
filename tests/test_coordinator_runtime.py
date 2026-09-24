@@ -6,12 +6,14 @@ import pytest
 from langchain_core.messages import HumanMessage
 
 from core.coordinator_runtime import CoordinatorRuntime, invoke_model_with_telemetry
+from core.learning import TeachingMaterials
 from core.observability.context import TelemetryContext, bind_telemetry_context
 from core.observability.models import SpanKind
 from core.observability.runtime import TelemetryRuntime
 from core.session_context import SessionContext
 from core.task_manager import global_task_manager
 from core.worker_events import WorkerCompletedEvent, WorkerEventBus
+from core.worker_protocol import WorkerWaitPlan
 from core.agent_runtime import global_agent_injections
 from schemas.models import WorkerExecutionResultSpec, WorkerTimingSpec
 
@@ -161,6 +163,33 @@ async def test_wait_barrier_keeps_other_turn_worker_results_out_of_current_turn(
 
 
 @pytest.mark.asyncio
+async def test_wait_barrier_does_not_consume_detached_worker_from_same_turn():
+    bus = WorkerEventBus()
+
+    async def invoke(_messages, _context, _background, _turn_id):
+        return None
+
+    runtime = CoordinatorRuntime(bus, invoke)
+    await bus.publish(event("detached", "turn-1"))
+    await bus.publish(event("joined", "turn-1"))
+    plan = WorkerWaitPlan(
+        session_id="session-a",
+        parent_turn_id="turn-1",
+        worker_ids=frozenset({"joined"}),
+        mode="all",
+        quorum=1,
+        timeout_s=1,
+    )
+
+    collected, timed_out = await runtime._collect_barrier_events_unobserved(plan)
+
+    assert timed_out is False
+    assert [item.worker_id for item in collected] == ["joined"]
+    assert [item.worker_id for item in bus.drain("session-a")] == ["detached"]
+    await runtime.close()
+
+
+@pytest.mark.asyncio
 async def test_detached_result_is_serialized_through_runtime():
     bus = WorkerEventBus()
     calls = []
@@ -277,6 +306,28 @@ async def test_new_message_is_injected_into_active_coordinator_turn():
 
 
 @pytest.mark.asyncio
+async def test_eight_argument_invoke_keeps_teaching_materials_compatibility():
+    calls = []
+
+    async def invoke(
+        _messages, _context, _background, _turn_id, _learning_context,
+        _learning_progress, _exercise_state, teaching_materials,
+    ):
+        calls.append(teaching_materials)
+
+    runtime = CoordinatorRuntime(WorkerEventBus(), invoke)
+    materials = TeachingMaterials(learning_topic={"id": "transformer"})
+    await runtime.submit_user_turn(
+        "session-materials",
+        HumanMessage(content="question", id="turn-materials"),
+        teaching_materials=materials,
+    )
+
+    assert calls == [materials]
+    await runtime.close()
+
+
+@pytest.mark.asyncio
 async def test_model_invocation_records_usage_in_a_model_span(monkeypatch, tmp_path):
     telemetry = TelemetryRuntime(tmp_path / "telemetry.sqlite3", flush_interval_s=0.01)
 
@@ -298,6 +349,31 @@ async def test_model_invocation_records_usage_in_a_model_span(monkeypatch, tmp_p
     assert detail is not None
     assert detail["trace"]["total_tokens"] == 15
     assert detail["spans"][0]["kind"] == SpanKind.MODEL.value
+    await telemetry.close()
+
+
+@pytest.mark.asyncio
+async def test_model_invocation_uses_telemetry_context_from_graph_config(monkeypatch, tmp_path):
+    telemetry = TelemetryRuntime(tmp_path / "telemetry.sqlite3", flush_interval_s=0.01)
+
+    class Model:
+        async def ainvoke(self, _messages, config=None):
+            return type("Response", (), {"usage_metadata": {"total_tokens": 7}})()
+
+    monkeypatch.setattr("core.coordinator_runtime.global_telemetry", telemetry)
+    context = TelemetryContext.create(session_id="config-session", turn_id="config-turn")
+    telemetry.start_trace(context)
+    await invoke_model_with_telemetry(
+        Model(), [], {"configurable": context.configurable()}, name="coordinator.model"
+    )
+    telemetry.complete_trace(context)
+    await telemetry.flush()
+
+    detail = telemetry.repository.trace_detail(context.trace_id)
+    assert detail is not None
+    assert len(detail["spans"]) == 1
+    assert detail["spans"][0]["kind"] == SpanKind.MODEL.value
+    assert detail["trace"]["total_tokens"] == 7
     await telemetry.close()
 
 

@@ -2,6 +2,8 @@
 
 NLP Agent 从 `v0.13.0` 起提供框架无关的本地观测核心。它不启动 HTTP 服务，也不依赖 WebUI、Gateway、Langfuse 或 OpenTelemetry。未来的 Web 层只需要调用 `ObservabilityService`。
 
+应用运行日志（启动、依赖异常、Worker 错误等）与这里的 Trace/Span 数据是两条互补链路；Docker 部署下的日志查看和过滤命令见 [`logging.md`](logging.md)。
+
 ## 数据链路
 
 ```text
@@ -10,14 +12,14 @@ Coordinator / Worker / Model / Tool / Memory / Compression
                  TelemetryRuntime
             bounded queue + batch writer
                          │
-              SQLite WAL repository
+              MySQL telemetry repository
                          │
               ObservabilityService
                   ├── 查询方法
                   └── 实时订阅队列
 ```
 
-数据库默认位于 `.data/observability/telemetry.sqlite3`。Prompt、模型完整输出和工具参数值不会写入观测库；工具仅记录参数键名。
+观测记录写入当前部署的 MySQL，由 `NLP_AGENT_DATABASE_URL` 决定目标；测试和生产必须使用不同数据库。Prompt、模型完整输出和工具参数值不会写入观测库；工具仅记录参数键名。
 
 ## 关联标识
 

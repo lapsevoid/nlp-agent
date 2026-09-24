@@ -7,6 +7,17 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
+def knowledge_point_ids(blueprint: dict[str, Any]) -> list[str]:
+    """Resolve knowledge-point refs from both legacy and current blueprint shapes."""
+    single = blueprint.get("knowledge_point_id")
+    if single:
+        return [str(single)]
+    many = blueprint.get("knowledge_point_ids")
+    if isinstance(many, list):
+        return [str(item) for item in many if item]
+    return []
+
+
 class LearningContext(BaseModel):
     """The learner-selected policy for one turn; never encoded into user text."""
 
@@ -32,6 +43,23 @@ class LearningContext(BaseModel):
     def topic(self) -> str:
         """Compatibility view for legacy prompt and transcript callers."""
         return self.topic_name
+
+
+class KnowledgeBookContext(BaseModel):
+    """The current knowledge-book location sent outside the visible user text."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    workspace_id: str = Field(min_length=1, max_length=128)
+    topic_id: str = Field(min_length=1, max_length=128)
+    topic_name: str = Field(default="", max_length=200)
+    knowledge_point_id: str = Field(min_length=1, max_length=128)
+    title: str = Field(default="", max_length=300)
+    heading: str = Field(default="", max_length=300)
+    selected_text: str = Field(default="", max_length=2_000)
+    code: str = Field(default="", max_length=20_000)
+    language: str = Field(default="", max_length=40)
+    content_markdown: str = Field(default="", max_length=60_000)
 
 
 class LearningProgress(BaseModel):

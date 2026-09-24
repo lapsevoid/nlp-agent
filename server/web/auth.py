@@ -1,4 +1,4 @@
-"""Same-origin authentication with fixed credentials and revocable web sessions."""
+"""Legacy same-origin authentication adapter used only by injected tests."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ from argon2 import PasswordHasher
 from argon2.exceptions import VerificationError, VerifyMismatchError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from configs.settings import auth_env_bool, auth_env_int, auth_session_ttl_s
 from core.identity import AuthenticatedPrincipal
 
 
@@ -113,7 +114,7 @@ class SameOriginSessionAuth:
         self.secure = secure
         self.username = username
         self.password_hash = password_hash
-        self.roles = roles or frozenset({"student"})
+        self.roles = roles or frozenset({"student", "teacher", "admin"})
         self.idle_timeout_s = min(max(int(idle_timeout_s), 60), self.ttl_s)
         self._password_hasher = PasswordHasher()
         self._username_rate_limiter = _LoginRateLimiter(max_login_attempts, rate_window_s)
@@ -125,23 +126,27 @@ class SameOriginSessionAuth:
         }
 
     @classmethod
-    def from_config(cls, config: dict) -> "SameOriginSessionAuth":
+    def from_config(
+        cls, config: dict, *, include_credentials: bool = True
+    ) -> "SameOriginSessionAuth":
         return cls(
             secret=str(config.get("auth_secret", "")),
             cookie_name=str(config.get("cookie_name", "nlp_session")),
-            ttl_s=int(config.get("cookie_ttl_s", 86_400)),
-            secure=bool(config.get("cookie_secure", False)),
+            ttl_s=auth_session_ttl_s(86_400),
+            secure=auth_env_bool("NLP_AGENT_AUTH_COOKIE_SECURE", bool(config.get("cookie_secure", False))),
             allowed_origins=list(config.get("allowed_origins", [])),
-            username=str(config.get("auth_username", "")),
-            password_hash=str(config.get("auth_password_hash", "")),
+            username=str(config.get("auth_username", "")) if include_credentials else "",
+            password_hash=str(config.get("auth_password_hash", "")) if include_credentials else "",
             roles=frozenset(
                 item.strip()
-                for item in str(config.get("auth_roles", "student")).split(",")
+                for item in str(
+                    config.get("auth_roles", "student,teacher,admin")
+                ).split(",")
                 if item.strip()
             ),
-            idle_timeout_s=int(config.get("auth_idle_timeout_s", 900)),
-            max_login_attempts=int(config.get("auth_max_login_attempts", 5)),
-            rate_window_s=int(config.get("auth_rate_window_s", 300)),
+            idle_timeout_s=auth_env_int("NLP_AGENT_AUTH_IDLE_TIMEOUT_S", 900),
+            max_login_attempts=auth_env_int("NLP_AGENT_AUTH_MAX_LOGIN_ATTEMPTS", 5),
+            rate_window_s=auth_env_int("NLP_AGENT_AUTH_RATE_WINDOW_S", 300),
         )
 
     @property
@@ -183,6 +188,17 @@ class SameOriginSessionAuth:
                 user_id=self.username,
                 workspace_ids=frozenset({"default"}),
                 roles=self.roles,
+            )
+        )
+
+    def issue_guest(self, *, previous_token: str | None = None) -> tuple[str, SessionClaims]:
+        """Create a limited session for public, read-only guest capabilities."""
+        self.revoke(previous_token)
+        return self.issue(
+            AuthenticatedPrincipal(
+                user_id="guest",
+                workspace_ids=frozenset(),
+                roles=frozenset({"guest"}),
             )
         )
 
@@ -249,6 +265,15 @@ class SameOriginSessionAuth:
                     raise AuthenticationError("authentication cookie has expired")
                 if touch:
                     session.last_seen_at = now
+                    # Limit sliding TTL: refresh the absolute expiry but cap it to prevent
+                    # sessions from lasting forever by sliding beyond the initial intended lifetime
+                    current_time = int(time.time())
+                    max_absolute_expiry = session.claims.issued_at + self.ttl_s
+                    new_expiry = current_time + self.ttl_s
+                    capped_expiry = min(new_expiry, max_absolute_expiry)
+                    session.claims = session.claims.model_copy(
+                        update={"expires_at": capped_expiry}
+                    )
                 return session.claims
         try:
             payload, supplied_signature = token.split(".", 1)

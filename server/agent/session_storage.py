@@ -25,6 +25,7 @@ from utils.tokens import token_count_with_estimation, rough_estimation_for_messa
 logger = get_logger("shiliu.session_storage")
 
 from core.session_context import SessionContext
+from server.agent.compression.internal_context import public_transcript_messages
 
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -318,7 +319,7 @@ class SessionStorageManager:
         parent_uuid = None
         new_entries = []
 
-        for msg in messages:
+        for msg in public_transcript_messages(messages):
             msg_uuid = msg.id
             if msg_uuid is None:
                 continue
@@ -360,11 +361,56 @@ class SessionStorageManager:
 
 global_session_storage = SessionStorageManager()
 
-async def record_transcript(session_id: str, messages: List[BaseMessage]):
+async def record_transcript(
+    session_id: str,
+    messages: List[BaseMessage],
+    *,
+    user_id: str | None = None,
+    workspace_id: str | None = None,
+):
     """
     暴露给上层的封装调用：对比当前 Graph 内的 messages 链，提取并附加新消息。
     """
-    global_session_storage.enqueue_messages(session_id, messages)
+    """Persist the current transcript snapshot in MySQL; JSONL is legacy-read only."""
+    from sqlalchemy import create_engine, delete, text
+    from sqlalchemy.dialects.mysql import insert
+    from configs.settings import settings
+    from server.infrastructure.mysql.models import ConversationTranscriptModel
+
+    def persist() -> None:
+        url = settings.NLP_AGENT_DATABASE_URL.strip()
+        if not url:
+            raise RuntimeError("NLP_AGENT_DATABASE_URL is required for transcript storage")
+        engine = create_engine(url.replace("mysql+aiomysql://", "mysql+pymysql://"), pool_pre_ping=True)
+        try:
+            with engine.begin() as connection:
+                if not user_id or not workspace_id:
+                    raise PermissionError("transcript identity is required")
+                owner = connection.execute(
+                    text(
+                        "SELECT 1 FROM nlp_conversations "
+                        "WHERE id=:session_id AND owner_user_id=:user_id "
+                        "AND workspace_id=:workspace_id AND status='active'"
+                    ),
+                    {
+                        "session_id": session_id,
+                        "user_id": user_id,
+                        "workspace_id": workspace_id,
+                    },
+                ).first()
+                if owner is None:
+                    raise PermissionError("transcript does not belong to the principal")
+                connection.execute(delete(ConversationTranscriptModel).where(ConversationTranscriptModel.session_id == session_id))
+                parent_id = None
+                for index, message in enumerate(public_transcript_messages(messages)):
+                    message_id = str(getattr(message, "id", None) or uuid.uuid4())
+                    role = "assistant" if isinstance(message, AIMessage) else "tool" if isinstance(message, ToolMessage) else "system" if isinstance(message, SystemMessage) else "user"
+                    connection.execute(insert(ConversationTranscriptModel).values(id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"{session_id}:{message_id}:{index}")), session_id=session_id, message_uuid=message_id, parent_uuid=parent_id, message_type=message.__class__.__name__, role=role, content_json={"content": message.content}, tool_json={"tool_calls": getattr(message, "tool_calls", [])} if getattr(message, "tool_calls", None) else None, usage_json=getattr(message, "usage_metadata", None)))
+                    parent_id = message_id
+        finally:
+            engine.dispose()
+
+    await asyncio.to_thread(persist)
 
 async def load_transcript_file(session_id: str) -> List[BaseMessage]:
     """
@@ -477,4 +523,6 @@ async def load_transcript_file(session_id: str) -> List[BaseMessage]:
             msg = HumanMessage(content=entry.content, id=entry.uuid)
         reconstructed_messages.append(msg)
 
-    return reconstructed_messages
+    # Legacy JSONL files may predate the internal metadata marker. Apply the
+    # content-based compatibility filter after reconstruction as well.
+    return public_transcript_messages(reconstructed_messages)

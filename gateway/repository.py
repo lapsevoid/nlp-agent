@@ -5,22 +5,26 @@ from __future__ import annotations
 import json
 import random
 import hashlib
+import re
 import sqlite3
 import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 from gateway.contracts import (
     GatewayEvent,
     GatewayEventType,
+    KnowledgeBookRevisionConflictError,
     TeachingConfigurationError,
     GuidedSessionRef,
     TurnRecord,
     TurnStatus,
 )
-from core.learning import ExerciseState, LearningContext, LearningProgress
+from core.learning import ExerciseState, LearningContext, LearningProgress, knowledge_point_ids
+from gateway.analytics_time import localize_turn_time
 
 
 def _now() -> str:
@@ -92,6 +96,15 @@ class GatewayRepository:
                     settings_json TEXT NOT NULL DEFAULT '{}',
                     updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS gateway_whiteboard_library_items (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    item_json TEXT NOT NULL,
+                    created_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_gateway_whiteboard_library_created
+                    ON gateway_whiteboard_library_items(created_at, id);
                 -- Teaching assets are deliberately independent from chat sessions,
                 -- turns, and user UI settings.  Editing a course cannot mutate a
                 -- learner transcript or LangGraph checkpoint.
@@ -100,6 +113,27 @@ class GatewayRepository:
                     revision INTEGER NOT NULL DEFAULT 0,
                     catalog_json TEXT NOT NULL,
                     updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS gateway_knowledge_pages (
+                    workspace_id TEXT NOT NULL,
+                    knowledge_point_id TEXT NOT NULL,
+                    draft_markdown TEXT NOT NULL DEFAULT '',
+                    published_markdown TEXT,
+                    revision INTEGER NOT NULL DEFAULT 0,
+                    published_revision INTEGER,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(workspace_id, knowledge_point_id)
+                );
+                CREATE TABLE IF NOT EXISTS gateway_knowledge_book_assets (
+                    workspace_id TEXT NOT NULL,
+                    asset_path TEXT NOT NULL,
+                    media_type TEXT NOT NULL,
+                    draft_content BLOB NOT NULL,
+                    published_content BLOB,
+                    size_bytes INTEGER NOT NULL,
+                    sha256 TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(workspace_id, asset_path)
                 );
                 CREATE TABLE IF NOT EXISTS gateway_blueprints (
                     workspace_id TEXT NOT NULL, blueprint_id TEXT NOT NULL, kind TEXT NOT NULL,
@@ -206,6 +240,15 @@ class GatewayRepository:
         guided_session_attempts: int | None = None,
         guided_session_status: str | None = None,
         exercise_state: ExerciseState | None = None,
+        dispatch_payload: str | None = None,
+        # The MySQL repository performs quota admission in the same
+        # transaction as turn creation.  Keep the in-memory repository
+        # compatible with that gateway contract; quota-aware callers may use
+        # this repository in tests and local development where admission is
+        # intentionally disabled.
+        quota_admission: Any = None,
+        quota_role_codes: tuple[str, ...] = (),
+        quota_classroom_ids: tuple[str, ...] = (),
     ) -> tuple[TurnRecord, bool]:
         with self._lock, self._conn:
             if idempotency_key:
@@ -257,6 +300,7 @@ class GatewayRepository:
         error_kind: str | None = None,
         error_message: str | None = None,
         exercise_state: ExerciseState | None = None,
+        dispatch_payload: str | None = None,
     ) -> TurnRecord:
         fields: dict[str, Any] = {
             "status": status.value,
@@ -264,6 +308,9 @@ class GatewayRepository:
             "error_kind": error_kind,
             "error_message": error_message[:1000] if error_message else None,
         }
+        if status == TurnStatus.ACCEPTED:
+            fields["started_at"] = None
+            fields["completed_at"] = None
         if status == TurnStatus.RUNNING:
             fields["started_at"] = _now()
         if status in {
@@ -277,12 +324,32 @@ class GatewayRepository:
             fields["exercise_state_json"] = exercise_state.model_dump_json()
         assignments = ",".join(f"{key}=?" for key in fields)
         with self._lock, self._conn:
-            cursor = self._conn.execute(
+            current = self._conn.execute(
+                "SELECT * FROM gateway_turns WHERE turn_id=?", (turn_id,)
+            ).fetchone()
+            if current is None:
+                raise KeyError(turn_id)
+            terminal_statuses = {
+                TurnStatus.COMPLETED.value,
+                TurnStatus.FAILED.value,
+                TurnStatus.CANCELLED.value,
+                TurnStatus.INTERRUPTED.value,
+            }
+            retrying_dispatch_failure = (
+                current["status"] == TurnStatus.FAILED.value
+                and current["error_kind"] == "dispatch_failed"
+                and status == TurnStatus.ACCEPTED
+            )
+            if (
+                current["status"] in terminal_statuses
+                and current["status"] != status.value
+                and not retrying_dispatch_failure
+            ):
+                return self._turn(current)
+            self._conn.execute(
                 f"UPDATE gateway_turns SET {assignments} WHERE turn_id=?",
                 (*fields.values(), turn_id),
             )
-            if cursor.rowcount != 1:
-                raise KeyError(turn_id)
             row = self._conn.execute(
                 "SELECT * FROM gateway_turns WHERE turn_id=?", (turn_id,)
             ).fetchone()
@@ -367,6 +434,30 @@ class GatewayRepository:
                 (turn_id, max(0, after_sequence), min(max(1, limit), 2000)),
             ).fetchall()
         return [self._event(row) for row in rows]
+
+    def ensure_event(
+        self,
+        *,
+        turn_id: str,
+        session_id: str,
+        event_type: GatewayEventType,
+        payload: dict[str, Any] | None = None,
+    ) -> GatewayEvent:
+        """Return an existing event of this type or append it exactly once."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM gateway_events WHERE turn_id=? AND event_type=? "
+                "ORDER BY sequence LIMIT 1",
+                (turn_id, event_type.value),
+            ).fetchone()
+            if row is not None:
+                return self._event(row)
+            return self.append_event(
+                turn_id=turn_id,
+                session_id=session_id,
+                event_type=event_type,
+                payload=payload,
+            )
 
     def list_turns(self, session_id: str, *, limit: int = 100) -> list[TurnRecord]:
         with self._lock:
@@ -544,24 +635,167 @@ class GatewayRepository:
             )
         return cursor.rowcount
 
-    def list_questions(
+    def list_question_turns(
         self,
         *,
         workspace_id: str,
         since: str,
-        limit: int = 2_000,
+        timezone_name: str = "UTC",
     ) -> list[dict[str, Any]]:
-        """Teacher-facing read model; account/course joins can replace this later."""
+        """Teacher read model: structured question rows (no question text).
+
+        The time window is the only bound; aggregation must reflect every turn.
+        """
         with self._lock:
             rows = self._conn.execute(
-                """SELECT turn_id,session_id,workspace_id,user_id,status,input_text,
-                          final_text,error_kind,created_at,completed_at,learning_context_json,learning_progress_json,exercise_state_json
-                   FROM gateway_turns
-                   WHERE workspace_id=? AND created_at>=?
+                """SELECT session_id,user_id,error_kind,created_at,learning_context_json
+                   FROM gateway_turns WHERE workspace_id=? AND created_at>=?
+                   ORDER BY created_at""",
+                (workspace_id, since),
+            ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            context = json.loads(row["learning_context_json"]) if row["learning_context_json"] else {}
+            created = str(row["created_at"])
+            try:
+                created_at = datetime.fromisoformat(created.replace("Z", "+00:00"))
+            except ValueError:
+                created_at = None
+            if created_at is None:
+                day, hour, weekday = created[:10], None, None
+            else:
+                day, hour, weekday = localize_turn_time(created_at, timezone_name)
+            result.append(
+                {
+                    "session_id": row["session_id"],
+                    "user_id": row["user_id"],
+                    "display_name": None,
+                    "username": None,
+                    "role_codes": [],
+                    "has_error": bool(row["error_kind"]),
+                    "topic_id": context.get("topic_id"),
+                    "level": context.get("level"),
+                    "mode": context.get("mode"),
+                    "day": day,
+                    "hour": hour,
+                    "weekday": weekday,
+                }
+            )
+        return result
+
+    def list_student_user_ids(self) -> set[str]:
+        """Return local learner ids; SQLite has no separate RBAC catalog."""
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT user_id FROM gateway_turns
+                   UNION SELECT user_id FROM gateway_exercise_sessions
+                   UNION SELECT user_id FROM gateway_guided_sessions"""
+            ).fetchall()
+        return {str(row[0]) for row in rows if row[0]}
+
+    def exercise_evidence_stats(
+        self,
+        *,
+        workspace_id: str,
+        since: str,
+        until: str | None = None,
+        limit: int = 10_000,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        cap = min(max(1, limit), 10_000)
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT e.normalized_score,e.passed,e.knowledge_point_ids_json,e.blueprint_snapshot_json,q.id AS question_id,q.question,s.user_id,s.topic_id,s.mode,s.completed_at
+                   FROM gateway_learning_evidence e
+                   JOIN gateway_exercise_questions q ON q.id=e.exercise_question_id
+                   JOIN gateway_exercise_sessions s ON s.id=e.exercise_session_id
+                   WHERE s.workspace_id=? AND s.completed_at>=? AND (? IS NULL OR s.completed_at<?)
+                   ORDER BY s.completed_at DESC LIMIT ?""",
+                (workspace_id, since, until, until, cap + 1),
+            ).fetchall()
+        truncated = len(rows) > cap
+        rows = rows[:cap]
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            kp_ids = json.loads(row["knowledge_point_ids_json"] or "[]") if row["knowledge_point_ids_json"] else []
+            if not kp_ids:
+                blueprint = json.loads(row["blueprint_snapshot_json"] or "{}") if row["blueprint_snapshot_json"] else {}
+                kp_ids = knowledge_point_ids(blueprint)
+            result.append(
+                {
+                    "user_id": row["user_id"],
+                    "topic_id": row["topic_id"],
+                    "mode": row["mode"],
+                    "question_id": row["question_id"],
+                    "question": row["question"],
+                    "knowledge_point_ids": [str(item) for item in kp_ids if item],
+                    "score": int(row["normalized_score"]),
+                    "passed": bool(row["passed"]),
+                    "completed_at": row["completed_at"],
+                }
+            )
+        return result, truncated
+
+    def exercise_criterion_stats(
+        self,
+        *,
+        workspace_id: str,
+        since: str,
+        until: str | None = None,
+        limit: int = 20_000,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        cap = min(max(1, limit), 50_000)
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT a.rubric_matches_json,s.user_id,s.topic_id,s.blueprint_snapshot_json,s.completed_at
+                   FROM gateway_exercise_attempts a
+                   JOIN gateway_exercise_questions q ON q.id=a.exercise_question_id
+                   JOIN gateway_exercise_sessions s ON s.id=q.exercise_session_id
+                   WHERE s.workspace_id=? AND s.completed_at>=? AND (? IS NULL OR s.completed_at<?)
+                   ORDER BY s.completed_at DESC LIMIT ?""",
+                (workspace_id, since, until, until, cap + 1),
+            ).fetchall()
+        truncated = len(rows) > cap
+        rows = rows[:cap]
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            blueprint = json.loads(row["blueprint_snapshot_json"] or "{}") if row["blueprint_snapshot_json"] else {}
+            matches = json.loads(row["rubric_matches_json"] or "[]") if row["rubric_matches_json"] else []
+            result.append(
+                {
+                    "user_id": row["user_id"],
+                    "topic_id": row["topic_id"],
+                    "knowledge_point_ids": knowledge_point_ids(blueprint),
+                    "matches": [m for m in matches if isinstance(m, dict)],
+                    "completed_at": row["completed_at"],
+                }
+            )
+        return result, truncated
+
+    def guided_session_stats(
+        self,
+        *,
+        workspace_id: str,
+        since: str,
+        limit: int = 10_000,
+    ) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT user_id,topic_id,misconceptions_json FROM gateway_guided_sessions
+                   WHERE workspace_id=? AND (completed_at>=? OR completed_at IS NULL)
                    ORDER BY created_at DESC LIMIT ?""",
                 (workspace_id, since, min(max(1, limit), 10_000)),
             ).fetchall()
-        return [dict(row) for row in rows]
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            misconceptions = json.loads(row["misconceptions_json"] or "[]") if row["misconceptions_json"] else []
+            result.append(
+                {
+                    "user_id": row["user_id"],
+                    "topic_id": row["topic_id"],
+                    "misconception_count": len(misconceptions) if isinstance(misconceptions, list) else 0,
+                }
+            )
+        return result
 
     def latest_event_sequence(self, turn_id: str) -> int:
         with self._lock:
@@ -612,6 +846,42 @@ class GatewayRepository:
             )
         return {"revision": revision, "settings": merged, "updated_at": updated_at}
 
+    def list_whiteboard_library(self) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT item_json FROM gateway_whiteboard_library_items "
+                "ORDER BY created_at ASC, id ASC"
+            ).fetchall()
+        return [json.loads(row["item_json"]) for row in rows]
+
+    def create_whiteboard_library_item(
+        self,
+        *,
+        name: str,
+        elements: list[dict[str, Any]],
+        created_by: str,
+    ) -> dict[str, Any]:
+        item = {
+            "id": str(uuid.uuid4()),
+            "status": "published",
+            "created": int(datetime.now(timezone.utc).timestamp() * 1000),
+            "name": name,
+            "elements": elements,
+        }
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO gateway_whiteboard_library_items "
+                "(id,name,item_json,created_by,created_at) VALUES (?,?,?,?,?)",
+                (
+                    item["id"],
+                    name,
+                    json.dumps(item, ensure_ascii=False, separators=(",", ":"), allow_nan=False),
+                    created_by,
+                    _now(),
+                ),
+            )
+        return item
+
     def get_teaching_catalog(self, workspace_id: str) -> dict[str, Any]:
         with self._lock:
             row = self._conn.execute(
@@ -645,6 +915,178 @@ class GatewayRepository:
                          json.dumps(blueprint, ensure_ascii=False, separators=(",", ":")), updated_at),
                     )
         return {"revision": revision, "catalog": catalog, "updated_at": updated_at}
+
+    def get_knowledge_page(self, workspace_id: str, knowledge_point_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                """SELECT workspace_id,knowledge_point_id,draft_markdown,published_markdown,
+                          revision,published_revision,updated_at
+                   FROM gateway_knowledge_pages
+                   WHERE workspace_id=? AND knowledge_point_id=?""",
+                (workspace_id, knowledge_point_id),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def list_knowledge_pages(self, workspace_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT workspace_id,knowledge_point_id,draft_markdown,published_markdown,
+                          revision,published_revision,updated_at
+                   FROM gateway_knowledge_pages
+                   WHERE workspace_id=?""",
+                (workspace_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_published_knowledge_page(self, workspace_id: str, knowledge_point_id: str) -> dict[str, Any] | None:
+        row = self.get_knowledge_page(workspace_id, knowledge_point_id)
+        if row is None or row["published_markdown"] is None:
+            return None
+        return row
+
+    @staticmethod
+    def _check_knowledge_page_revision(current: dict[str, Any] | None, expected_revision: int | None) -> int:
+        revision = int(current["revision"]) if current is not None else 0
+        if expected_revision is not None and expected_revision != revision:
+            raise KnowledgeBookRevisionConflictError(f"知识点教材版本冲突：当前版本为 {revision}")
+        return revision
+
+    def update_knowledge_page(
+        self,
+        workspace_id: str,
+        knowledge_point_id: str,
+        draft_markdown: str,
+        *,
+        expected_revision: int | None = None,
+    ) -> dict[str, Any]:
+        with self._lock, self._conn:
+            current = self.get_knowledge_page(workspace_id, knowledge_point_id)
+            revision = self._check_knowledge_page_revision(current, expected_revision) + 1
+            updated_at = _now()
+            if current is None:
+                self._conn.execute(
+                    """INSERT INTO gateway_knowledge_pages(
+                               workspace_id,knowledge_point_id,draft_markdown,revision,updated_at)
+                       VALUES (?,?,?,?,?)""",
+                    (workspace_id, knowledge_point_id, draft_markdown, revision, updated_at),
+                )
+            else:
+                self._conn.execute(
+                    """UPDATE gateway_knowledge_pages
+                       SET draft_markdown=?,revision=?,updated_at=?
+                       WHERE workspace_id=? AND knowledge_point_id=?""",
+                    (draft_markdown, revision, updated_at, workspace_id, knowledge_point_id),
+                )
+        return self.get_knowledge_page(workspace_id, knowledge_point_id)  # type: ignore[return-value]
+
+    def publish_knowledge_page(
+        self,
+        workspace_id: str,
+        knowledge_point_id: str,
+        *,
+        expected_revision: int,
+    ) -> dict[str, Any]:
+        with self._lock, self._conn:
+            current = self.get_knowledge_page(workspace_id, knowledge_point_id)
+            if current is None:
+                raise ValueError("教材页面尚未保存草稿")
+            revision = self._check_knowledge_page_revision(current, expected_revision)
+            if not str(current["draft_markdown"]).strip():
+                raise ValueError("教材正文为空，不能发布")
+            updated_at = _now()
+            self._conn.execute(
+                """UPDATE gateway_knowledge_pages
+                   SET published_markdown=draft_markdown,
+                       published_revision=?,updated_at=?
+                   WHERE workspace_id=? AND knowledge_point_id=?""",
+                (revision, updated_at, workspace_id, knowledge_point_id),
+            )
+            for asset_path in self._asset_paths_from_markdown(str(current["draft_markdown"])):
+                self._conn.execute(
+                    """UPDATE gateway_knowledge_book_assets
+                       SET published_content=draft_content,updated_at=?
+                       WHERE workspace_id=? AND asset_path=?""",
+                    (_now(), workspace_id, asset_path),
+                )
+        return self.get_knowledge_page(workspace_id, knowledge_point_id)  # type: ignore[return-value]
+
+    @staticmethod
+    def _asset_paths_from_markdown(markdown: str) -> set[str]:
+        paths: set[str] = set()
+        for raw_path in re.findall(r"/assets/(assets/[^)\s\"']+)", markdown):
+            path = unquote(raw_path)
+            if path.startswith("assets/") and ".." not in path.split("/"):
+                paths.add(path)
+        return paths
+
+    def apply_knowledge_book_import(
+        self,
+        workspace_id: str,
+        pages: list[dict[str, Any]],
+        assets: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Apply a validated package atomically after checking every revision."""
+        with self._lock, self._conn:
+            currents: dict[str, dict[str, Any] | None] = {}
+            for page in pages:
+                point_id = str(page["knowledge_point_id"])
+                current = self.get_knowledge_page(workspace_id, point_id)
+                self._check_knowledge_page_revision(current, int(page["expected_revision"]))
+                currents[point_id] = current
+
+            for page in pages:
+                point_id = str(page["knowledge_point_id"])
+                current = currents[point_id]
+                revision = int(page["expected_revision"]) + 1
+                updated_at = _now()
+                if current is None:
+                    self._conn.execute(
+                        """INSERT INTO gateway_knowledge_pages(
+                           workspace_id,knowledge_point_id,draft_markdown,revision,updated_at)
+                           VALUES (?,?,?,?,?)""",
+                        (workspace_id, point_id, str(page["content_markdown"]), revision, updated_at),
+                    )
+                else:
+                    self._conn.execute(
+                        """UPDATE gateway_knowledge_pages
+                           SET draft_markdown=?,revision=?,updated_at=?
+                           WHERE workspace_id=? AND knowledge_point_id=?""",
+                        (str(page["content_markdown"]), revision, updated_at, workspace_id, point_id),
+                    )
+
+            for asset in assets:
+                content = bytes(asset["content"])
+                self._conn.execute(
+                    """INSERT INTO gateway_knowledge_book_assets(
+                       workspace_id,asset_path,media_type,draft_content,size_bytes,sha256,updated_at)
+                       VALUES (?,?,?,?,?,?,?)
+                       ON CONFLICT(workspace_id,asset_path) DO UPDATE SET
+                         media_type=excluded.media_type,draft_content=excluded.draft_content,
+                         size_bytes=excluded.size_bytes,sha256=excluded.sha256,
+                         updated_at=excluded.updated_at""",
+                    (
+                        workspace_id,
+                        str(asset["asset_path"]),
+                        str(asset["media_type"]),
+                        content,
+                        len(content),
+                        str(asset["sha256"]),
+                        _now(),
+                    ),
+                )
+        return [self.get_knowledge_page(workspace_id, str(page["knowledge_point_id"])) for page in pages]  # type: ignore[list-item]
+
+    def get_knowledge_book_asset(self, workspace_id: str, asset_path: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                """SELECT workspace_id,asset_path,media_type,published_content AS content,size_bytes,sha256
+                   FROM gateway_knowledge_book_assets
+                   WHERE workspace_id=? AND asset_path=?""",
+                (workspace_id, asset_path),
+            ).fetchone()
+        if row is None or row["content"] is None:
+            return None
+        return dict(row)
 
     def select_guided_blueprint(self, *, workspace_id: str, topic_id: str) -> dict[str, Any] | None:
         catalog = self.get_teaching_catalog(workspace_id)["catalog"]

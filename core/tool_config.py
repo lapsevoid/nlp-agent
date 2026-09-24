@@ -31,6 +31,7 @@ class ToolPoliciesConfig(StrictConfigModel):
                 "TaskStop",
                 "read_local_file",
                 "get_current_time",
+                "get_knowledge_book_context",
             },
             allowed_capabilities={"context.manage"},
             denied_capabilities={"business.write"},
@@ -102,20 +103,245 @@ class MCPServerConfig(StrictConfigModel):
         return self
 
 
+DEFAULT_BLOCKED_CIDRS: tuple[str, ...] = (
+    "0.0.0.0/8",
+    "10.0.0.0/8",
+    "100.64.0.0/10",
+    "127.0.0.0/8",
+    "169.254.0.0/16",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "::1/128",
+    "fc00::/7",
+    "fe80::/10",
+)
+
+
+class WebNetworkConfig(StrictConfigModel):
+    connect_timeout_s: float = Field(default=5.0, gt=0, le=60)
+    read_timeout_s: float = Field(default=20.0, gt=0, le=120)
+    max_redirects: int = Field(default=5, ge=0, le=10)
+    max_response_bytes: int = Field(default=5_000_000, ge=10_000, le=50_000_000)
+    blocked_cidrs: list[str] = Field(
+        default_factory=lambda: list(DEFAULT_BLOCKED_CIDRS)
+    )
+
+    @field_validator("blocked_cidrs")
+    @classmethod
+    def validate_blocked_cidrs(cls, values: list[str]) -> list[str]:
+        import ipaddress
+
+        for value in values:
+            try:
+                ipaddress.ip_network(value, strict=False)
+            except ValueError as error:
+                raise ValueError(f"invalid blocked CIDR {value!r}: {error}") from error
+        return values
+
+
+class WebFetchConfig(StrictConfigModel):
+    max_chars: int = Field(default=20_000, ge=500, le=50_000)
+    cache_ttl_s: int = Field(default=300, ge=0, le=3600)
+    allowed_content_types: list[str] = Field(
+        default_factory=lambda: ["text/html", "text/plain", "application/json"]
+    )
+
+
+class WebToolsConfig(StrictConfigModel):
+    enabled: bool = True
+    proxy_url: str = ""
+    proxy_url_env: str = Field(
+        default="", pattern=r"^$|^[A-Z][A-Z0-9_]{1,79}$"
+    )
+    user_agent: str = "Nova/1.0 (+web-fetch)"
+    network: WebNetworkConfig = Field(default_factory=WebNetworkConfig)
+    fetch: WebFetchConfig = Field(default_factory=WebFetchConfig)
+
+
+class VisionPreprocessingConfig(StrictConfigModel):
+    auto_rotate: bool = True
+    max_dimension: int = Field(default=4096, ge=48, le=16_384)
+    retry_low_confidence_once: bool = True
+
+
+class VisionOCRConfig(StrictConfigModel):
+    provider: str = "rapidocr"
+    language_default: Literal["auto", "zh", "en"] = "auto"
+    confidence_threshold: float = Field(default=0.75, ge=0, le=1)
+
+    @field_validator("provider")
+    @classmethod
+    def validate_provider(cls, value: str) -> str:
+        provider = value.strip()
+        if provider not in {"rapidocr", "none"}:
+            raise ValueError(
+                "vision OCR provider must be 'rapidocr' or 'none'"
+            )
+        return provider
+
+
+class VisionVLMConfig(StrictConfigModel):
+    # Image understanding is an application service, not a chat-profile
+    # capability.  Keep one route so profile changes cannot swap providers.
+    model_route: Literal["vision-worker"] = "vision-worker"
+    max_image_bytes: int = Field(default=6_000_000, ge=1_024, le=100_000_000)
+    send_ocr_context: bool = True
+    standard_image_max_pixels: int = Field(
+        default=1_048_576, ge=2_304, le=200_000_000
+    )
+    high_image_max_pixels: int = Field(
+        default=4_194_304, ge=2_304, le=200_000_000
+    )
+
+    @model_validator(mode="after")
+    def validate_image_unit_tiers(self) -> "VisionVLMConfig":
+        if self.high_image_max_pixels <= self.standard_image_max_pixels:
+            raise ValueError(
+                "vision VLM high_image_max_pixels must exceed "
+                "standard_image_max_pixels"
+            )
+        return self
+
+    def fallback_image_units(self, *, width: int, height: int, task: str) -> int:
+        """Map the application-sent image dimensions and mode to 1/2/3 units."""
+
+        pixels = width * height
+        if pixels <= self.standard_image_max_pixels:
+            units = 1
+        elif pixels <= self.high_image_max_pixels:
+            units = 2
+        else:
+            units = 3
+        if task in {"table", "chart", "formula"}:
+            return 3
+        return units
+
+
+class VisionResultConfig(StrictConfigModel):
+    max_chars: int = Field(default=20_000, ge=500, le=50_000)
+    retain_raw_ocr: bool = True
+
+
+class VisionToolsConfig(StrictConfigModel):
+    enabled: bool = True
+    max_file_bytes: int = Field(default=10_000_000, ge=1_024, le=100_000_000)
+    max_pixels: int = Field(default=40_000_000, ge=2_304, le=200_000_000)
+    max_pages: int = Field(default=10, ge=1, le=100)
+    allowed_media_types: list[Literal["image/jpeg", "image/png", "image/webp"]] = Field(
+        default_factory=lambda: ["image/jpeg", "image/png", "image/webp"],
+        min_length=1,
+    )
+    allow_remote_url: bool = False
+    preprocessing: VisionPreprocessingConfig = Field(default_factory=VisionPreprocessingConfig)
+    ocr: VisionOCRConfig = Field(default_factory=VisionOCRConfig)
+    vlm: VisionVLMConfig = Field(default_factory=VisionVLMConfig)
+    result: VisionResultConfig = Field(default_factory=VisionResultConfig)
+
+    @field_validator("allowed_media_types")
+    @classmethod
+    def validate_allowed_media_types(cls, values: list[str]) -> list[str]:
+        if len(values) != len(set(values)):
+            raise ValueError("vision allowed_media_types cannot contain duplicates")
+        return values
+
+    @model_validator(mode="after")
+    def validate_vlm_image_limit(self) -> "VisionToolsConfig":
+        if self.vlm.max_image_bytes > self.max_file_bytes:
+            raise ValueError("vision vlm.max_image_bytes must be <= max_file_bytes")
+        return self
+
+
+class AcademicArxivConfig(StrictConfigModel):
+    enabled: bool = True
+    base_url: str = "https://export.arxiv.org/api/query"
+    min_interval_s: float = Field(default=3.0, ge=3.0)
+    timeout_s: float = Field(default=15.0, gt=0, le=60)
+
+
+class AcademicSemanticScholarConfig(StrictConfigModel):
+    enabled: bool = True
+    base_url: str = "https://api.semanticscholar.org/graph/v1"
+    api_key_env: str = "SEMANTIC_SCHOLAR_API_KEY"
+    timeout_s: float = Field(default=10.0, gt=0, le=60)
+
+
+class AcademicCrossrefConfig(StrictConfigModel):
+    enabled: bool = True
+    base_url: str = "https://api.crossref.org"
+    mailto_env: str = "ACADEMIC_CROSSREF_MAILTO"
+    timeout_s: float = Field(default=10.0, gt=0, le=60)
+
+
+class AcademicReliabilityConfig(StrictConfigModel):
+    redis_enabled: bool = True
+    redis_url_env: str = Field(
+        default="NLP_AGENT_REDIS_URL", pattern=r"^[A-Z][A-Z0-9_]{1,79}$"
+    )
+    redis_key_prefix: str = Field(
+        default="nova:academic",
+        min_length=1,
+        max_length=80,
+        pattern=r"^[A-Za-z0-9:_-]+$",
+    )
+    redis_operation_timeout_s: float = Field(default=1.0, gt=0, le=10)
+    circuit_failure_threshold: int = Field(default=3, ge=1, le=20)
+    circuit_cooldown_s: float = Field(default=60.0, gt=0, le=3600)
+    retry_attempts: int = Field(default=1, ge=1, le=3)
+    retry_base_delay_s: float = Field(default=0.5, ge=0, le=10)
+    retry_max_delay_s: float = Field(default=4.0, ge=0, le=30)
+
+    @model_validator(mode="after")
+    def validate_retry_delay(self) -> "AcademicReliabilityConfig":
+        if self.retry_max_delay_s < self.retry_base_delay_s:
+            raise ValueError("retry_max_delay_s must be >= retry_base_delay_s")
+        return self
+
+
+class AcademicToolsConfig(StrictConfigModel):
+    enabled: bool = True
+    max_results: int = Field(default=5, ge=1, le=10)
+    search_cache_ttl_s: int = Field(default=86400, ge=0, le=604800)
+    metadata_cache_ttl_s: int = Field(default=2592000, ge=0)
+    arxiv: AcademicArxivConfig = Field(default_factory=AcademicArxivConfig)
+    semantic_scholar: AcademicSemanticScholarConfig = Field(
+        default_factory=AcademicSemanticScholarConfig
+    )
+    crossref: AcademicCrossrefConfig = Field(default_factory=AcademicCrossrefConfig)
+    reliability: AcademicReliabilityConfig = Field(
+        default_factory=AcademicReliabilityConfig
+    )
+
+
 class ToolRuntimeConfig(StrictConfigModel):
     policies: ToolPoliciesConfig = Field(default_factory=ToolPoliciesConfig)
     custom: CustomToolsConfig = Field(default_factory=CustomToolsConfig)
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
+    web: WebToolsConfig = Field(default_factory=WebToolsConfig)
+    vision: VisionToolsConfig = Field(default_factory=VisionToolsConfig)
+    academic: AcademicToolsConfig = Field(default_factory=AcademicToolsConfig)
 
 
 class WorkerProfileSpec(StrictConfigModel):
     name: str
     description: str = ""
     model: str | None = None
+    execution_mode: Literal["react", "one_shot"] = "react"
+    requires_native_search: bool = False
+    inherit_tool_policy: bool = True
     skills: list[str] = Field(default_factory=list)
     capabilities: set[str] = Field(default_factory=set)
     allowed_tools: set[str] = Field(default_factory=set)
     denied_tools: set[str] = Field(default_factory=set)
+
+    @model_validator(mode="after")
+    def validate_native_search_profile(self) -> "WorkerProfileSpec":
+        if self.requires_native_search and not self.model:
+            raise ValueError("native-search Worker Profile requires an explicit model preset")
+        if self.requires_native_search and self.execution_mode != "one_shot":
+            raise ValueError("native-search Worker Profile must use execution_mode=one_shot")
+        if self.requires_native_search and self.inherit_tool_policy:
+            raise ValueError("native-search Worker Profile cannot inherit global tool grants")
+        return self
 
 
 class AgentRuntimeConfig(StrictConfigModel):

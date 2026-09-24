@@ -2,16 +2,17 @@
 
 NLP Agent 从 `v0.14.0` 起使用显式 Provider Registry 和类型化模型路由。Coordinator、Worker、Memory 与 Compression 不再直接构造 DeepSeek/OpenAI SDK 对象。
 
-## 四层配置
+## 五层配置
 
-`configs/agent_config.yaml` 将模型配置拆成四层：
+`configs/agent_config.yaml` 将模型配置拆成五层：
 
 1. `providers`：连接协议、Endpoint、密钥环境变量和固定 Header；
 2. `models`：真实模型 ID、上下文窗口、最大输出和能力声明；
 3. `model_presets`：思考、生成、超时、重试和熔断策略；
-4. `model_routes`：Coordinator、Worker、Utility 的主模型和 fallback 链。
+4. `model_routes`：Coordinator、Worker、Utility 的默认主模型和 fallback 链；
+5. `model_profiles`：学生可选择的模型档案，显式绑定同一 Provider 的 Coordinator、Worker 和 Utility preset。
 
-Provider 和 Model 必须显式关联，不通过 URL 或模型名称猜测 Provider。
+Provider 和 Model 必须显式关联，不通过 URL 或模型名称猜测 Provider。模型档案也会在配置加载时校验三个 preset 是否属于其声明的 Provider，避免无意间要求其他厂商的密钥。
 
 ## 默认 DeepSeek 路由
 
@@ -25,16 +26,57 @@ Utility 用于记忆整理、Context Collapse 和 Auto Compact，避免为确定
 
 DeepSeek 思考模式通过 `extra_body.thinking.type` 控制。内部统一 effort 枚举为 `none/low/medium/high/max`；DeepSeek Adapter 将 low、medium、high 映射为 `high`，将 max 映射为 `max`。思考模式下会丢弃无效的 temperature/top_p。
 
+## Qwen 适配
+
+Qwen 使用专用 `qwen` Adapter，而不是把兼容接口直接当作通用 OpenAI Provider。Adapter 根据 preset 写入 `extra_body.enable_thinking`；仅对官方声明支持该参数的模型在启用思考时设置 `preserve_thinking=true`，并将 Qwen3.8 Max 的内部 `high/max` effort 映射为厂商参数 `xhigh`。`qwen3-vl-plus` 不发送 `preserve_thinking`。
+
+流式和非流式响应中的 `reasoning_content` 都会保留。多轮请求会将历史 Assistant 消息的 `reasoning_content` 回传给 Qwen，避免开启 `preserve_thinking` 后丢失推理上下文。缓存 Token、推理 Token 和总用量仍归一化到统一 usage 字段。
+
+Qwen 原生联网搜索是 preset 级的显式能力，不会随 Qwen Provider 全局开启。只有 `worker-qwen-web` 设置 `native_search.enabled=true`；Adapter 才会在 `extra_body` 中写入 `enable_search=true` 和 `search_options`。普通 `coordinator-qwen-max`、`worker-qwen-plus` 与 `utility-qwen-plus` 的请求保持不联网。
+
+Coordinator 仅把最新、实时、新闻、价格、政策、版本或用户明确要求联网检索的问题路由到 `web_researcher`。该 Worker 固定使用 `qwen3.7-plus`、`forced_search=true` 和 `turbo` 策略；运行时禁止模型覆盖及其他 Profile 借用该 preset。它采用 one-shot 执行（单轮、无工具、无 Provider/Worker 重试、预算耗尽不再调用模型），从服务端限制单任务最多一次原生搜索。用户提供明确 URL 时改用 `web_reader`；它继承当前普通 Worker 模型且只获授 `web_fetch`，不会触发 Qwen 原生搜索。两个内建 Web Profile 不继承全局 Worker 工具授权，也不能被 Developer UI 覆盖。兼容模式的模型回答不保证包含结构化来源 URL，因此运行时不得补造引用。
+
+## Kimi 适配
+
+Kimi 使用专用 `kimi` Adapter，通过国内 Moonshot Endpoint `https://api.moonshot.cn/v1` 调用配置中的 `kimi-k2.6`。`coordinator-kimi` 和 `worker-kimi` 启用思考，`utility-kimi` 关闭思考；请求统一写入 `extra_body.thinking.type`，并设置 `keep=null`，不跨普通轮次保留推理内容。
+
+Kimi K2.6 不接收项目的统一 effort、temperature、top_p 或 n 参数。Adapter 不发送这些字段；preset 一旦显式设置 temperature 或 top_p，会在构建阶段报错，避免产生表面生效、实际被忽略的配置。
+
+流式和非流式响应中的 `reasoning_content`、响应 ID 与用量都会进入统一模型消息。只有包含 `tool_calls` 的历史 Assistant 消息会回传 `reasoning_content`，以满足工具调用循环，同时保持普通请求前缀稳定。Kimi 顶层 `cached_tokens` 会归一化为 `cached_input_tokens`。
+
+## GLM 适配
+
+GLM 使用专用 `glm` Adapter，通过国内 BigModel Endpoint `https://open.bigmodel.cn/api/paas/v4` 调用。Coordinator 和 Worker 使用 `glm-5.3`；该模型必须启用思考，配置为 disabled 时会在 Adapter 构建阶段直接报错。内部 effort 映射为 GLM-5.3 支持的 `low/high/max`：low→low、medium/high→high、max→max。Utility 使用可关闭思考的 `glm-5.2`，并配置 `temperature=0.1`。
+
+GLM 请求始终设置 `tool_stream=true`，使长工具参数生成能够持续产生增量 chunk。与 Kimi 相同，只有包含工具调用的历史 Assistant 消息才会回传 `reasoning_content`。GLM 的 `prompt_tokens_details.cached_tokens` 会归一化为统一缓存 Token 字段。
+
+GLM 还可能在 HTTP 请求正常结束时通过 `finish_reason` 表示错误。`model_context_window_exceeded` 按上下文超限处理，`network_error` 按可重试过载处理，`sensitive` 按不可重试错误处理。首个可见 delta 前可以执行既有 retry/fallback；已经输出正文或工具参数后会抛出 `StreamInterruptedError`，不会把另一轮输出拼接到原流。若只有 reasoning 增量而尚未产生正文或工具参数，且错误属于可重试的连接、超时或过载错误，则允许透明重试；这样不会把没有形成答案的半截推理误当作最终结果。
+
+数字业务码在通用 HTTP 状态之前分类：`1113` 是欠费、`1261` 是 Prompt 超长、`1301` 是安全拦截，均不可重试；`1302` 是可重试限流；`1305` 是可重试过载；`1308–1311` 与 `1313–1321` 属于用量上限或订阅权益限制，不进行短退避重试。完整依据与暂不映射的代码见 `docs/model_runtime_p0_specs.md`。
+
+## Provider 密钥
+
+模型密钥只从服务端环境读取：DeepSeek 使用 `DEEPSEEK_API_KEY`，Qwen 使用 `QWEN_API_KEY`，Kimi 使用 `KIMI_API_KEY`，GLM 使用 `GLM_API_KEY`。本地开发在项目根目录 `.env` 配置；部署时使用 `deploy/env/production.env.example` 或 `deploy/env/test.env.example` 创建服务器专用文件，不提交真实密钥。
+
+Developer UI 的 Provider 页面可以选择 `deepseek`、`qwen`、`kimi`、`glm` 或 `openai_compatible` Adapter，也会显示对应密钥是否已配置。浏览器只收到布尔状态，不会收到密钥值。CLI 在当前 Coordinator 缺少密钥时会显示其实际环境变量名。
+
+## 学生端模型档案
+
+学生端从 Settings API 动态读取 `default_model_profile` 和 `model_profiles`。公开数据只包含档案名称、展示标签、Provider 和可用状态，不会暴露 API Key。缺少对应 Provider 密钥的档案会显示为不可用并禁止选择。
+
+选择结果通过用户设置中的 `model_profile` 持久化，后续 `chat.send` 会携带该值。Gateway 将它作为当前 turn 的本地上下文传递给 Executor 和 LangGraph；Coordinator、Worker、Utility 分别解析档案绑定的 preset，不修改进程级默认模型，也不会影响其他会话。
+
 ## 运行语义
 
 `ResilientChatModel` 保持 LangChain 的 `bind_tools()`、`with_structured_output()`、`ainvoke()` 和 `astream()` 调用形态。普通 `ainvoke()` 内部也使用统一流式路径，确保首 Token、流空闲和总超时具有相同语义。
 
-重试仅覆盖超时、连接错误、408/409/429 和 5xx。400/401/403/404、上下文超限、非法工具 Schema、余额和配额错误不会重试或 fallback。SDK 自带重试固定为 0，避免双重重试。
+重试仅覆盖超时、连接错误、408/409、通用 429 和 5xx。400/401/403/404、上下文超限、非法工具 Schema、余额和配额错误不会重试或 fallback；GLM 的数字业务码会先于通用 HTTP 状态分类，因此欠费或订阅上限即使返回 429 也不会重试。SDK 自带重试固定为 0，避免双重重试。
 
 流式调用遵守：
 
 - 首个可见 delta 前失败，可以重试或 fallback；
-- 已输出正文、reasoning 或工具调用 delta 后失败，抛出 `StreamInterruptedError`；
+- 已输出正文或工具调用 delta 后失败，抛出 `StreamInterruptedError`；
+- 仅输出 reasoning delta 后发生可重试错误时，允许 retry/fallback；
 - 不会把新模型从头生成的内容静默拼接到已有流；
 - reasoning、content、tool argument 和 usage chunk 都能维持流活性。
 
@@ -42,7 +84,7 @@ Fallback 在配置加载时验证 streaming/tool-call 能力。上下文预算�
 
 ## DeepSeek 工具调用
 
-DeepSeek thinking 模式下，包含工具调用的 Assistant 消息必须回传 `reasoning_content`。`DeepSeekChatModel` 只为此类消息注入 reasoning；普通完成轮次不回传，从而保持请求前缀稳定。
+DeepSeek thinking 模式下，只要当前请求携带 `tools` 参数，`DeepSeekChatModel` 就会回传所有历史 Assistant 消息的 `reasoning_content`，包括此前未调用工具的普通完成轮次，以满足多轮 Function Calling 的上下文约束。当前请求不携带 `tools` 时，仍只为包含 `tool_calls` 的历史 Assistant 消息注入 reasoning，普通完成轮次不回传，从而保持请求前缀稳定。
 
 工具调用仍使用 LangChain 标准 `AIMessage.tool_calls` 与 `AIMessageChunk.tool_call_chunks`，后续由 Tool Runtime 执行 Pydantic 参数校验。模型层不会修复或猜测可执行参数。
 
@@ -87,3 +129,52 @@ model.stream_interrupted
 ```
 
 未来 Gateway/WebUI 继续通过 `ObservabilityService` 查询，无需理解具体 Provider SDK。
+
+## 计量与 Token 配额交接 (Multi-Provider Metering & Quota Handoff)
+
+模型层为下游计费与配额控制系统提供不可变的标准化用量上报协议。
+
+### 1. 核心数据契约
+
+- **`ModelIdentity`**: 描述模型调用的静态身份，包含 `provider`, `provider_model`, `model_profile`, `preset`, `route`, `pricing_key`, `context_window_tokens`, `max_output_tokens`。
+- **`UsageAttributionContext`**: 溯源归属上下文，包含 `request_id`, `user_id`, `workspace_id`, `conversation_id`, `turn_id`, `reservation_id`, `worker_id`, `parent_operation_id`, `purpose` (`coordinator | worker | compact | memory | vision | evaluation | other`)。
+- **`CanonicalTokenUsage`**: 标准化 Token 用量，包含 `input_tokens`, `cached_input_tokens`, `cache_miss_input_tokens`（Provider 观测、非独立计费项）, `cache_write_input_tokens`, `output_tokens`, `reasoning_output_tokens`, `total_tokens`, `source` (`provider | estimated | none`), `provider_response_id`。严格保证：
+  - `cached_input_tokens + cache_write_input_tokens <= input_tokens`
+  - `cached_input_tokens + cache_miss_input_tokens <= input_tokens`
+  - `reasoning_output_tokens <= output_tokens`
+  - `total_tokens = input_tokens + output_tokens`
+- **`BillableFeatureUsage`**: 与 Token 契约并列的功能用量，包含 `visual_input_tokens`, `image_units`, `search_calls`, `link_pages`；视觉 Token 与图片单位互斥。
+- **`ModelInvocation`**: 单次 Provider 尝试的事实记录，包含由系统生成的 UUIDv4 `operation_id`、`identity`、`attribution`、`attempt`、`fallback_index`、`feature_usage` 和带 UTC 时区的 `started_at`。
+- **`InvocationOutcome`**: 尝试结果状态 (`succeeded | failed | interrupted | cancelled`), `finish_reason`, `error_kind`, `completed_at`。
+
+### 2. 用量上报生命周期
+
+- 通过 `configure_global_model_usage_reporter()` 注册全局 Reporter（满足 `ModelUsageReporter` 异步协议）；每个会调用模型的进程都要在启动时注册。
+- 每次 Provider 尝试均生成唯一的 `operation_id`，在尝试结束（成功、失败、可见中断或取消）后严格上报且仅上报一次。
+- `ainvoke` 与 `astream` 共享统一生命周期，Structured Output 内部强制使用 `include_raw=True` 提取原始响应 usage 并上报，对外透明返回解析对象。
+- 若配置了 Reporter 但未绑定归属上下文，在发起 Provider 调用前立即抛出 `MissingUsageAttributionError`。
+- Reporter 写入失败会使模型调用失败，并停止后续 Retry/Fallback；不得静默丢失计量记录。
+
+### 3. 识图、搜索与链接读取
+
+- 识图优先读取 Provider 返回的视觉 Token；缺失时按实际送入 VLM 的图片像素和任务复杂度换算为 1/2/3 个 `image_units`。二者只计一种，并继续计模型输出 Token。
+- 原生搜索按 Provider 返回的搜索次数计量；当前强制搜索 preset 在 Provider 不返回次数时按一次调用记录。搜索结果不另建 Token 字段，进入模型的内容只通过现有 `input_tokens` 计价一次。
+- `web_fetch` 每次成功、非缓存的页面读取记录一个 `link_pages`；缓存命中不收页面读取费。页面正文进入后续模型调用时，只通过该模型调用的 `input_tokens` 计价。
+- 单价只来自版本化 PricingRule。模型规则可配置视觉 Token、图片单位和搜索调用价格；纯 OCR 使用 `feature/image-understanding`，链接读取使用 `feature/link-read`。缺少对应价格时 UsageEvent 保持 `pending`，不会按零价结算。
+- `qwen3-vl-plus` 的图片分析在模型请求前会预留 `image_units`，响应后改用 Provider 返回的 `prompt_tokens_details.image_tokens` 精确结算。`python main.py bootstrap-db` 会自动安装并验证这条视觉规则；`scripts/seed_extended_model_pricing.py` 仅作为预览或人工修复入口。
+- 图片输入不直接发送给 Coordinator、普通 Worker、Kimi 或 GLM。所有聊天 profile 统一调用 `image_analyze`，再由固定的 `vision-worker -> vision-qwen-plus -> qwen3-vl-plus` 路由处理。
+
+### 4. 标准化错误分类
+
+`classify_model_error()` 产生规范的 `error_kind`：
+- `upstream_provider_quota_exhausted`: 厂商配额不足/欠费（不可重试）
+- `upstream_rate_limited`: 429 限流（可重试，支持 Retry-After）
+- `upstream_context_length_exceeded`: 上下文超限（不可重试）
+- `upstream_auth_failed`: 401/403 鉴权失败（不可重试）
+- `upstream_model_unavailable`: 404 模型不可用（不可重试）
+- `upstream_invalid_request`: 400/422 非法请求（不可重试）
+- `upstream_timeout`: 超时（可重试）
+- `upstream_connection_error`: 连接重置/网络中断（可重试）
+- `upstream_overloaded`: 408/409/5xx 或厂商过载（可重试）
+- `upstream_empty_response`: 空流或空响应（可重试）
+- `upstream_unknown`: 未知异常（不可重试）

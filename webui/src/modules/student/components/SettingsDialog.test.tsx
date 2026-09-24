@@ -1,0 +1,338 @@
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+
+import { SettingsDialog } from "./SettingsDialog";
+import { loadFeedback } from "@/shared/utils/feedback";
+import type { UserSettings } from "@/shared/types";
+
+const { getFeedbackDailyStateMock, getOwnFeedbackMock, getQuotaMock, getUsageMock, listPublishedReleaseNotesMock, markOwnFeedbackReadMock, submitFeedbackMock } = vi.hoisted(() => ({ getFeedbackDailyStateMock: vi.fn(), getOwnFeedbackMock: vi.fn(), getQuotaMock: vi.fn(), getUsageMock: vi.fn(), listPublishedReleaseNotesMock: vi.fn(), markOwnFeedbackReadMock: vi.fn(), submitFeedbackMock: vi.fn() }));
+vi.mock("@/platform/http/api", () => ({ api: { getFeedbackDailyState: getFeedbackDailyStateMock, getOwnFeedback: getOwnFeedbackMock, getQuota: getQuotaMock, getUsage: getUsageMock, listPublishedReleaseNotes: listPublishedReleaseNotesMock, markOwnFeedbackRead: markOwnFeedbackReadMock, submitFeedback: submitFeedbackMock } }));
+vi.mock("@/platform/realtime/client", () => ({ StudentSocket: class { connect() {} close() {} } }));
+
+const settings: UserSettings = {
+  theme: "system",
+  content_font_size: "medium",
+  reduce_motion: false,
+  locale: "zh-CN",
+  show_reasoning: true,
+  stream_render_interval_ms: 30,
+  model_profile: "deepseek",
+  default_workspace_id: "default",
+};
+
+const baseProps = {
+  open: true,
+  settings,
+  learningContext: { topic_id: null as string | null, topic_name: "", level: "beginner" as const, mode: "explain" as const },
+  roles: ["student"],
+  onClose: () => {},
+  onChange: () => {},
+  onReset: () => {},
+  onLearningContextChange: () => {},
+  onOpenDeveloper: () => {},
+  onOpenTeacher: () => {},
+};
+
+describe("SettingsDialog", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    listPublishedReleaseNotesMock.mockReset();
+    listPublishedReleaseNotesMock.mockResolvedValue({ items: [] });
+    getFeedbackDailyStateMock.mockReset();
+    getFeedbackDailyStateMock.mockResolvedValue({ used: 0, remaining: 3, limit: 3, today_start_utc: "2026-08-31T00:00:00+00:00" });
+    getOwnFeedbackMock.mockReset();
+    getOwnFeedbackMock.mockResolvedValue({ thread_id: null, user_id: "u1", username: "student", display_name: "Student", status: "open", category: "other", priority: "medium", updated_at: null, messages: [] });
+    markOwnFeedbackReadMock.mockReset();
+    markOwnFeedbackReadMock.mockResolvedValue({ ok: true, updated: true });
+    submitFeedbackMock.mockReset();
+    submitFeedbackMock.mockResolvedValue({ thread_id: "thread-1", remaining: 2, daily_limit: 3 });
+    getQuotaMock.mockReset();
+    getQuotaMock.mockResolvedValue({ quota: { user_id: "user-1", workspace_id: "workspace-a", buckets: [] }, policy: null });
+    getUsageMock.mockReset();
+    getUsageMock.mockResolvedValue({ events: 0, priced_credits_micro: 0, unpriced_events: 0, credits_complete: true, tokens: {}, breakdown: [] });
+  });
+
+  it("shows the About page and opens and closes the Join Nova dialog", () => {
+    const { container } = render(<SettingsDialog {...baseProps} />);
+
+    const aboutEntry = screen.getByRole("button", { name: "关于我们" });
+    expect(aboutEntry).toBeVisible();
+    fireEvent.click(aboutEntry);
+
+    expect(screen.queryByText("Nova · LSNU NLP Learning Agent")).not.toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: "Nova" })).not.toBeInTheDocument();
+    expect(screen.getByText("了解 Nova 以及项目背后的团队。")).toBeVisible();
+    expect(container.querySelector(".settings-about-team-card")).toBeVisible();
+    expect(container.querySelectorAll(".settings-about-labs article")).toHaveLength(2);
+    const contributionList = screen.getByRole("list", { name: "可以参与的方向" });
+    expect(contributionList).toBeVisible();
+    expect(within(contributionList).getAllByRole("listitem")).toHaveLength(7);
+    expect(screen.queryByText("2026.07 · 延安")).not.toBeInTheDocument();
+    const repositoryLink = screen.getByRole("link", { name: "GitHub 仓库" });
+    expect(repositoryLink).toHaveAttribute("href", "https://github.com/liunor/nlp-agent");
+    expect(repositoryLink).toHaveAttribute("target", "_blank");
+    expect(repositoryLink).toHaveAttribute("rel", "noreferrer");
+
+    fireEvent.click(screen.getByRole("button", { name: "加入 Nova" }));
+    const joinDialog = screen.getByRole("dialog", { name: "加入 Nova" });
+    expect(joinDialog).toBeVisible();
+    expect(within(joinDialog).getByText("1080497980")).toBeVisible();
+    expect(within(joinDialog).getByText("在 QQ 中搜索以下群号申请加入。")).toBeVisible();
+    expect(within(joinDialog).queryByText("联系方式将在后续开放。")).not.toBeInTheDocument();
+
+    fireEvent.click(within(joinDialog).getByRole("button", { name: "关闭加入 Nova" }));
+    expect(screen.queryByRole("dialog", { name: "加入 Nova" })).not.toBeInTheDocument();
+  });
+
+  it("renders only the newest published version with a readable date", async () => {
+    listPublishedReleaseNotesMock.mockResolvedValue({
+      items: [
+        { id: "n1", version: "1.0.0", released_at: "2026-08-01T00:00:00", notes: ["旧版本"], status: "published" },
+        { id: "n2", version: "1.1.0", released_at: "2026-08-13T00:00:00", notes: ["最新版本"], status: "published" },
+      ],
+    });
+    render(<SettingsDialog {...baseProps} />);
+    fireEvent.click(screen.getByRole("button", { name: "版本与更新" }));
+
+    expect(await screen.findByText("v1.1.0")).toBeVisible();
+    expect(screen.getByText("发布日期 · 2026-08-13")).toBeVisible();
+    expect(screen.getByText("最新版本")).toBeVisible();
+    expect(screen.queryByText("v1.0.0")).not.toBeInTheDocument();
+    expect(screen.queryByText("旧版本")).not.toBeInTheDocument();
+    expect(screen.queryByText("版本号随构建自动同步")).not.toBeInTheDocument();
+  });
+
+  it("renders published release notes fetched from the backend", async () => {
+    listPublishedReleaseNotesMock.mockResolvedValue({
+      items: [{ id: "n1", version: "1.0.0", released_at: "2026-08-01T00:00:00", notes: ["新增发布说明功能"], status: "published" }],
+    });
+    render(<SettingsDialog {...baseProps} />);
+    fireEvent.click(screen.getByRole("button", { name: "版本与更新" }));
+
+    expect(await screen.findByText("v1.0.0")).toBeVisible();
+    expect(screen.getByText("新增发布说明功能")).toBeVisible();
+    expect(listPublishedReleaseNotesMock).toHaveBeenCalledOnce();
+  });
+
+  it("shows an empty state when the backend has no published notes", async () => {
+    render(<SettingsDialog {...baseProps} />);
+    fireEvent.click(screen.getByRole("button", { name: "版本与更新" }));
+
+    expect(await screen.findByText("暂无已发布的更新说明。")).toBeVisible();
+  });
+
+  it("shows an error state when release notes fail to load", async () => {
+    listPublishedReleaseNotesMock.mockRejectedValue(new Error("network"));
+    render(<SettingsDialog {...baseProps} />);
+    fireEvent.click(screen.getByRole("button", { name: "版本与更新" }));
+
+    expect(await screen.findByText("无法读取更新说明，请稍后重试。")).toBeVisible();
+    expect(screen.queryByText("暂无已发布的更新说明。")).not.toBeInTheDocument();
+  });
+
+  it("refreshes published release notes when the settings dialog is opened again", async () => {
+    listPublishedReleaseNotesMock
+      .mockResolvedValueOnce({ items: [{ id: "n1", version: "1.0.0", released_at: "2026-08-01T00:00:00", notes: ["第一版"], status: "published" }] })
+      .mockResolvedValueOnce({ items: [{ id: "n2", version: "1.1.0", released_at: "2026-08-13T00:00:00", notes: ["第二版"], status: "published" }] });
+    const { rerender } = render(<SettingsDialog {...baseProps} />);
+    fireEvent.click(screen.getByRole("button", { name: "版本与更新" }));
+    expect(await screen.findByText("第一版")).toBeVisible();
+
+    rerender(<SettingsDialog {...baseProps} open={false} />);
+    rerender(<SettingsDialog {...baseProps} open />);
+    fireEvent.click(screen.getByRole("button", { name: "版本与更新" }));
+
+    expect(await screen.findByText("第二版")).toBeVisible();
+    expect(listPublishedReleaseNotesMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries loading release notes after the failure recovers", async () => {
+    listPublishedReleaseNotesMock
+      .mockRejectedValueOnce(new Error("network"))
+      .mockResolvedValueOnce({
+        items: [{ id: "n1", version: "1.0.0", released_at: "2026-08-01T00:00:00", notes: ["新增发布说明功能"], status: "published" }],
+      });
+    render(<SettingsDialog {...baseProps} />);
+    fireEvent.click(screen.getByRole("button", { name: "版本与更新" }));
+    expect(await screen.findByText("无法读取更新说明，请稍后重试。")).toBeVisible();
+
+    fireEvent.click(screen.getByRole("button", { name: "重新加载" }));
+
+    expect(await screen.findByText("v1.0.0")).toBeVisible();
+    expect(listPublishedReleaseNotesMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("persists submitted feedback before reporting success", async () => {
+    render(<SettingsDialog {...baseProps} />);
+    fireEvent.click(screen.getByRole("button", { name: "意见反馈" }));
+    fireEvent.change(screen.getByPlaceholderText(/我希望/), { target: { value: "请增加错题计划" } });
+    fireEvent.click(screen.getByRole("button", { name: "发布意见" }));
+
+    await waitFor(() => expect(loadFeedback().map((item) => item.content)).toEqual(["请增加错题计划"]));
+    expect(screen.getByText("意见已发送到开发者工作台。")).toBeVisible();
+    expect(submitFeedbackMock).toHaveBeenCalledWith("请增加错题计划", "other");
+  });
+
+  it("shows an error card and keeps the draft when submission fails", async () => {
+    submitFeedbackMock.mockRejectedValue(new Error("HTTP 403"));
+    render(<SettingsDialog {...baseProps} />);
+    fireEvent.click(screen.getByRole("button", { name: "意见反馈" }));
+    fireEvent.change(screen.getByPlaceholderText(/我希望/), { target: { value: "会失败的意见" } });
+    fireEvent.click(screen.getByRole("button", { name: "发布意见" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("发送失败：HTTP 403");
+    expect(screen.getByPlaceholderText(/我希望/)).toHaveValue("会失败的意见");
+    expect(screen.getByRole("button", { name: "发布意见" })).toBeEnabled();
+    expect(loadFeedback()).toEqual([]);
+    expect(submitFeedbackMock).toHaveBeenCalledWith("会失败的意见", "other");
+  });
+
+  it("loads older feedback history on demand", async () => {
+    const baseThread = {
+      thread_id: "thread-1",
+      user_id: "u1",
+      username: "student",
+      display_name: "Student",
+      status: "open" as const,
+      category: "other" as const,
+      priority: "medium" as const,
+      updated_at: "2026-08-31T00:00:00+00:00",
+    };
+    getOwnFeedbackMock
+      .mockResolvedValueOnce({
+        ...baseThread,
+        messages: [
+          { id: "m2", sender_type: "developer", body: "回复", created_at: "2026-08-31T00:01:00+00:00" },
+          { id: "m3", sender_type: "student", body: "追问", created_at: "2026-08-31T00:02:00+00:00" },
+        ],
+        message_total: 3,
+        message_has_more: true,
+        student_unread_count: 1,
+      })
+      .mockResolvedValueOnce({
+        ...baseThread,
+        messages: [{ id: "m1", sender_type: "student", body: "最初意见", created_at: "2026-08-31T00:00:00+00:00" }],
+        message_total: 3,
+        message_has_more: false,
+    });
+    render(<SettingsDialog {...baseProps} />);
+    expect(await screen.findByLabelText("未读消息")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: /意见反馈/ }));
+
+    expect(await screen.findByRole("button", { name: "展开消息" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "展开消息" }));
+    expect(await screen.findByText("回复")).toBeVisible();
+    await waitFor(() => expect(markOwnFeedbackReadMock).toHaveBeenCalledOnce());
+    expect(screen.queryByText("最初意见")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /加载更早反馈/ }));
+    expect(await screen.findByText("最初意见")).toBeVisible();
+    expect(getOwnFeedbackMock).toHaveBeenLastCalledWith({ limit: 50, offset: 2 });
+  });
+
+  it("disables the feedback entry for guests instead of rendering a doomed form", () => {
+    render(<SettingsDialog {...baseProps} roles={["guest"]} />);
+
+    const entry = screen.getByRole("button", { name: "意见反馈" });
+    expect(entry).toBeDisabled();
+    expect(entry).toHaveAttribute("title", "当前身份不支持提交反馈");
+  });
+
+  it("keeps feedback submittable for a custom role granted the permission", async () => {
+    render(<SettingsDialog {...baseProps} roles={[]} permissions={["learning:feedback:submit"]} />);
+    fireEvent.click(screen.getByRole("button", { name: "意见反馈" }));
+    fireEvent.change(screen.getByPlaceholderText(/我希望/), { target: { value: "自定义角色也能提交" } });
+    fireEvent.click(screen.getByRole("button", { name: "发布意见" }));
+
+    await waitFor(() => expect(submitFeedbackMock).toHaveBeenCalledWith("自定义角色也能提交", "other"));
+  });
+
+  it("defers to server permissions even when built-in roles suggest otherwise", () => {
+    render(<SettingsDialog {...baseProps} roles={["student"]} permissions={["identity:profile:read_self"]} />);
+
+    expect(screen.getByRole("button", { name: "意见反馈" })).toBeDisabled();
+  });
+
+  it("only projects teacher and developer navigation for the matching roles", () => {
+    const { rerender } = render(<SettingsDialog {...baseProps} roles={["student"]} />);
+
+    expect(screen.queryByRole("button", { name: /进入教师模式/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /开发者工作台/ })).not.toBeInTheDocument();
+
+    rerender(<SettingsDialog {...baseProps} roles={["teacher", "developer"]} />);
+    expect(screen.getByRole("button", { name: /进入教师模式/ })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "数据与隐私" }));
+    expect(screen.getByRole("button", { name: /开发者工作台/ })).toBeVisible();
+  });
+
+  it("shows personal quota inside settings for students", async () => {
+    render(<SettingsDialog {...baseProps} roles={["student"]} userId="user-1" workspaceIds={["workspace-a", "workspace-b"]} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "额度与用量" }));
+
+    expect(await screen.findByText("Token 活动")).toBeVisible();
+    expect(screen.queryByText("查看当前账号在不同工作空间中的额度、用量与账务状态。")).not.toBeInTheDocument();
+    await waitFor(() => expect(getQuotaMock).toHaveBeenCalledWith("workspace-a"));
+    expect(getUsageMock).toHaveBeenCalledWith(7, "workspace-a", "day");
+    expect(getUsageMock).toHaveBeenCalledWith(182, "workspace-a", "day");
+    expect(getUsageMock).toHaveBeenCalledWith(182, "workspace-a", "week");
+  });
+
+  it("shows personal quota inside settings for developers", () => {
+    render(<SettingsDialog {...baseProps} roles={["developer"]} />);
+
+    expect(screen.getByRole("button", { name: "额度与用量" })).toBeVisible();
+  });
+
+  it("shows personal quota inside settings for guests", () => {
+    render(<SettingsDialog {...baseProps} roles={["guest"]} />);
+
+    expect(screen.getByRole("button", { name: "额度与用量" })).toBeVisible();
+  });
+
+  it("treats an empty compatibility permission list as the built-in role package", () => {
+    render(<SettingsDialog {...baseProps} roles={["student"]} permissions={[]} />);
+
+    expect(screen.getByRole("button", { name: "额度与用量" })).toBeVisible();
+  });
+  it("updates the answer content font size", () => {
+    const onChange = vi.fn();
+    render(<SettingsDialog {...baseProps} onChange={onChange} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /外观/ }));
+    fireEvent.change(
+      screen.getByRole("combobox", { name: /回答内容字号/ }),
+      { target: { value: "large" } },
+    );
+
+    expect(onChange).toHaveBeenCalledWith({ content_font_size: "large" });
+  });
+    it("updates the reduce motion preference", () => {
+    const onChange = vi.fn();
+    render(<SettingsDialog {...baseProps} onChange={onChange} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /外观/ }));
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: /减少动态效果/ }),
+    );
+
+    expect(onChange).toHaveBeenCalledWith({ reduce_motion: true });
+  });
+    it("resets preferences after confirmation", () => {
+    const onReset = vi.fn();
+    render(<SettingsDialog {...baseProps} onReset={onReset} />);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "恢复默认" }),
+    );
+
+    const dialog = screen.getByRole("alertdialog", {
+      name: "恢复默认偏好？",
+    });
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "恢复默认" }),
+    );
+
+    expect(onReset).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+  });
+});

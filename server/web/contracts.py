@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
-from core.learning import LearningContext
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, StringConstraints, field_validator, model_validator
+from core.learning import KnowledgeBookContext, LearningContext
 from gateway.contracts import EvaluationContext
 
 
@@ -21,17 +22,158 @@ class CreateSessionBody(StrictModel):
     workspace_id: str = Field(default="default", min_length=1, max_length=128)
 
 
+class CreateWhiteboardLibraryBody(StrictModel):
+    name: str = Field(min_length=1, max_length=128)
+    elements: list[dict[str, Any]] = Field(min_length=1, max_length=100)
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def strip_name(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("elements")
+    @classmethod
+    def validate_elements(cls, value: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if any(
+            not isinstance(element.get("id"), str)
+            or not element["id"].strip()
+            or not isinstance(element.get("type"), str)
+            or not element["type"].strip()
+            for element in value
+        ):
+            raise ValueError("素材元素必须包含有效的 id 和 type")
+        if any(element.get("type") in {"image", "iframe", "embeddable"} for element in value):
+            raise ValueError("素材不能包含图片或嵌入式元素")
+        try:
+            serialized = json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+        except (TypeError, ValueError) as error:
+            raise ValueError("素材元素必须是可序列化的 JSON") from error
+        if len(serialized.encode("utf-8")) > 512_000:
+            raise ValueError("素材不能超过 512 KB")
+        return value
+
+
+class RenameSessionBody(StrictModel):
+    title: str = Field(min_length=1, max_length=255)
+
+
 class LoginBody(StrictModel):
     username: str = Field(min_length=1, max_length=128)
     password: str = Field(min_length=1, max_length=512)
+    workspace_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class FeedbackBody(StrictModel):
+    body: str = Field(min_length=1, max_length=2_000)
+    category: Literal["feature", "ux", "bug", "other"] | None = None
+
+    @field_validator("body", mode="before")
+    @classmethod
+    def strip_body(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("category", mode="before")
+    @classmethod
+    def normalize_category(cls, value: object) -> object:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            return normalized or None
+        return value
+
+
+class FeedbackReadBody(StrictModel):
+    read_through_message_id: str = Field(min_length=1, max_length=128)
+
+
+class FeedbackBulkBody(StrictModel):
+    thread_ids: list[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]] = Field(
+        min_length=1,
+        max_length=200,
+    )
+
+
+FeedbackCategoryValue = Literal["feature", "ux", "bug", "other"]
+FeedbackStatusValue = Literal["open", "under_review", "planned", "in_progress", "complete", "closed"]
+FeedbackPriorityValue = Literal["low", "medium", "high"]
+FeedbackSortValue = Literal["latest", "oldest", "unread"]
+
+
+class FeedbackUpdateBody(StrictModel):
+    status: FeedbackStatusValue | None = None
+    category: FeedbackCategoryValue | None = None
+    priority: FeedbackPriorityValue | None = None
+
+    @model_validator(mode="after")
+    def require_change(self) -> "FeedbackUpdateBody":
+        if self.status is None and self.category is None and self.priority is None:
+            raise ValueError("至少提供一个反馈字段")
+        return self
+
+
+class FeedbackReplyBody(StrictModel):
+    body: str = Field(min_length=1, max_length=2_000)
+
+    @field_validator("body", mode="before")
+    @classmethod
+    def strip_body(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+
+class ReplaceUserRolesBody(StrictModel):
+    # An empty selection is intentional: the service converts it to the
+    # least-privilege guest role instead of leaving an account roleless.
+    role_codes: set[str] = Field(max_length=4)
+
+
+class ReplaceRolePermissionsBody(StrictModel):
+    permission_codes: set[str] = Field(max_length=128)
+    scopes: dict[str, set[Literal["public", "own", "classroom", "workspace", "system"]]] = Field(default_factory=dict)
+
+
+class CreateRoleBody(StrictModel):
+    code: str = Field(pattern=r"^[a-z][a-z0-9_]{1,62}$")
+    name: str = Field(min_length=1, max_length=64)
+    description: str = Field(default="", max_length=500)
+
+
+class UpdateRoleStatusBody(StrictModel):
+    status: Literal["active", "disabled"]
+
+
+class CreateClassroomBody(StrictModel):
+    workspace_id: str = Field(min_length=1, max_length=128)
+    name: str = Field(min_length=1, max_length=128)
+
+
+class ReplaceClassroomMemberBody(StrictModel):
+    member_role: Literal["student", "teacher"]
+    status: Literal["active", "disabled"] = "active"
+
+
+
+class ChatAttachment(StrictModel):
+    file_name: str = Field(min_length=1, max_length=256)
 
 
 class SubmitChatBody(StrictModel):
     session_id: str
-    content: str = Field(min_length=1, max_length=200_000)
+    content: str = Field(default="", max_length=200_000)
+    attachments: list[ChatAttachment] = Field(default_factory=list, max_length=5)
     idempotency_key: str | None = Field(default=None, max_length=128)
     learning_context: LearningContext | None = None
+    knowledge_book_context: KnowledgeBookContext | None = None
     evaluation: EvaluationContext | None = None
+    model_profile: str | None = Field(
+        default=None, pattern=r"^[a-z][a-z0-9_-]{0,63}$"
+    )
+
+    @model_validator(mode="after")
+    def require_content_or_attachment(self) -> "SubmitChatBody":
+        if not self.content.strip() and not self.attachments:
+            raise ValueError("content 或 attachments 至少提供一项")
+        return self
 
 
 class InjectChatBody(StrictModel):
@@ -49,9 +191,14 @@ class ToolApprovalBody(StrictModel):
 class UpdateSettingsBody(StrictModel):
     locale: str | None = Field(default=None, min_length=2, max_length=20)
     theme: Literal["system", "light", "dark"] | None = None
+    content_font_size: Literal["small", "medium", "large"] | None = None
+    reduce_motion: bool | None = None
     show_reasoning: bool | None = None
     stream_render_interval_ms: int | None = Field(default=None, ge=0, le=1_000)
     default_workspace_id: str | None = Field(default=None, min_length=1, max_length=128)
+    model_profile: str | None = Field(
+        default=None, pattern=r"^[a-z][a-z0-9_-]{0,63}$"
+    )
 
 
 class UpdateToolPoliciesBody(StrictModel):
@@ -74,6 +221,165 @@ class WorkerProfileBody(StrictModel):
     profile: dict[str, Any]
 
 
+class ModelConfigBody(StrictModel):
+    config: dict[str, Any]
+
+
+class ReleaseNoteBody(StrictModel):
+    version: str = Field(pattern=r"^\d+\.\d+\.\d+$", max_length=32)
+    released_at: datetime
+    notes: list[Annotated[str, StringConstraints(min_length=1, max_length=2_000)]] = Field(
+        min_length=1, max_length=200
+    )
+    status: Literal["draft", "published"] = "published"
+
+
+class QuotaPolicyBody(StrictModel):
+    code: str = Field(pattern=r"^[a-z][a-z0-9_.-]{0,127}$")
+    version: str = Field(min_length=1, max_length=64)
+    name: str = Field(min_length=1, max_length=255)
+    request_limit_micro: StrictInt | None = Field(default=None, ge=0)
+    daily_limit_micro: StrictInt | None = Field(default=None, ge=0)
+    weekly_limit_micro: StrictInt | None = Field(default=None, ge=0)
+    concurrency_limit: StrictInt | None = Field(default=None, ge=0)
+    max_overdraft_micro: StrictInt = Field(default=0, ge=0)
+    allowed_model_profiles: list[str] = Field(default_factory=list, max_length=128)
+    unlimited: bool = False
+    effective_from: datetime
+    effective_until: datetime | None = None
+    # Publishing is a separate audited action.  Accepting ``active`` here
+    # would let a caller bypass the publish workflow and its validation.
+    status: Literal["draft"] = "draft"
+
+
+class QuotaPolicyUpdateBody(StrictModel):
+    code: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_.-]{0,127}$")
+    version: str | None = Field(default=None, min_length=1, max_length=64)
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    request_limit_micro: StrictInt | None = Field(default=None, ge=0)
+    daily_limit_micro: StrictInt | None = Field(default=None, ge=0)
+    weekly_limit_micro: StrictInt | None = Field(default=None, ge=0)
+    concurrency_limit: StrictInt | None = Field(default=None, ge=0)
+    max_overdraft_micro: StrictInt | None = Field(default=None, ge=0)
+    allowed_model_profiles: list[str] | None = Field(default=None, max_length=128)
+    unlimited: bool | None = None
+    effective_from: datetime | None = None
+    effective_until: datetime | None = None
+
+
+class QuotaBindingBody(StrictModel):
+    subject_type: Literal["default", "role", "user", "workspace", "classroom"]
+    subject_id: str = Field(min_length=1, max_length=128)
+    policy_id: str = Field(min_length=1, max_length=36)
+    priority: StrictInt = Field(default=0, ge=0)
+    effective_from: datetime
+    effective_until: datetime | None = None
+
+
+class QuotaGrantBody(StrictModel):
+    owner_type: Literal["user", "workspace", "classroom"]
+    owner_id: str = Field(min_length=1, max_length=128)
+    bucket_type: Literal["daily", "weekly"]
+    period_start: datetime
+    period_end: datetime
+    allocated_micro: StrictInt = Field(ge=0)
+    source_type: Literal["role", "purchase", "grant", "adjustment", "reset"]
+    source_id: str | None = Field(default=None, max_length=128)
+    reason: str = Field(min_length=1, max_length=255)
+    idempotency_key: str = Field(min_length=1, max_length=255)
+    effective_from: datetime
+    expires_at: datetime | None = None
+
+
+class QuotaAdjustmentBody(StrictModel):
+    owner_type: Literal["user", "workspace", "classroom"]
+    owner_id: str = Field(min_length=1, max_length=128)
+    bucket_type: Literal["daily", "weekly"]
+    period_start: datetime
+    period_end: datetime
+    amount_micro: StrictInt
+    reason: str = Field(min_length=1, max_length=255)
+    idempotency_key: str = Field(min_length=1, max_length=255)
+
+
+class QuotaGrantRevokeBody(StrictModel):
+    idempotency_key: str = Field(min_length=1, max_length=255)
+
+
+class QuotaPricingRuleBody(StrictModel):
+    pricing_key: str = Field(min_length=1, max_length=255)
+    version: str = Field(min_length=1, max_length=64)
+    effective_from: datetime
+    effective_until: datetime | None = None
+    ordinary_input_credits_micro_per_million_tokens: StrictInt = Field(ge=0)
+    cached_input_credits_micro_per_million_tokens: StrictInt = Field(ge=0)
+    cache_write_credits_micro_per_million_tokens: StrictInt = Field(ge=0)
+    output_credits_micro_per_million_tokens: StrictInt = Field(ge=0)
+    reasoning_output_credits_micro_per_million_tokens: StrictInt | None = Field(
+        default=None, ge=0
+    )
+    visual_input_credits_micro_per_million_tokens: StrictInt | None = Field(
+        default=None, ge=0
+    )
+    image_unit_credits_micro: StrictInt | None = Field(default=None, ge=0)
+    search_call_credits_micro: StrictInt | None = Field(default=None, ge=0)
+    link_page_credits_micro: StrictInt | None = Field(default=None, ge=0)
+
+
+class QuotaBillingStatementBody(StrictModel):
+    provider: str = Field(min_length=1, max_length=128)
+    statement_id: str = Field(min_length=1, max_length=255)
+    operation_id: str = Field(min_length=1, max_length=128)
+    billed_at: datetime
+    billed_credits_micro: StrictInt | None = Field(default=None, ge=0)
+    billed_tokens: dict[str, StrictInt] = Field(default_factory=dict)
+    idempotency_key: str = Field(min_length=1, max_length=255)
+
+
+class QuotaBillingReconcileBody(StrictModel):
+    statements: list[QuotaBillingStatementBody] = Field(min_length=1, max_length=10_000)
+
+
+class QuotaCreditOperationBody(StrictModel):
+    owner_type: Literal["user", "workspace", "classroom"]
+    owner_id: str = Field(min_length=1, max_length=128)
+    bucket_type: Literal["daily", "weekly"]
+    period_start: datetime
+    period_end: datetime
+    amount_micro: StrictInt = Field(ge=0)
+    reason: str = Field(min_length=1, max_length=255)
+    idempotency_key: str = Field(min_length=1, max_length=255)
+    effective_from: datetime
+    expires_at: datetime | None = None
+
+
+class QuotaRoleCreditOperationBody(StrictModel):
+    role_code: str = Field(pattern=r"^[a-z][a-z0-9_.-]{0,63}$")
+    bucket_type: Literal["daily", "weekly"]
+    period_start: datetime
+    period_end: datetime
+    amount_micro: StrictInt = Field(ge=0)
+    reason: str = Field(min_length=1, max_length=255)
+    idempotency_key: str = Field(min_length=1, max_length=255)
+    effective_from: datetime
+    expires_at: datetime | None = None
+
+
+class QuotaBillingRepairBody(StrictModel):
+    reason: str = Field(min_length=1, max_length=255)
+    idempotency_key: str = Field(min_length=1, max_length=255)
+
+
+class QuotaUsageArchiveBody(StrictModel):
+    before: datetime
+    batch_size: StrictInt = Field(default=10_000, ge=1, le=100_000)
+
+
+class QuotaAlertStatusBody(StrictModel):
+    status: Literal["acknowledged", "resolved"]
+    reason: str = Field(min_length=1, max_length=255)
+
+
 class CommandEnvelope(StrictModel):
     v: Literal["1"] = API_VERSION
     type: str = Field(min_length=1, max_length=100)
@@ -83,9 +389,20 @@ class CommandEnvelope(StrictModel):
 
 class ChatSendPayload(StrictModel):
     session_id: str
-    content: str = Field(min_length=1, max_length=200_000)
+    content: str = Field(default="", max_length=200_000)
+    attachments: list[ChatAttachment] = Field(default_factory=list, max_length=5)
     idempotency_key: str | None = Field(default=None, max_length=128)
     learning_context: LearningContext | None = None
+    knowledge_book_context: KnowledgeBookContext | None = None
+    model_profile: str | None = Field(
+        default=None, pattern=r"^[a-z][a-z0-9_-]{0,63}$"
+    )
+
+    @model_validator(mode="after")
+    def require_content_or_attachment(self) -> "ChatSendPayload":
+        if not self.content.strip() and not self.attachments:
+            raise ValueError("content 或 attachments 至少提供一项")
+        return self
 
 
 class ChatInjectPayload(StrictModel):

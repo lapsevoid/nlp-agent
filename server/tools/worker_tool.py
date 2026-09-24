@@ -64,6 +64,7 @@ import hashlib
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
+from datetime import datetime
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 from core.task_manager import global_task_manager
@@ -74,13 +75,19 @@ from core.worker_lifecycle import (
     classify_worker_error,
 )
 from core.worker_protocol import WorkerCommand, WorkerWaitMode
+from core.vision_execution import current_image_turn
 from langchain_core.runnables import RunnableConfig
 from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
 
-from core.skill_loader import skill_loader
-from server.agent.llm_factory import get_worker_llm, get_tool_llm
+from core.skill_loader import ResolvedWorkerProfile, skill_loader
+from server.agent.llm_factory import (
+    get_worker_llm,
+    get_tool_llm,
+    resolve_worker_model_name,
+    worker_model_uses_native_search,
+)
 from core.tool_registry import physical_tool_manager
-from core.tool_runtime import ToolGrantSnapshot, ToolSet
+from core.tool_runtime import ToolExecutionResult, ToolGrantSnapshot, ToolSet
 from core.session_context import SessionContext
 from core.agent_runtime import (
     AgentStopReason,
@@ -91,6 +98,10 @@ from core.agent_runtime import (
 from core.observability.context import current_telemetry_context
 from core.observability.models import SpanKind, SpanStatus
 from core.observability.runtime import global_telemetry
+from core.model_runtime.usage import (
+    bind_usage_attribution,
+    worker_usage_attribution,
+)
 from core.prompt_runtime import global_prompt_runtime
 from server.agent.compression.context_manager import global_context_manager
 from utils.tokens import build_context_budget
@@ -109,6 +120,187 @@ from schemas.models import (
 )
 
 logger = get_logger("shiliu.tools.worker")
+
+NON_PERSISTED_TOOL_RESULT_PLACEHOLDER = (
+    "[tool result omitted from persistent transcript by tool policy]"
+)
+_WORKER_TIME_REFERENCE = "由后续运行时上下文消息提供"
+
+
+def _build_worker_stable_prefix() -> SystemMessage:
+    """Build the versioned Worker prefix without accepting runtime inputs.
+
+    Keeping this boundary argument-free makes it difficult for future per-run
+    fields (time, profile SOP, directive, identifiers) to enter the cacheable
+    prefix accidentally. A prompt version/configuration change is allowed to
+    invalidate the prefix intentionally.
+    """
+    return SystemMessage(
+        content=global_prompt_runtime.render(
+            "worker",
+            today=_WORKER_TIME_REFERENCE,
+        )
+    )
+
+
+def _build_worker_initial_messages(
+    sop_prompt: str,
+    directive: str,
+    *,
+    current_time: str | None = None,
+) -> list[SystemMessage | HumanMessage]:
+    """Keep the argument-free Worker prefix ahead of every per-run field."""
+    resolved_time = current_time or datetime.now().strftime("%Y-%m-%d %H:%M:%S %A")
+    skill_section = (
+        "[专家领域与标准操作流程 (SOP)]\n"
+        f"{sop_prompt}\n"
+        "[/专家领域与标准操作流程 (SOP)]"
+    )
+    runtime_context = (
+        "[运行时上下文]\n"
+        f"当前真实时间：{resolved_time}\n"
+        "[/运行时上下文]"
+    )
+    return [
+        _build_worker_stable_prefix(),
+        SystemMessage(content=skill_section),
+        SystemMessage(content=runtime_context),
+        HumanMessage(content=f"【任务指令】：\n{directive}"),
+    ]
+
+
+_TOOL_RUNTIME_OVERHEAD_S = 30.0
+_JOIN_COMPLETION_GRACE_S = 5.0
+
+
+def _aligned_worker_timeouts(
+    toolset: ToolSet,
+    *,
+    max_duration_s: float,
+    wait_timeout_s: float,
+    join: bool,
+    expected_image_calls: int = 1,
+) -> tuple[float, float]:
+    """Keep a Worker alive long enough for its slowest granted tool.
+
+    Tool timeouts apply per attempt.  The Worker also needs time for the model
+    turn before and after the tool call, while a joining Coordinator needs a
+    small completion-delivery grace period.
+    """
+
+    worst_tool_runtime_s = 0.0
+    for descriptor in toolset.descriptors:
+        retry = descriptor.retry
+        retry_delays_s = sum(
+            min(
+                retry.max_delay_s,
+                retry.base_delay_s
+                * (2 ** max(0, failed_attempt - 1))
+                * (1 + retry.jitter_ratio),
+            )
+            for failed_attempt in range(1, retry.max_attempts)
+        )
+        worst_tool_runtime_s = max(
+            worst_tool_runtime_s,
+            (descriptor.timeout_s * retry.max_attempts + retry_delays_s)
+            * (
+                (max(1, expected_image_calls) + max(1, descriptor.max_concurrency) - 1)
+                // max(1, descriptor.max_concurrency)
+                if descriptor.name == "image_analyze" else 1
+            ),
+        )
+
+    required_duration_s = worst_tool_runtime_s + _TOOL_RUNTIME_OVERHEAD_S
+    visual = toolset.has("image_analyze")
+    if required_duration_s <= max_duration_s and not visual:
+        return max_duration_s, wait_timeout_s
+    if required_duration_s > 1_800:
+        raise ValueError("granted tool timeouts exceed the Worker duration limit")
+
+    required_duration_s = max(max_duration_s, required_duration_s)
+    if visual and (turn := current_image_turn()) is not None and join:
+        required_duration_s = min(required_duration_s, turn.worker_remaining_s() - _JOIN_COMPLETION_GRACE_S)
+        required_duration_s = max(0.1, required_duration_s)
+    aligned_wait_s = wait_timeout_s
+    if join:
+        aligned_wait_s = max(
+            wait_timeout_s, required_duration_s + _JOIN_COMPLETION_GRACE_S
+        )
+        if visual and (turn := current_image_turn()) is not None:
+            aligned_wait_s = min(aligned_wait_s, turn.worker_remaining_s())
+        if aligned_wait_s > 600:
+            raise ValueError("granted tool timeouts exceed the Worker join-wait limit")
+    return required_duration_s, aligned_wait_s
+
+
+def _resolve_profile_worker_model(
+    profile: ResolvedWorkerProfile,
+    *,
+    requested_model: str = "",
+    model_profile: str | None = None,
+) -> str:
+    explicit = requested_model.strip()
+    if explicit == "inherit":
+        explicit = ""
+    if profile.model and explicit and explicit != profile.model:
+        raise ValueError(
+            f"Worker Profile {profile.name!r} pins model {profile.model!r}; "
+            f"override {explicit!r} is not allowed"
+        )
+    resolved = resolve_worker_model_name(
+        profile.name,
+        profile.model or explicit or None,
+        model_profile,
+    )
+    if profile.model and resolved != profile.model:
+        raise ValueError(
+            f"Worker Profile {profile.name!r} requires model {profile.model!r}, "
+            f"but the global Worker override selected {resolved!r}"
+        )
+    native_search = worker_model_uses_native_search(resolved)
+    if profile.requires_native_search and not native_search:
+        raise ValueError(
+            f"Worker Profile {profile.name!r} requires a native-search model preset"
+        )
+    if native_search and not profile.requires_native_search:
+        raise ValueError(
+            f"Worker Profile {profile.name!r} is not authorized to use native-search "
+            f"preset {resolved!r}"
+        )
+    return resolved
+
+
+def _build_profile_execution_policies(
+    profile: ResolvedWorkerProfile,
+    *,
+    runtime_settings: dict,
+    max_turns: int,
+    max_duration_s: float,
+    max_tokens: int,
+    max_tool_calls: int,
+    max_attempts: int,
+) -> tuple[WorkerResourceBudget, WorkerRetryPolicy]:
+    one_shot = profile.execution_mode == "one_shot"
+    budget = WorkerResourceBudget(
+        max_turns=1 if one_shot else max_turns,
+        max_duration_s=max_duration_s,
+        max_tokens=max_tokens,
+        max_tool_calls=0 if one_shot else max_tool_calls,
+        max_injections=(
+            0 if one_shot else int(runtime_settings.get("max_injections", 15))
+        ),
+        injection_batch_size=int(runtime_settings.get("injection_batch_size", 3)),
+        max_tool_result_chars=int(
+            runtime_settings.get("max_tool_result_chars", 50_000)
+        ),
+        finalize_on_exhaustion=(
+            False
+            if one_shot
+            else bool(runtime_settings.get("finalize_on_exhaustion", True))
+        ),
+    )
+    retry = WorkerRetryPolicy(max_attempts=1 if one_shot else max_attempts)
+    return budget, retry
 
 
 @asynccontextmanager
@@ -154,6 +346,7 @@ async def _execute_sandbox_loop(
     *,
     budget: WorkerResourceBudget | None = None,
     attempt: int = 1,
+    context: SessionContext | None = None,
 ) -> WorkerExecutionResultSpec:
     """Execute one isolated Worker attempt under an explicit resource budget."""
     worker_logger = logger.bind(worker_id=worker_id, session_id=session_id)
@@ -181,6 +374,14 @@ async def _execute_sandbox_loop(
     total_tokens_used = 0
     tool_uses_count = 0
     injection_count = 0
+    image_results: dict[str, ToolExecutionResult] = {}
+
+    def image_partial_output() -> str:
+        limit = max(512, budget.max_tool_result_chars // max(1, len(image_results)))
+        return "图片处理结果（逐图核验成功、降级和失败状态；未完成部分不可编造）：\n" + "\n\n".join(
+            f"图片 {index}: {name}\n{item.to_model_content(max_chars=limit)}"
+            for index, (name, item) in enumerate(image_results.items(), 1)
+        )
     fallback_context, fallback_output = settings.get_context_limits(model_name or None)
     context_window = getattr(llm, "context_window_tokens", fallback_context)
     output_reserve = getattr(llm, "max_output_tokens", fallback_output)
@@ -189,11 +390,21 @@ async def _execute_sandbox_loop(
         output_reserve=output_reserve,
         tools=toolset.tools,
     )
-    session_context = SessionContext(
-        session_id=session_id,
-        channel="worker",
-        agent_id=worker_id,
+    parent_context = context or SessionContext(session_id=session_id)
+    if parent_context.session_id != session_id:
+        raise ValueError("Worker context must belong to the parent session")
+    session_context = parent_context.model_copy(
+        update={"channel": "worker", "agent_id": worker_id}
     )
+    tool_config: RunnableConfig = {
+        "configurable": {
+            "thread_id": session_context.session_id,
+            "worker_id": worker_id,
+            "user_id": session_context.user_id,
+            "workspace_id": session_context.workspace_id,
+            "channel": session_context.channel,
+        }
+    }
 
     def result(
         *,
@@ -241,7 +452,7 @@ async def _execute_sandbox_loop(
         return execution
 
     async def query_loop() -> WorkerExecutionResultSpec:
-        nonlocal total_tokens_used, tool_uses_count, injection_count
+        nonlocal messages, total_tokens_used, tool_uses_count, injection_count
 
         async def finalize(reason: AgentStopReason) -> str:
             nonlocal total_tokens_used
@@ -328,8 +539,15 @@ async def _execute_sandbox_loop(
                         tokens_before=context_view.tokens_before,
                         tokens_after=context_view.tokens_after,
                         tokens_saved=max(0, context_view.tokens_before - context_view.tokens_after),
+                        context_window=context_view.context_window,
+                        input_limit=context_view.input_limit,
+                        output_reserve=context_view.output_reserve,
                         actions=context_view.actions,
                     )
+            # ContextManager returns the model-facing state for this Worker.
+            # Keep it as the next iteration's source so a later prepare call
+            # does not reprocess the pre-compaction history.
+            messages = context_view.messages
             response = await llm.ainvoke(context_view.messages)
             messages.append(response)
             if getattr(response, "usage_metadata", None):
@@ -402,19 +620,63 @@ async def _execute_sandbox_loop(
             calls = [(call["name"], call["args"]) for call in response.tool_calls]
             for name, _arguments in calls:
                 worker_logger.info("发起工具调用", tool_name=name)
-            tool_results = await toolset.execute_many(calls)
-            for tool_call, execution in zip(response.tool_calls, tool_results, strict=True):
-                tool_msg = ToolMessage(
-                    content=execution.to_model_content(
-                        max_chars=budget.max_tool_result_chars
-                    ),
-                    tool_call_id=tool_call["id"],
-                    name=tool_call["name"],
-                    status="success" if execution.ok else "error",
-                    artifact=execution.model_dump(mode="json"),
+            if calls and all(name == "image_analyze" for name, _ in calls):
+                from server.tools.vision.batch import execute_image_batch
+
+                remaining_s = budget.max_duration_s - (time.time() - start_time)
+                tool_results = await execute_image_batch(
+                    toolset, calls, tool_config, timeout_s=max(0, remaining_s - 20),
                 )
+                for call, item in zip(response.tool_calls, tool_results, strict=True):
+                    image_results[str(call["args"].get("image", ""))] = item
+            else:
+                tool_results = await toolset.execute_many(calls, tool_config)
+            for tool_call, execution in zip(response.tool_calls, tool_results, strict=True):
+                descriptor = toolset.descriptor(tool_call["name"])
+                persist_result = descriptor.persist_result if descriptor else True
+                status = "success" if execution.ok else "error"
+                if persist_result:
+                    tool_msg = ToolMessage(
+                        content=execution.to_model_content(
+                            max_chars=budget.max_tool_result_chars
+                        ),
+                        tool_call_id=tool_call["id"],
+                        name=tool_call["name"],
+                        status=status,
+                        artifact=execution.model_dump(mode="json"),
+                    )
+                    persisted_tool_msg = tool_msg
+                else:
+                    tool_msg = ToolMessage(
+                        content=execution.to_model_content(
+                            max_chars=budget.max_tool_result_chars
+                        ),
+                        tool_call_id=tool_call["id"],
+                        name=tool_call["name"],
+                        status=status,
+                    )
+                    persisted_tool_msg = ToolMessage(
+                        content=NON_PERSISTED_TOOL_RESULT_PLACEHOLDER,
+                        tool_call_id=tool_call["id"],
+                        name=tool_call["name"],
+                        status=status,
+                    )
                 messages.append(tool_msg)
-                record_sidechain_transcript(session_id, worker_id, [tool_msg])
+                record_sidechain_transcript(
+                    session_id, worker_id, [persisted_tool_msg]
+                )
+
+            if image_results and any(
+                item.error and item.error.code in {
+                    "image_batch_deadline", "provider_quota_exhausted", "provider_auth_failed",
+                }
+                for item in tool_results
+            ):
+                return result(
+                    status="failed", summary="部分图片未完成，已返回逐图结果。",
+                    termination_reason="unrecoverable_error", output=image_partial_output(),
+                    error=WorkerErrorSpec(category="tool", message="图片处理需要恢复服务或下一轮继续", retryable=False),
+                )
 
         final_output = await finalize(AgentStopReason.MAX_ITERATIONS)
         return result(
@@ -446,8 +708,8 @@ async def _execute_sandbox_loop(
             status="timed_out",
             summary=f"Worker attempt timed out after {budget.max_duration_s:g} seconds.",
             termination_reason="timeout",
-            output=exhaustion_fallback(AgentStopReason.MODEL_TIMEOUT),
-            error=WorkerErrorSpec(category="timeout", message=str(error) or "timeout", retryable=True),
+            output=image_partial_output() if image_results else exhaustion_fallback(AgentStopReason.MODEL_TIMEOUT),
+            error=WorkerErrorSpec(category="timeout", message=str(error) or "timeout", retryable=not bool(image_results)),
         )
     except Exception as error:
         category, retryable = classify_worker_error(error)
@@ -456,11 +718,11 @@ async def _execute_sandbox_loop(
             status="failed",
             summary=f"Worker attempt failed: {error}",
             termination_reason="unrecoverable_error",
-            output=exhaustion_fallback(AgentStopReason.MODEL_ERROR),
+            output=image_partial_output() if image_results else exhaustion_fallback(AgentStopReason.MODEL_ERROR),
             error=WorkerErrorSpec(
                 category=category,
                 message=str(error),
-                retryable=retryable,
+                retryable=retryable and not bool(image_results),
             ),
         )
 
@@ -551,6 +813,7 @@ async def _background_task_wrapper(
     initial_messages: list,
     toolset: ToolSet,
     model_name: str = "",
+    context: SessionContext | None = None,
 ) -> None:
     """Own the complete Worker lifecycle and publish exactly one terminal result."""
     task = global_task_manager.get_active_task(worker_id)
@@ -571,7 +834,7 @@ async def _background_task_wrapper(
             ) as worker_span:
                 result = await _execute_sandbox_loop(
                     worker_id, session_id, initial_messages, toolset, model_name,
-                    budget=task.budget, attempt=attempt,
+                    budget=task.budget, attempt=attempt, context=context,
                 )
                 if worker_span is not None:
                     worker_span.annotate(
@@ -589,7 +852,12 @@ async def _background_task_wrapper(
                         )
                 return result
 
-        execution = await _execute_with_retries(worker_id, execute)
+        worker_attribution = worker_usage_attribution(worker_id)
+        if worker_attribution is None:
+            execution = await _execute_with_retries(worker_id, execute)
+        else:
+            with bind_usage_attribution(worker_attribution):
+                execution = await _execute_with_retries(worker_id, execute)
     except asyncio.CancelledError:
         now = time.time()
         reason = task.cancellation_reason if task and task.cancellation_reason else "cancelled"
@@ -671,17 +939,17 @@ async def spawn_worker(
     """启动一个新的 Worker 执行任务。使用此工具时，Worker 没有之前的记忆。
 
     Worker 模型解析优先级（由高到低）：
-    1. NLP_AGENT_WORKER_MODEL 环境变量（全局覆盖）
-    2. 本函数的 model 参数（Coordinator 调用时动态指定）
-    3. agent_config.yaml 中 agents.<name>.model
-    4. agent_config.yaml 中 defaults.worker
-    5. inherit → 继承 Coordinator 当前模型
+    1. 声明了 model 的 Worker Profile 固定使用该 preset，不能被参数覆盖；
+       若 NLP_AGENT_WORKER_MODEL 与其冲突，则拒绝启动。
+    2. 其他 Profile 依次采用 NLP_AGENT_WORKER_MODEL、本函数 model 参数、
+       当前会话 model_profile、agents.<name>.model 与 defaults.worker。
+    3. 原生联网 preset 仅允许 requires_native_search=true 的 Profile 使用。
 
     Args:
         agent_name: 技能黄页中存在的技能包名或基础工具名。
         directive: 详尽的操作指令，需包含所有参数。
         config: LangChain RunnableConfig，从中提取 thread_id 作为 session_id。
-        model: 可选的模型覆盖，如 deepseek-v3.2、doubao-1-6-flash。留空走默认解析链。
+        model: 可选的模型 preset/model 覆盖；不能覆盖 Profile 固定模型或借用原生联网 preset。
 
     Returns:
         JSON 字符串（WorkerNotificationSpec），包含 task_id 和 "started" 状态。
@@ -690,6 +958,7 @@ async def spawn_worker(
     runtime_settings = settings.get_agent_runtime("worker")
 
     session_id = config.get("configurable", {}).get("thread_id", "default_session")
+    parent_context = SessionContext.from_config(config, require=True)
     parent_turn_id = config.get("configurable", {}).get("turn_id", "")
     parent_worker_id = config.get("configurable", {}).get("worker_id", "")
     worker_id = create_agent_id(agent_name)
@@ -697,37 +966,59 @@ async def spawn_worker(
     try:
         profile = skill_loader.resolve_profile(agent_name)
         skill_loader.validate_tool_references(set(physical_tool_manager.runtime.catalog.names()))
+        resolved_model = _resolve_profile_worker_model(
+            profile,
+            requested_model=model,
+            model_profile=config.get("configurable", {}).get("model_profile"),
+        )
         toolset = physical_tool_manager.get_worker_toolset(
             allowed_names=profile.allowed_tools,
             capabilities=profile.capabilities,
             denied_names=profile.denied_tools,
             session_id=session_id,
             profile=profile.name,
+            inherit_policy=profile.inherit_tool_policy,
+        )
+        if profile.execution_mode == "one_shot" and toolset.tools:
+            raise ValueError(
+                f"one-shot Worker Profile {profile.name!r} cannot receive tools"
+            )
+        max_duration_s, wait_timeout_s = _aligned_worker_timeouts(
+            toolset,
+            max_duration_s=max_duration_s,
+            wait_timeout_s=wait_timeout_s,
+            join=join,
+            expected_image_calls=(current_image_turn().image_count if current_image_turn() else 1),
+        )
+        if toolset.has("image_analyze"):
+            # A whole-Worker retry repeats successful/paid image calls. Each
+            # image reports its own failure or partial result instead.
+            max_attempts = 1
+        worker_budget, worker_retry = _build_profile_execution_policies(
+            profile,
+            runtime_settings=runtime_settings,
+            max_turns=max_turns,
+            max_duration_s=max_duration_s,
+            max_tokens=max_tokens,
+            max_tool_calls=max_tool_calls,
+            max_attempts=max_attempts,
         )
     except ValueError as error:
         return WorkerNotificationSpec(
             task_id=worker_id, status="failed", summary=str(error)
         ).model_dump_json(exclude_none=True)
-    resolved_model = settings._resolve_model_name(agent_name, model or profile.model)
     sop_prompt = profile.system_prompt
 
-    import datetime
-    current_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S %A')
-    skill_section = f"[专家领域与标准操作流程 (SOP)]\n{sop_prompt}\n[/专家领域与标准操作流程 (SOP)]"
-    system_instruction = global_prompt_runtime.composer.compose(
-        [("worker", {"today": current_time}), skill_section]
-    )
-
-    initial_messages = [
-        SystemMessage(content=system_instruction),
-        HumanMessage(content=f"【任务指令】：\n{directive}")
-    ]
+    initial_messages = _build_worker_initial_messages(sop_prompt, directive)
 
     write_agent_metadata(session_id, worker_id, {
         "agentType": agent_name,
         "directive": directive,
         "model": resolved_model,
         "profile": profile.name,
+        "kvCachePrefixSha256": hashlib.sha256(
+            str(initial_messages[0].content).encode("utf-8")
+        ).hexdigest(),
         "skills": list(profile.skills),
         "toolGrant": toolset.snapshot.model_dump(mode="json"),
         "join": join,
@@ -737,12 +1028,12 @@ async def spawn_worker(
         "waitTimeoutS": wait_timeout_s,
         "parentWorkerId": parent_worker_id,
         "budget": {
-            "maxTurns": max_turns,
-            "maxDurationS": max_duration_s,
-            "maxTokens": max_tokens,
-            "maxToolCalls": max_tool_calls,
+            "maxTurns": worker_budget.max_turns,
+            "maxDurationS": worker_budget.max_duration_s,
+            "maxTokens": worker_budget.max_tokens,
+            "maxToolCalls": worker_budget.max_tool_calls,
         },
-        "retry": {"maxAttempts": max_attempts},
+        "retry": {"maxAttempts": worker_retry.max_attempts},
     })
     # Keep orchestration evidence queryable without putting the directive itself
     # (which may contain user data) into observability storage.
@@ -761,7 +1052,14 @@ async def spawn_worker(
     record_sidechain_transcript(session_id, worker_id, initial_messages)
 
     bg_task = asyncio.create_task(
-        _background_task_wrapper(worker_id, session_id, initial_messages, toolset, resolved_model)
+        _background_task_wrapper(
+            worker_id,
+            session_id,
+            initial_messages,
+            toolset,
+            resolved_model,
+            parent_context,
+        )
     )
 
     global_task_manager.register_task(
@@ -776,17 +1074,8 @@ async def spawn_worker(
         wait_mode=wait_mode,
         quorum=quorum,
         wait_timeout_s=wait_timeout_s,
-        budget=WorkerResourceBudget(
-            max_turns=max_turns,
-            max_duration_s=max_duration_s,
-            max_tokens=max_tokens,
-            max_tool_calls=max_tool_calls,
-            max_injections=int(runtime_settings.get("max_injections", 15)),
-            injection_batch_size=int(runtime_settings.get("injection_batch_size", 3)),
-            max_tool_result_chars=int(runtime_settings.get("max_tool_result_chars", 50_000)),
-            finalize_on_exhaustion=bool(runtime_settings.get("finalize_on_exhaustion", True)),
-        ),
-        retry_policy=WorkerRetryPolicy(max_attempts=max_attempts),
+        budget=worker_budget,
+        retry_policy=worker_retry,
     )
 
     return WorkerNotificationSpec(

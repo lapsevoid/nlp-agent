@@ -22,7 +22,7 @@ def make_auth(**overrides) -> SameOriginSessionAuth:
     return SameOriginSessionAuth(**config)
 
 
-def test_login_issues_stateful_student_session_and_authenticates_it() -> None:
+def test_login_issues_stateful_universal_session_and_authenticates_it() -> None:
     auth = make_auth()
 
     token, claims = auth.login("nova", "correct-password")
@@ -30,7 +30,7 @@ def test_login_issues_stateful_student_session_and_authenticates_it() -> None:
     assert claims.principal() == AuthenticatedPrincipal(
         user_id="nova",
         workspace_ids=frozenset({"default"}),
-        roles=frozenset({"student"}),
+        roles=frozenset({"student", "teacher", "admin"}),
     )
     assert auth.authenticate(token) == claims
     assert "." not in token
@@ -117,3 +117,24 @@ def test_stateless_monitor_compatibility_remains_available_without_credentials()
 
     assert auth.authenticate(token) == claims
     assert "." in token
+
+
+def test_login_issues_expiry_from_ttl() -> None:
+    auth = make_auth(ttl_s=300)
+    _token, claims = auth.login("nova", "correct-password")
+
+    now = int(time.time())
+    assert now + 299 <= claims.expires_at <= now + 301
+
+
+def test_touch_extends_existing_session_with_current_ttl() -> None:
+    auth = make_auth(ttl_s=300)
+    token, claims = auth.login("nova", "correct-password")
+    original_expiry = claims.expires_at
+
+    # Simulate a TTL increase after the session was already issued.
+    auth.ttl_s = 900
+    refreshed = auth.authenticate(token)
+
+    assert refreshed.expires_at >= original_expiry + 600
+    assert refreshed.expires_at <= int(time.time()) + 901
